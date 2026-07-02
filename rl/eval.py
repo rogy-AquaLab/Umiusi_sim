@@ -71,9 +71,12 @@ def main():
             return o
 
     returns, pos_errs, ori_errs, depth_errs, hold_fracs, successes = [], [], [], [], [], []
+    thrust_uses, servo_motions, thrust_changes = [], [], []
     for ep in range(args.episodes):
         obs, info = env.reset(seed=args.seed + ep)
         ep_ret, steps, in_tol = 0.0, 0, 0
+        thrust_sum, servo_mot_sum, thrust_chg_sum = 0.0, 0.0, 0.0
+        prev_servo, prev_esc = None, None
         done = False
         while not done:
             action, _ = model.predict(norm_obs(obs), deterministic=True)
@@ -81,6 +84,12 @@ def main():
             ep_ret += reward
             steps += 1
             in_tol += int(info.get("is_success", False))
+            esc, servo = info["esc_cmd"], info["servo"]
+            thrust_sum += float(np.mean(np.abs(esc)))
+            if prev_esc is not None:
+                thrust_chg_sum += float(np.mean(np.abs(esc - prev_esc)))
+                servo_mot_sum += float(np.mean(np.abs(servo - prev_servo)))
+            prev_esc, prev_servo = esc, servo
             if args.render:
                 env.render()
                 time.sleep(control_dt)
@@ -94,6 +103,9 @@ def main():
         depth_errs.append(abs(info["depth_err"]))
         hold_fracs.append(in_tol / max(steps, 1))
         successes.append(info.get("is_success", False))
+        thrust_uses.append(thrust_sum / max(steps, 1))
+        servo_motions.append(np.degrees(servo_mot_sum / max(steps - 1, 1)))  # deg/step
+        thrust_changes.append(thrust_chg_sum / max(steps - 1, 1))
         print(f"ep {ep:2d}: return={ep_ret:8.1f}  ori_err={info['ori_err']:.3f} rad  "
               f"pos_err={info['pos_err']:.3f} m  depth_err={abs(info['depth_err']):.3f} m  "
               f"hold={hold_fracs[-1] * 100:4.0f}%")
@@ -113,6 +125,9 @@ def main():
     print(f"mean final depth err: {np.mean(depth_errs):.3f} m")
     print(f"mean hold fraction : {np.mean(hold_fracs) * 100:.0f}%   (steps within tolerance)")
     print(f"final-step success : {np.mean(successes) * 100:.0f}%")
+    print(f"mean thrust use    : {np.mean(thrust_uses):.3f}   (mean |esc|, 0..1 -> minimize)")
+    print(f"mean servo motion  : {np.mean(servo_motions):.2f} deg/step   (vibration -> minimize)")
+    print(f"mean thrust change : {np.mean(thrust_changes):.3f} /step     (|Δesc| -> minimize)")
 
 
 if __name__ == "__main__":
