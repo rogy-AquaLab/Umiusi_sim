@@ -29,6 +29,7 @@ env:
   depth_tol: 0.10                 # depth within this [m] for success (attitude_depth)
   near_goal_dist: 0.50            # linear velocity penalized only within this distance (pose) [m]
   near_goal_ori: 0.15             # within this ori error [rad] the "settle" penalties kick in
+  ori_deadband: 0.05              # no orientation reward gradient within this [rad] (~3deg): settle, don't chatter
 
 reward:
   w_pos: 1.0                      # -w_pos * ||position_error||            (pose)

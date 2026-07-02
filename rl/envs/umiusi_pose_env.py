@@ -92,6 +92,7 @@ class UmiusiPoseEnv(gym.Env):
         self.depth_tol = float(e.get("depth_tol", 0.10))
         self.near_goal_dist = float(e["near_goal_dist"])
         self.near_goal_ori = float(e.get("near_goal_ori", 0.20))  # rad: within this, press to settle
+        self.ori_deadband = float(e.get("ori_deadband", 0.0))     # rad: no ori reward gradient inside this
         self.rw = cfg["reward"]
         self.dr = cfg.get("domain_rand", {"enabled": False})
 
@@ -239,8 +240,11 @@ class UmiusiPoseEnv(gym.Env):
         if ori_err < self.near_goal_ori:  # near the target: press hard to stop moving (kill limit cycles)
             reward -= rw.get("w_settle_servo", 0.0) * servo_rate
             reward -= rw.get("w_settle_thrust", 0.0) * thrust_rate
-        reward -= rw["w_ori"] * ori_err
-        reward += rw.get("w_ori_bonus", 0.0) * prox(ori_err, rw.get("ori_scale", 0.35))
+        # Deadband: no orientation reward gradient once inside ori_deadband, so the policy has no
+        # incentive to chatter for sub-deadband precision — it can settle and hold still.
+        ori_eff = max(0.0, ori_err - self.ori_deadband)
+        reward -= rw["w_ori"] * ori_eff
+        reward += rw.get("w_ori_bonus", 0.0) * prox(ori_eff, rw.get("ori_scale", 0.35))
         if self.track_position:
             reward -= rw["w_pos"] * pos_err
             reward += rw.get("w_pos_bonus", 0.0) * prox(pos_err, rw.get("pos_scale", 0.5))

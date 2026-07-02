@@ -54,6 +54,7 @@ class UmiusiSimulator:
         t = cfg["thrusters"]
         self.servo_range_rad = np.radians(max(abs(v) for v in t["servo_range_deg"]))
         self.servo_slew_rad = np.radians(t["servo_slew_deg_per_s"])
+        self.thrust_slew = float(t.get("thrust_slew_per_s", 1e9))  # esc units/s (mirrors max_duty_step_per_sec)
         self.thrust_per_cmd = float(t["thrust_per_cmd"])
         # Per-thruster neutral thrust direction (thruster body frame). The MJCF servo hinge (about
         # the mounting arm) rotates the body, so this axis, carried by the body, tilts with the servo.
@@ -83,6 +84,7 @@ class UmiusiSimulator:
         for a in self.servo_qadr:
             self.data.qpos[a] = 0.0
         self.servo_ctrl = np.zeros(4)
+        self.esc_current = np.zeros(4)
         self.thrust_mag = np.zeros(4)
         self.prev_vel_body = np.zeros(6)
         mujoco.mj_forward(self.model, self.data)
@@ -91,11 +93,11 @@ class UmiusiSimulator:
     def step(self, action):
         action = np.asarray(action, dtype=float).reshape(8)
         servo_target = np.clip(action[:4], -1.0, 1.0) * self.servo_range_rad
-        self.thrust_mag = np.array(
-            [thr.command_to_thrust(c, self.thrust_per_cmd) for c in action[4:8]]
-        )
+        esc_target = np.clip(action[4:8], -1.0, 1.0)
         for _ in range(self.substeps):
             self.servo_ctrl = thr.slew(self.servo_ctrl, servo_target, self.servo_slew_rad, self.dt)
+            self.esc_current = thr.slew(self.esc_current, esc_target, self.thrust_slew, self.dt)
+            self.thrust_mag = self.esc_current * self.thrust_per_cmd
             for k, aid in enumerate(self.act_ids):
                 self.data.ctrl[aid] = self.servo_ctrl[k]
             self._apply_external_forces()

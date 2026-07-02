@@ -50,6 +50,7 @@ thrusters:
   # (= ~300..350 deg/s). Derated to 250 deg/s as an in-water/loaded estimate; stall torque
   # ~0.94..1.14 N*m is modeled as the actuator forcerange in sim/assets/umiusi.xml.
   servo_slew_deg_per_s: 250.0  # servo rate limit (mirrors max_duty_step_per_sec concept)
+  thrust_slew_per_s: 4.0       # ESC command slew [esc units/s] (mirrors max_duty_step_per_sec); caps thrust changes
   thrust_per_cmd: 30.0         # N per unit command; F = clamp(esc_cmd, -1, 1) * thrust_per_cmd
   # Per-unit: pivot = measured servo joint (base_link frame; from CAD placement.txt), and
   # thrust_axis = the NEUTRAL (servo=0) thrust direction = horizontal tangential (perp to the arm),
