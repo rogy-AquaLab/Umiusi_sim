@@ -1,0 +1,21 @@
+ep  0: return=  4403.1  ori_err=0.022 rad  pos_err=5.859 m  depth_err=1.770 m  hold=  93%
+ep  1: return=  4303.2  ori_err=0.035 rad  pos_err=2.749 m  depth_err=0.156 m  hold=  92%
+ep  2: return=  4551.9  ori_err=0.046 rad  pos_err=2.439 m  depth_err=1.570 m  hold=  97%
+ep  3: return=  4366.3  ori_err=0.073 rad  pos_err=3.783 m  depth_err=0.933 m  hold=  95%
+ep  4: return=  4460.2  ori_err=0.065 rad  pos_err=3.910 m  depth_err=1.805 m  hold=  96%
+ep  5: return=  4464.0  ori_err=0.058 rad  pos_err=5.303 m  depth_err=2.295 m  hold=  95%
+ep  6: return=  4420.3  ori_err=0.022 rad  pos_err=5.315 m  depth_err=3.900 m  hold=  93%
+ep  7: return=  4351.9  ori_err=0.052 rad  pos_err=3.129 m  depth_err=1.517 m  hold=  93%
+wrote att_v4.mp4  (4800 frames)
+----------------------------------------------------------------
+episodes=8  task=attitude  algo=ppo  obs_mode=imu
+mean return        :   4415.1 +/- 72.6
+mean final ori err : 0.047 rad
+mean final pos err : 4.061 m
+mean final depth err: 1.743 m
+mean hold fraction : 94%   (steps within tolerance)
+final-step success : 100%
+mean thrust use    : 0.210   (mean |esc|, 0..1 -> minimize)
+mean servo motion  : 1.36 deg/step   (vibration -> minimize)
+mean thrust change : 0.030 /step     (|Δesc| -> minimize)
+ALL DONE
