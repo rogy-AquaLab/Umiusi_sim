@@ -207,16 +207,24 @@ class UmiusiPoseEnv(gym.Env):
         action_rate = float(np.linalg.norm(action - self.prev_action))
         rw = self.rw
 
+        # Penalty terms give a gradient everywhere; dense exp() "closeness" bonuses add a smooth
+        # pull toward the goal (reduces reliance on the sparse goal_bonus, lowers variance).
+        def prox(err, scale):
+            return float(np.exp(-((err / scale) ** 2)))
+
         reward = -rw["w_effort"] * effort - rw["w_action_rate"] * action_rate
         reward -= rw["w_ori"] * ori_err
+        reward += rw.get("w_ori_bonus", 0.0) * prox(ori_err, rw.get("ori_scale", 0.35))
         if self.track_position:
             reward -= rw["w_pos"] * pos_err
+            reward += rw.get("w_pos_bonus", 0.0) * prox(pos_err, rw.get("pos_scale", 0.5))
             if pos_err < self.near_goal_dist:
                 reward -= rw["w_vel"] * speed
         else:
             reward -= rw.get("w_angvel", 0.05) * ang_speed  # damp rotation to hold attitude
         if self.track_depth:
             reward -= rw.get("w_depth", 1.0) * abs(depth_err)
+            reward += rw.get("w_depth_bonus", 0.0) * prox(abs(depth_err), rw.get("depth_scale", 0.25))
 
         success = ori_err < self.ori_tol
         if self.track_position:

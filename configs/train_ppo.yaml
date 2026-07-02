@@ -37,7 +37,14 @@ reward:
   w_depth: 2.0                    # -w_depth * |depth error|              (attitude_depth)
   w_effort: 0.02                  # -w_effort * ||esc_command||
   w_action_rate: 0.02             # -w_action_rate * ||action - prev_action|| (smoothness)
-  goal_bonus: 10.0                # +goal_bonus per step while within tolerance
+  # Dense "closeness" bonuses: + w_*_bonus * exp(-(err / *_scale)^2)  (smooth pull to the goal)
+  w_ori_bonus: 3.0
+  ori_scale: 0.35                 # rad
+  w_pos_bonus: 3.0                # pose
+  pos_scale: 0.50                 # m
+  w_depth_bonus: 2.0              # attitude_depth
+  depth_scale: 0.25               # m
+  goal_bonus: 5.0                 # +goal_bonus per step while within tolerance
   out_of_bounds_penalty: 50.0     # one-time penalty when leaving the workspace (pose)
 
 # Domain randomization for sim-to-real robustness. DEFAULT OFF (all fracs used only if enabled).

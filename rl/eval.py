@@ -17,6 +17,7 @@ from pathlib import Path
 import numpy as np
 import yaml
 from stable_baselines3 import PPO, SAC, TD3
+from stable_baselines3.common.vec_env import DummyVecEnv, VecNormalize
 
 from rl.envs.umiusi_pose_env import UmiusiPoseEnv, load_config
 
@@ -47,13 +48,27 @@ def main():
     control_dt = 1.0 / env.sim.cfg["sim"]["control_rate_hz"]
     model = ALGOS[algo].load(str(model_path), device="cpu")
 
+    # Reapply the training-time observation normalization (VecNormalize stats), if any.
+    stats_path = model_path.parent / "vecnormalize.pkl"
+    if stats_path.exists():
+        _dummy = DummyVecEnv([lambda: UmiusiPoseEnv(cfg)])
+        vn = VecNormalize.load(str(stats_path), _dummy)
+        _dummy.close()
+        rms, clip, eps = vn.obs_rms, vn.clip_obs, vn.epsilon
+
+        def norm_obs(o):
+            return np.clip((o - rms.mean) / np.sqrt(rms.var + eps), -clip, clip).astype(np.float32)
+    else:
+        def norm_obs(o):
+            return o
+
     returns, pos_errs, ori_errs, depth_errs, hold_fracs, successes = [], [], [], [], [], []
     for ep in range(args.episodes):
         obs, info = env.reset(seed=args.seed + ep)
         ep_ret, steps, in_tol = 0.0, 0, 0
         done = False
         while not done:
-            action, _ = model.predict(obs, deterministic=True)
+            action, _ = model.predict(norm_obs(obs), deterministic=True)
             obs, reward, terminated, truncated, info = env.step(action)
             ep_ret += reward
             steps += 1

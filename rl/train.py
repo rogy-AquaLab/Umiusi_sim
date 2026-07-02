@@ -20,7 +20,7 @@ import yaml
 from stable_baselines3 import PPO, SAC, TD3
 from stable_baselines3.common.callbacks import CheckpointCallback
 from stable_baselines3.common.env_util import make_vec_env
-from stable_baselines3.common.vec_env import DummyVecEnv, SubprocVecEnv
+from stable_baselines3.common.vec_env import DummyVecEnv, SubprocVecEnv, VecNormalize
 
 from rl.envs.umiusi_pose_env import _DEFAULT_OBS, UmiusiPoseEnv, load_config
 
@@ -78,6 +78,9 @@ def main():
     vec_cls = DummyVecEnv if (args.vec == "dummy" or (args.vec == "auto" and n_envs == 1)) else SubprocVecEnv
     venv = make_vec_env(UmiusiPoseEnv, n_envs=n_envs, seed=seed,
                         env_kwargs={"config": cfg}, vec_env_cls=vec_cls)
+    # Normalize observations (and, for on-policy PPO, rewards) — stabilizes value learning with
+    # these large returns. Stats are saved and reloaded by eval so inference matches training.
+    venv = VecNormalize(venv, norm_obs=True, norm_reward=(algo == "ppo"), clip_obs=10.0)
 
     model = build_model(algo, cfg, venv, seed, run_dir / "tb")
 
@@ -91,9 +94,10 @@ def main():
     model.learn(total_timesteps=total_timesteps, callback=ckpt)
 
     model.save(str(run_dir / "final"))
+    venv.save(str(run_dir / "vecnormalize.pkl"))  # obs/reward normalization stats for eval
     with open(run_dir / "meta.yaml", "w") as f:
-        yaml.safe_dump({"algo": algo, "task": task, "obs_mode": obs_mode, "config": args.config,
-                        "seed": seed, "total_timesteps": total_timesteps}, f)
+        yaml.safe_dump({"algo": algo, "task": task, "obs_mode": obs_mode, "vecnormalize": True,
+                        "config": args.config, "seed": seed, "total_timesteps": total_timesteps}, f)
     venv.close()
     print(f"[train] done. policy -> {run_dir / 'final.zip'}")
     print(f"[train] eval:  python -m rl.eval --model {run_dir / 'final.zip'}")
