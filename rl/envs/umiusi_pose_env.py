@@ -91,6 +91,7 @@ class UmiusiPoseEnv(gym.Env):
         self.ori_tol = float(e["ori_tol"])
         self.depth_tol = float(e.get("depth_tol", 0.10))
         self.near_goal_dist = float(e["near_goal_dist"])
+        self.near_goal_ori = float(e.get("near_goal_ori", 0.20))  # rad: within this, press to settle
         self.rw = cfg["reward"]
         self.dr = cfg.get("domain_rand", {"enabled": False})
 
@@ -235,6 +236,9 @@ class UmiusiPoseEnv(gym.Env):
         reward = -rw["w_effort"] * effort - rw["w_action_rate"] * action_rate
         reward -= rw.get("w_servo_rate", 0.0) * servo_rate      # penalize servo chatter (smooth steering)
         reward -= rw.get("w_thrust_rate", 0.0) * thrust_rate    # penalize thrust command changes
+        if ori_err < self.near_goal_ori:  # near the target: press hard to stop moving (kill limit cycles)
+            reward -= rw.get("w_settle_servo", 0.0) * servo_rate
+            reward -= rw.get("w_settle_thrust", 0.0) * thrust_rate
         reward -= rw["w_ori"] * ori_err
         reward += rw.get("w_ori_bonus", 0.0) * prox(ori_err, rw.get("ori_scale", 0.35))
         if self.track_position:

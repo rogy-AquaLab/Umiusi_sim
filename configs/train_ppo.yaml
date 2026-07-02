@@ -28,6 +28,7 @@ env:
   ori_tol: 0.20                   # orientation within this [rad] for success
   depth_tol: 0.10                 # depth within this [m] for success (attitude_depth)
   near_goal_dist: 0.50            # linear velocity penalized only within this distance (pose) [m]
+  near_goal_ori: 0.15             # within this ori error [rad] the "settle" penalties kick in
 
 reward:
   w_pos: 1.0                      # -w_pos * ||position_error||            (pose)
@@ -42,6 +43,10 @@ reward:
   w_servo_rate: 0.25              # -w_servo_rate * ||servo_angle - prev|| (servo vibration)
   w_thrust_rate: 0.15             # -w_thrust_rate * ||esc - prev_esc||    (thrust change)
   w_action_rate: 0.02             # -w_action_rate * ||action - prev_action|| (mild overall smoothness)
+  # Extra penalties applied ONLY near the target (ori_err < near_goal_ori) to kill steady-state
+  # limit cycles / servo chatter without discouraging the initial slew to the target.
+  w_settle_servo: 0.80            # -w_settle_servo * ||Δservo|| when near the goal
+  w_settle_thrust: 0.40           # -w_settle_thrust * ||Δesc|| when near the goal
   # Dense "closeness" bonuses: + w_*_bonus * exp(-(err / *_scale)^2)  (smooth pull to the goal)
   w_ori_bonus: 3.0
   ori_scale: 0.35                 # rad
