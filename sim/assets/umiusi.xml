@@ -56,6 +56,15 @@
     <!-- Follows the vehicle CoM (keeps it centred and upright even as it drifts) — used by RL eval. -->
     <camera name="track" mode="trackcom" pos="0.92 0.65 0.92" xyaxes="0.707 0 -0.707  -0.313 0.897 -0.313"/>
 
+    <!-- RL target-pose marker (mocap, kinematic, negligible mass, no collision). The RL env moves
+         it to show the commanded orientation/position; parked far below by default so it stays out
+         of the placement snapshots and the validation run. -->
+    <body name="target_marker" mocap="true" pos="0 -10 0">
+      <geom type="box" size="0.10 0.006 0.006" pos="0.10 0 0" rgba="1 0 0 0.7" contype="0" conaffinity="0" mass="0.0002"/>
+      <geom type="box" size="0.006 0.10 0.006" pos="0 0.10 0" rgba="0.1 1 0.1 0.7" contype="0" conaffinity="0" mass="0.0002"/>
+      <geom type="box" size="0.006 0.006 0.10" pos="0 0 0.10" rgba="0.2 0.5 1 0.7" contype="0" conaffinity="0" mass="0.0002"/>
+    </body>
+
     <body name="base_link" pos="0 0 0">
       <freejoint name="floating_base"/>
       <!-- Measured inertial (overrides geom-derived inertia for this body). -->

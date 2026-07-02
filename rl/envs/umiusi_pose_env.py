@@ -107,6 +107,11 @@ class UmiusiPoseEnv(gym.Env):
 
         self.render_mode = render_mode
         self._viewer = None
+        # Optional target-pose marker (mocap body in the MJCF); -1 if the model has none.
+        try:
+            self._mocap_id = int(self.sim.model.body_mocapid[self.sim.model.body("target_marker").id])
+        except (KeyError, ValueError):
+            self._mocap_id = -1
 
         self.target_pos = np.zeros(3)
         self.target_quat = np.array([1.0, 0.0, 0.0, 0.0])
@@ -142,6 +147,17 @@ class UmiusiPoseEnv(gym.Env):
         self.sim.thrust_per_cmd = b["thrust_per_cmd"] * (1.0 + u(-1, 1) * self.dr["thrust_frac"])
         self.sim.drag_lin = b["drag_lin"] * (1.0 + u(-1, 1) * self.dr["drag_frac"])
         self.sim.drag_quad = b["drag_quad"] * (1.0 + u(-1, 1) * self.dr["drag_frac"])
+
+    def _place_marker(self, state):
+        """Move the visual target marker to show the commanded pose (rendering only)."""
+        if self._mocap_id < 0:
+            return
+        if self.task == "pose":
+            self.sim.data.mocap_pos[self._mocap_id] = self.target_pos
+            self.sim.data.mocap_quat[self._mocap_id] = (1.0, 0.0, 0.0, 0.0)
+        else:  # attitude tasks: park the marker beside the vehicle, oriented to the target
+            self.sim.data.mocap_pos[self._mocap_id] = state["pos"] + np.array([0.7, 0.0, 0.0])
+            self.sim.data.mocap_quat[self._mocap_id] = self.target_quat
 
     # -- errors / observation --------------------------------------------------
     def _errors(self, state):
@@ -188,7 +204,9 @@ class UmiusiPoseEnv(gym.Env):
 
         state = self.sim.reset(pos=tuple(start), quat=(1.0, 0.0, 0.0, 0.0))
         self.prev_action = np.zeros(ACT_DIM)
+        self.prev_servo = np.zeros(4)
         self.step_count = 0
+        self._place_marker(state)
         R, ori_err = self._errors(state)
         return self._get_obs(state, R, ori_err), self._info(state, 0.0, float(np.linalg.norm(ori_err)), 0.0, False)
 
@@ -205,6 +223,7 @@ class UmiusiPoseEnv(gym.Env):
         ang_speed = float(np.linalg.norm(state["ang_vel"]))
         effort = float(np.linalg.norm(action[4:8]))
         action_rate = float(np.linalg.norm(action - self.prev_action))
+        servo_rate = float(np.linalg.norm(state["servo"] - self.prev_servo))  # actual servo motion
         rw = self.rw
 
         # Penalty terms give a gradient everywhere; dense exp() "closeness" bonuses add a smooth
@@ -213,6 +232,7 @@ class UmiusiPoseEnv(gym.Env):
             return float(np.exp(-((err / scale) ** 2)))
 
         reward = -rw["w_effort"] * effort - rw["w_action_rate"] * action_rate
+        reward -= rw.get("w_servo_rate", 0.0) * servo_rate  # penalize servo chatter (smooth steering)
         reward -= rw["w_ori"] * ori_err
         reward += rw.get("w_ori_bonus", 0.0) * prox(ori_err, rw.get("ori_scale", 0.35))
         if self.track_position:
@@ -242,6 +262,8 @@ class UmiusiPoseEnv(gym.Env):
         truncated = self.step_count >= self.horizon
 
         self.prev_action = action.copy()
+        self.prev_servo = state["servo"].copy()
+        self._place_marker(state)
         info = self._info(state, pos_err, ori_err, depth_err, success)
         info["out_of_bounds"] = out_of_bounds
         return self._get_obs(state, R, ori_err_vec), reward, terminated, truncated, info

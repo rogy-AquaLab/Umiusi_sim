@@ -135,7 +135,9 @@ python -m rl.eval --model models/att/final.zip --render     # watch live in the 
 MUJOCO_GL=egl python -m rl.eval --model models/att/final.zip --record out.mp4   # headless video
 ```
 
-`--render`/`--record` use a **tracking camera** that follows the vehicle, so it stays in frame
+An **RGB target marker** (red=X, green=Y, blue=Z axis triad) shows the commanded pose next to the
+vehicle so you can see it tracking the target orientation. `--render`/`--record` use a **tracking
+camera** that follows the vehicle, so it stays in frame
 even when it drifts (attitude/attitude_depth tasks don't control horizontal position, so the
 vehicle holds its commanded attitude while floating away — that drift is the expected,
 sensor-limited behavior). `--record` renders offscreen, so run it with `MUJOCO_GL=egl`.
