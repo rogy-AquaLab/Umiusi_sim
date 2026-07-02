@@ -1,0 +1,63 @@
+# Physical parameters for the UMIUSI MuJoCo model.  Units: SI (m, kg, s, rad).
+# Coordinate frame: CAD frame with +Y UP (the 4 thrusters lie in the X-Z plane).
+# Values marked PLACEHOLDER are first estimates to be calibrated in phase-2 validation.
+
+sim:
+  timestep: 0.002              # 500 Hz physics
+  control_rate_hz: 50          # policy / command rate (matches sinsei_umiusi controllers.yaml)
+  gravity: [0.0, -9.81, 0.0]   # +Y is up in the CAD frame
+
+water:
+  density: 1000.0              # kg/m^3
+  # Displaced (external hull) volume, NOT the CAD solid volume (3.726e6 mm^3 = material only).
+  # ~ slightly positive of neutral: total mass 12.48 kg -> neutral 0.01248 m^3. Tune in validation.
+  displaced_volume: 0.012600   # m^3
+  # Center of buoyancy is auto-placed horizontally over the whole-vehicle CoM (base + 4
+  # thrusters) and this far ABOVE it [m], giving a passive righting moment. Aligning with
+  # the system CoM (not the base CoM) avoids a spurious steady couple. Tune in validation.
+  buoyancy_offset_above_com: 0.05
+
+# --- hull (base_link), measured in CAD -----------------------------------------
+hull:
+  mass: 9.963939               # kg  (9963.939 g)
+  com: [-0.241053, 0.093368, 0.000327]        # m
+  # fullinertia about CoM [kg m^2], MJCF order: Ixx Iyy Izz Ixy Ixz Iyz
+  fullinertia: [0.1865, 0.4736, 0.3380, 1.499e-4, 4.590e-4, -8.78e-7]
+  half_extents: [0.35098, 0.110, 0.26499]     # m  (bbox 701.96 x 220.00 x 529.99 mm)
+  center: [-0.23098, 0.100, 0.0]              # bbox center in hull frame [m]
+
+# --- hydrodynamic damping, diagonal, body axes [x, y, z, roll, pitch, yaw] ------
+# PLACEHOLDER coefficients; calibrate against expected terminal velocities.
+drag:
+  linear:    [15.0, 25.0, 20.0, 3.0, 3.0, 3.0]      # N/(m/s) ; N*m/(rad/s)
+  quadratic: [40.0, 80.0, 60.0, 5.0, 5.0, 5.0]      # N/(m/s)^2 ; N*m/(rad/s)^2
+added_mass:
+  # Diagonal added mass/inertia [x, y, z, roll, pitch, yaw]. Default 0 = OFF.
+  # Enable only after drag/buoyancy are validated (explicit-integrator added mass
+  # needs numerical care); kept configurable to satisfy the analytical model spec.
+  diag: [0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
+
+# --- thrusters (azimuth: servo angle + ESC thrust), measured pivots -------------
+thrusters:
+  mass: 0.629177               # kg per thruster (629.177 g)
+  # Servo TILTS the thrust up/down: hinge about each thruster's local Z (horizontal, perp
+  # to the cylinder/thrust axis). Thrust stays parallel to the cylinder (local +X).
+  servo_axis: [0.0, 0.0, 1.0]  # local Z (documentation; MJCF joint axis is authoritative)
+  servo_range_deg: [-90.0, 90.0]
+  # Servo = Hitec HS-646WP. Datasheet no-load speed 0.20 s/60deg @6V .. 0.17 s/60deg @7.4V
+  # (= ~300..350 deg/s). Derated to 250 deg/s as an in-water/loaded estimate; stall torque
+  # ~0.94..1.14 N*m is modeled as the actuator forcerange in sim/assets/umiusi.xml.
+  servo_slew_deg_per_s: 250.0  # servo rate limit (mirrors max_duty_step_per_sec concept)
+  thrust_axis: [1.0, 0.0, 0.0] # thrust direction in each thruster's local frame; refine in validation
+  thrust_per_cmd: 30.0         # N per unit command; F = clamp(esc_cmd, -1, 1) * thrust_per_cmd
+  # id -> reference name mapping (sinsei_umiusi controllers.yaml): 1=lf 2=lb 3=rb 4=rf (ASSUMED, verify).
+  # neutral_deg is the mounting yaw about +Y (sets the horizontal outward direction, 45 deg
+  # diagonal from pivot->thruster-origin); the servo then tilts thrust up/down about local Z.
+  # Pivots are in the base_link frame: placement.txt gives joints in the assembly-global frame
+  # (thruster1 x=187.223 mm, etc.) and base_link's origin is at (210, 0, 0) mm there, so
+  # x_base = x_global - 0.210 m. (The y/z offsets of base_link's origin are zero.)
+  units:
+    - {id: 1, pivot: [-0.022777, 0.09815, -0.187224], neutral_deg:  -45.0}
+    - {id: 2, pivot: [-0.397223, 0.09815, -0.187224], neutral_deg: -135.0}
+    - {id: 3, pivot: [-0.022777, 0.09815,  0.187224], neutral_deg:   45.0}
+    - {id: 4, pivot: [-0.397223, 0.09815,  0.187224], neutral_deg:  135.0}

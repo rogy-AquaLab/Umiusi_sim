@@ -1,0 +1,36 @@
+# --- Claude Code task request (per-task, not version controlled) ---
+# Copy ai/templates/task_request.template.yaml -> ai/task_request.yaml and edit.
+ai/task_request.yaml
+
+# --- Claude Code local settings ---
+.claude/settings.local.json
+
+# --- ROS 2 / colcon workspace ---
+build/
+install/
+log/
+
+# --- External reference package (its own git repo; fetched via deps.repos, not vendored) ---
+ros2_ws/src/sinsei_UMIUSI_control/
+
+# --- Training artifacts (checkpoints, tensorboard logs, videos) ---
+models/
+
+# --- CAD raw meshes (huge: base_link.stl ~52M; sim uses primitives. Keep description/ text) ---
+umiusi_model/STL/
+
+# --- MuJoCo runtime log ---
+MUJOCO_LOG.TXT
+
+# --- Python ---
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+
+# --- Editor / OS ---
+.vscode/
+.idea/
+*.swp
+.DS_Store

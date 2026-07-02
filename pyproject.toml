@@ -1,0 +1,25 @@
+[project]
+name = "umiusi_sim"
+version = "0.0.0"
+description = "MuJoCo simulation + RL for the UMIUSI azimuth-thruster underwater robot"
+requires-python = ">=3.10"
+dependencies = [
+    "mujoco>=3.2",
+    "numpy",
+    "pyyaml",
+    "gymnasium>=0.29",
+    "stable-baselines3>=2.3",
+]
+
+[project.optional-dependencies]
+dev = ["fast-simplification", "imageio[ffmpeg]", "tensorboard"]
+
+[tool.setuptools]
+packages = ["sim", "sim.physics", "tools"]
+
+[tool.ruff]
+line-length = 119
+
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
