@@ -5,13 +5,10 @@ ai/task_request.yaml
 # --- Claude Code local settings ---
 .claude/settings.local.json
 
-# --- ROS 2 / colcon workspace ---
+# --- Colcon build artifacts (only if a workspace ever nests here) ---
 build/
 install/
 log/
-
-# --- External reference package (its own git repo; fetched via deps.repos, not vendored) ---
-ros2_ws/src/sinsei_UMIUSI_control/
 
 # --- Training artifacts (checkpoints, tensorboard logs, videos) ---
 models/

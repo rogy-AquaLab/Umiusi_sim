@@ -31,17 +31,18 @@ Design docs: [`ai/project_spec.yaml`](ai/project_spec.yaml) and [`ai/architectur
 ## Repository layout
 
 ```
-mujoco_ws/
-  sim/                    # simulator core (standalone Python, no ROS)
-    assets/umiusi.xml     #   MJCF model: free base + 4 azimuth servos + 4 thrust sites
-    physics/              #   analytical hydrodynamics + thruster model
-    simulator.py          #   UmiusiSimulator: reset() / step(action) / get_state()
-  configs/umiusi.yaml     # all physical parameters (mass, drag, thrust, servo, buoyancy)
-  tools/                  # view (GUI), snapshot, mesh decimation
-  media/                  # rendered placement screenshots
-  umiusi_model/           # measured CAD data (STL + mass/placement notes)
-  ros2_ws/                # ROS 2 metapackage + bridge (later phases)
-  ai/                     # project_spec.yaml, architecture.md, review_policy.yaml
+mujoco_ws/                # workspace container (NOT version-controlled)
+  umiusi_sim/             # ← THIS git repo: the standalone Python project
+    sim/                    # simulator core (standalone Python, no ROS)
+      assets/umiusi.xml     #   MJCF model: free base + 4 azimuth servos + 4 thrust sites
+      physics/              #   analytical hydrodynamics + thruster model
+      simulator.py          #   UmiusiSimulator: reset() / step(action) / get_state()
+    configs/umiusi.yaml     # all physical parameters (mass, drag, thrust, servo, buoyancy)
+    tools/                  # view (GUI), snapshot, mesh decimation
+    media/                  # rendered placement screenshots
+    umiusi_model/           # measured CAD data (STL + mass/placement notes)
+    ai/                     # project_spec.yaml, architecture.md, review_policy.yaml
+  ros2_ws/                 # separate ROS 2 workspace (bridge, later phases; its own repo when needed)
 ```
 
 ---
@@ -56,7 +57,7 @@ sudo apt update
 sudo apt install -y python3-venv python3-pip build-essential libglfw3 libglfw3-dev
 
 # python env
-cd ~/mujoco_ws
+cd ~/mujoco_ws/umiusi_sim
 python3 -m venv .venv
 source .venv/bin/activate
 python -m pip install -U pip
@@ -65,7 +66,7 @@ pip install "mujoco>=3.2" "gymnasium>=0.29" "stable-baselines3[extra]>=2.3" \
             numpy pyyaml tensorboard glfw "imageio[ffmpeg]"
 ```
 
-Everything below assumes `source .venv/bin/activate` and running from the repo root (`~/mujoco_ws`).
+Everything below assumes `source .venv/bin/activate` and running from the repo root (`~/mujoco_ws/umiusi_sim`).
 
 ---
 
