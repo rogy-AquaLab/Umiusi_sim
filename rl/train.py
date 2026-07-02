@@ -18,7 +18,7 @@ from pathlib import Path
 
 import yaml
 from stable_baselines3 import PPO, SAC, TD3
-from stable_baselines3.common.callbacks import CheckpointCallback
+from stable_baselines3.common.callbacks import BaseCallback, CheckpointCallback
 from stable_baselines3.common.env_util import make_vec_env
 from stable_baselines3.common.vec_env import DummyVecEnv, SubprocVecEnv, VecNormalize
 
@@ -26,6 +26,26 @@ from rl.envs.umiusi_pose_env import _DEFAULT_OBS, UmiusiPoseEnv, load_config
 
 _ROOT = Path(__file__).resolve().parents[1]
 ALGOS = {"ppo": PPO, "sac": SAC, "td3": TD3}
+
+
+class CurriculumCallback(BaseCallback):
+    """Widen the attitude_velocity difficulty (v_cmd direction cone + yaw range) from 0 to the
+    config targets over the first `frac` of training, so the policy first learns to cruise in a
+    single direction (easy) and then generalizes. Avoids the from-scratch do-nothing local optimum."""
+
+    def __init__(self, total, cone_max, yaw_max, frac):
+        super().__init__()
+        self.total, self.cone_max, self.yaw_max, self.frac = total, cone_max, yaw_max, frac
+        self._last_pct = -1
+
+    def _on_step(self):
+        p = min(1.0, self.num_timesteps / max(self.frac * self.total, 1.0))
+        pct = int(p * 100)
+        if pct != self._last_pct:  # throttle the set_attr IPC to ~100 updates
+            self._last_pct = pct
+            self.training_env.set_attr("vel_cmd_cone_deg", p * self.cone_max)
+            self.training_env.set_attr("yaw_target_deg", p * self.yaw_max)
+        return True
 
 
 def build_model(algo, cfg, venv, seed, tb_dir):
@@ -51,6 +71,8 @@ def main():
                     default=None, help="override sensor suite (env.obs_mode)")
     ap.add_argument("--vel-cone", type=float, default=None, help="override env.vel_cmd_cone_deg [deg]")
     ap.add_argument("--yaw-target", type=float, default=None, help="override env.yaw_target_deg [deg]")
+    ap.add_argument("--curriculum-frac", type=float, default=None,
+                    help="attitude_velocity: widen cone/yaw 0->config over this fraction of training (0=off)")
     ap.add_argument("--timesteps", type=int, default=None, help="override total_timesteps")
     ap.add_argument("--n-envs", type=int, default=None, help="override number of parallel envs")
     ap.add_argument("--seed", type=int, default=None)
@@ -94,10 +116,21 @@ def main():
     save_freq = max(total_timesteps // (10 * n_envs), 1)
     ckpt = CheckpointCallback(save_freq=save_freq, save_path=str(run_dir / "checkpoints"),
                               name_prefix=algo)
+    callbacks = [ckpt]
+
+    # Curriculum (attitude_velocity): start fixed +X / level, widen to the config cone + yaw range.
+    cfrac = args.curriculum_frac if args.curriculum_frac is not None else (0.5 if task == "attitude_velocity" else 0.0)
+    if task == "attitude_velocity" and cfrac > 0:
+        cone_max = float(cfg["env"].get("vel_cmd_cone_deg", 180.0))
+        yaw_max = float(cfg["env"].get("yaw_target_deg", 180.0))
+        venv.set_attr("vel_cmd_cone_deg", 0.0)
+        venv.set_attr("yaw_target_deg", 0.0)
+        callbacks.append(CurriculumCallback(total_timesteps, cone_max, yaw_max, cfrac))
+        print(f"[train] curriculum: cone/yaw 0 -> {cone_max:.0f}/{yaw_max:.0f} over {cfrac * 100:.0f}% of steps")
 
     print(f"[train] task={task} algo={algo} obs_mode={obs_mode} n_envs={n_envs} "
           f"timesteps={total_timesteps} seed={seed} -> {run_dir}")
-    model.learn(total_timesteps=total_timesteps, callback=ckpt)
+    model.learn(total_timesteps=total_timesteps, callback=callbacks)
 
     model.save(str(run_dir / "final"))
     venv.save(str(run_dir / "vecnormalize.pkl"))  # obs/reward normalization stats for eval
