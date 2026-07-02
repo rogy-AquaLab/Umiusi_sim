@@ -73,6 +73,16 @@ domain_rand:
   drag_frac: 0.20                 # linear & quadratic drag *= 1 + U(-frac, frac)
   obs_noise: 0.0                  # gaussian obs noise std (in obs units)
 
+# External disturbances (steady water current + random force impulses). DEFAULT OFF; --disturb enables.
+# A current is modeled as a water velocity (drag uses v - current), so it drags the vehicle along.
+disturbance:
+  enabled: false
+  current_max: 0.30               # steady current speed sampled U(0, this) per episode [m/s]
+  current_horizontal: true        # current in the x-z plane
+  impulse_prob: 0.01              # per control step, chance to start a force impulse
+  impulse_force: 25.0             # impulse force magnitude [N]
+  impulse_steps: 5                # impulse duration [control steps]
+
 # --- Algorithm ---------------------------------------------------------------
 algo: ppo                         # ppo (default) | sac | td3  (override with --algo)
 n_envs: 8                         # parallel environments (CPU vectorization)

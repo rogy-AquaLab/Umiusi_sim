@@ -47,6 +47,8 @@ def main():
     for k in ("task", "obs_mode", "vel_cmd_cone_deg", "yaw_target_deg"):
         if meta.get(k) is not None:
             cfg["env"][k] = meta[k]
+    if meta.get("disturbance"):  # evaluate under the same disturbances it trained with
+        cfg.setdefault("disturbance", {})["enabled"] = True
     env = UmiusiPoseEnv(cfg, render_mode="human" if args.render else None)
     control_dt = 1.0 / env.sim.cfg["sim"]["control_rate_hz"]
 

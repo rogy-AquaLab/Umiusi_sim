@@ -87,6 +87,8 @@ class UmiusiSimulator:
         self.esc_current = np.zeros(4)
         self.thrust_mag = np.zeros(4)
         self.prev_vel_body = np.zeros(6)
+        self.current_world = np.zeros(3)    # water-current velocity [m/s] (disturbance; set by the env)
+        self.ext_force_world = np.zeros(3)  # extra external force [N] at the CoM (impulse disturbance)
         mujoco.mj_forward(self.model, self.data)
         return self.get_state()
 
@@ -129,7 +131,8 @@ class UmiusiSimulator:
         mujoco.mj_subtreeVel(m, d)  # fills d.subtree_linvel (world CoM velocity)
         vel6 = np.zeros(6)
         mujoco.mj_objectVelocity(m, d, mujoco.mjtObj.mjOBJ_BODY, base, vel6, 0)  # global
-        lin_body = R.T @ d.subtree_linvel[base]
+        # Relative to any water current, so a current drags the vehicle along (disturbance).
+        lin_body = R.T @ (d.subtree_linvel[base] - self.current_world)
         ang_body = R.T @ vel6[:3]
         vel_body = np.concatenate([lin_body, ang_body])
         w = hydro.drag_wrench_body(vel_body, self.drag_lin, self.drag_quad)
@@ -139,6 +142,10 @@ class UmiusiSimulator:
         self.prev_vel_body = vel_body
         sys_com = d.subtree_com[base].copy()
         mujoco.mj_applyFT(m, d, R @ w[:3], R @ w[3:], sys_com, base, d.qfrc_applied)
+
+        # External impulse disturbance (waves/bumps), a world-frame force at the CoM.
+        if self.ext_force_world.any():
+            mujoco.mj_applyFT(m, d, self.ext_force_world, zero3, sys_com, base, d.qfrc_applied)
 
         # Thrusters: thrust along the (servo-rotated) local axis, applied at each tip site.
         for k in range(4):

@@ -104,6 +104,8 @@ class UmiusiPoseEnv(gym.Env):
         self.ori_deadband = float(e.get("ori_deadband", 0.0))     # rad: no ori reward gradient inside this
         self.rw = cfg["reward"]
         self.dr = cfg.get("domain_rand", {"enabled": False})
+        self.dist = cfg.get("disturbance", {"enabled": False})  # water current + random impulses
+        self._impulse_left = 0
 
         self._base = {
             "volume": self.sim.volume,
@@ -175,6 +177,33 @@ class UmiusiPoseEnv(gym.Env):
             self.sim.data.mocap_pos[self._mocap_id] = state["pos"] + np.array([0.7, 0.0, 0.0])
             self.sim.data.mocap_quat[self._mocap_id] = self.target_quat
 
+    # -- disturbances (water current + random impulses) ------------------------
+    def _sample_current(self):
+        """Per-episode water current; also clears any impulse. No-op if disturbance is disabled."""
+        self._impulse_left = 0
+        self.sim.ext_force_world = np.zeros(3)
+        if not self.dist.get("enabled", False):
+            self.sim.current_world = np.zeros(3)
+            return
+        d = self.np_random.normal(size=3)
+        if self.dist.get("current_horizontal", True):
+            d[1] = 0.0
+        d = d / (np.linalg.norm(d) + 1e-9)
+        self.sim.current_world = d * self.np_random.uniform(0.0, self.dist.get("current_max", 0.0))
+
+    def _apply_disturbance(self):
+        """Occasionally fire a short world-frame force impulse (waves/bumps)."""
+        if not self.dist.get("enabled", False):
+            return
+        if self._impulse_left > 0:
+            self._impulse_left -= 1
+            if self._impulse_left == 0:
+                self.sim.ext_force_world = np.zeros(3)
+        elif self.np_random.uniform() < self.dist.get("impulse_prob", 0.0):
+            d = self.np_random.normal(size=3)
+            self.sim.ext_force_world = d / (np.linalg.norm(d) + 1e-9) * self.dist.get("impulse_force", 0.0)
+            self._impulse_left = int(self.dist.get("impulse_steps", 5))
+
     # -- errors / observation --------------------------------------------------
     def _errors(self, state):
         R = np.zeros(9)
@@ -228,6 +257,7 @@ class UmiusiPoseEnv(gym.Env):
             self.v_cmd_world = Rt.reshape(3, 3) @ self.v_cmd  # command expressed in world for the reward
 
         state = self.sim.reset(pos=tuple(start), quat=(1.0, 0.0, 0.0, 0.0))
+        self._sample_current()
         self.prev_action = np.zeros(ACT_DIM)
         self.prev_servo = np.zeros(4)
         self.step_count = 0
@@ -237,6 +267,7 @@ class UmiusiPoseEnv(gym.Env):
 
     def step(self, action):
         action = np.clip(np.asarray(action, dtype=float), -1.0, 1.0)
+        self._apply_disturbance()
         state = self.sim.step(action)
         self.step_count += 1
         R, ori_err_vec = self._errors(state)
