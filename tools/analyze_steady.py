@@ -70,7 +70,7 @@ def main():
             a, _ = model.predict(norm(obs), deterministic=True)
             obs, _, term, trunc, info = env.step(a)
             servos.append(info["servo"].copy())
-            escs.append(info["esc_cmd"].copy())
+            escs.append(info["esc_applied"].copy())  # slew-limited actual thrust command
             oris.append(info["ori_err"])
             done = term or trunc
         s, e, o = np.array(servos), np.array(escs), np.array(oris)
@@ -79,7 +79,7 @@ def main():
         servo_std = float(np.degrees(np.mean(np.std(ts, axis=0))))
         thr_chg = float(np.mean(np.abs(np.diff(te, axis=0))))
         ori_ss = float(np.mean(o[-args.tail:]))
-        cls = "VIBRATING" if servo_mot > 0.3 else "settled"
+        cls = "VIBRATING" if servo_std > 0.5 else "settled"  # oscillation amplitude (deg)
         rows.append((tilt, ori_ss, servo_mot, servo_std, thr_chg, cls))
         print(f"{ep:>3} {tilt:6.1f} {ori_ss:7.3f} {servo_mot:13.3f} {servo_std:10.2f} {thr_chg:8.4f}  {cls}")
 

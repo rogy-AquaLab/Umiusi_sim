@@ -276,8 +276,9 @@ class UmiusiPoseEnv(gym.Env):
         self._place_marker(state)
         info = self._info(state, pos_err, ori_err, depth_err, success)
         info["out_of_bounds"] = out_of_bounds
-        info["servo"] = state["servo"].copy()   # for eval diagnostics (servo motion)
-        info["esc_cmd"] = action[4:8].copy()     # for eval diagnostics (thrust use / change)
+        info["servo"] = state["servo"].copy()             # actual servo angles (motion diagnostics)
+        info["esc_cmd"] = action[4:8].copy()               # raw policy command (thrust use)
+        info["esc_applied"] = self.sim.esc_current.copy()  # slew-limited applied esc (true thrust change)
         return self._get_obs(state, R, ori_err_vec), reward, terminated, truncated, info
 
     def _info(self, state, pos_err, ori_err, depth_err, success):
