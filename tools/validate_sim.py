@@ -180,31 +180,27 @@ def check_drag(sim, rep):
 
 
 def check_thrust_direction(sim, rep):
-    """Each thruster at neutral servo pushes horizontally along its configured mounting dir."""
-    thrust_axis = np.array(sim.cfg["thrusters"]["thrust_axis"], dtype=float)
-    units = sim.cfg["thrusters"]["units"]
+    """Each thruster at neutral servo (=0) pushes horizontally along its neutral (tangential) axis."""
     base_v = _settle_velocity(sim, np.zeros(8), steps=3)  # buoyancy/gravity baseline to subtract
 
     all_ok = True
     lines = []
-    for k, u in enumerate(units):
+    for k in range(4):
         act = np.zeros(8)
         act[4 + k] = 0.5  # fire only thruster k forward, servos at neutral (0)
         v = _settle_velocity(sim, act, steps=3) - base_v  # isolate the thrust contribution
         speed = np.linalg.norm(v)
-        # Expected world direction from config: neutral yaw about +Y applied to the thrust axis.
-        expect = _rot_y(u["neutral_deg"]) @ thrust_axis
-        expect /= np.linalg.norm(expect)
+        # At servo=0 the body is upright, so the world thrust dir is the configured neutral axis.
+        expect = sim.thrust_axes[k] / np.linalg.norm(sim.thrust_axes[k])
         obs = v / speed if speed > _EPS else v
         align = float(obs @ expect)
         horizontal = abs(v[1]) < 0.25 * speed if speed > _EPS else False
         ok = speed > _EPS and align > _ALIGN and horizontal
         all_ok &= ok
-        lines.append(f"id{u['id']} (neutral {u['neutral_deg']:+.0f}°): "
-                     f"align={align:+.2f}, |Δv|={speed:.3f}, dir={np.round(obs, 2)}")
-    rep.check("thrust_dir: neutral thrust horizontal along mounting dir", all_ok,
-              "all 4 thrusters match configured neutral direction")
-    rep.note("thrust direction per unit (observed vs configured neutral_deg)", lines)
+        lines.append(f"id{k + 1}: align={align:+.2f}, |Δv|={speed:.3f}, dir={np.round(obs, 2)}")
+    rep.check("thrust_dir: neutral thrust horizontal (tangential) per unit", all_ok,
+              "all 4 thrusters match configured neutral thrust_axis")
+    rep.note("thrust direction per unit (observed vs configured neutral thrust_axis)", lines)
 
 
 def check_servo_tilt(sim, rep):
@@ -219,12 +215,11 @@ def check_servo_tilt(sim, rep):
     rep.check("servo: tracks commanded angle", track_ok,
               f"cmd {np.degrees(target):.0f}° -> {np.round(np.degrees(servo), 1)}°")
 
-    # Direction: with a positive servo, the world thrust axis of each thruster gains +Y (up).
-    thrust_axis = np.array(sim.cfg["thrusters"]["thrust_axis"], dtype=float)
+    # Direction: with a positive servo, each thruster's world thrust axis gains +Y (tilts up).
     up_ok = True
     lines = []
     for k, bid in enumerate(sim.thr_ids):
-        y_up = float((sim.data.xmat[bid].reshape(3, 3) @ thrust_axis)[1])
+        y_up = float((sim.data.xmat[bid].reshape(3, 3) @ sim.thrust_axes[k])[1])
         up_ok &= y_up > 0.0
         lines.append(f"thruster_{k + 1}: thrust·ŷ = {y_up:+.2f} (want > 0 for +servo)")
     rep.check("servo: +command tilts thrust UP (+Y)", up_ok, "positive servo -> upward thrust")

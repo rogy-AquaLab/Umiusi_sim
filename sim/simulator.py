@@ -55,7 +55,9 @@ class UmiusiSimulator:
         self.servo_range_rad = np.radians(max(abs(v) for v in t["servo_range_deg"]))
         self.servo_slew_rad = np.radians(t["servo_slew_deg_per_s"])
         self.thrust_per_cmd = float(t["thrust_per_cmd"])
-        self.thrust_axis = np.array(t["thrust_axis"], dtype=float)
+        # Per-thruster neutral thrust direction (thruster body frame). The MJCF servo hinge (about
+        # the mounting arm) rotates the body, so this axis, carried by the body, tilts with the servo.
+        self.thrust_axes = np.array([u["thrust_axis"] for u in t["units"]], dtype=float)
 
         # Indices
         self.base_id = self.model.body("base_link").id
@@ -139,7 +141,7 @@ class UmiusiSimulator:
         # Thrusters: thrust along the (servo-rotated) local axis, applied at each tip site.
         for k in range(4):
             bid, sid = self.thr_ids[k], self.site_ids[k]
-            f_thr = thr.thrust_to_world(self.thrust_mag[k], self.thrust_axis, d.xmat[bid])
+            f_thr = thr.thrust_to_world(self.thrust_mag[k], self.thrust_axes[k], d.xmat[bid])
             mujoco.mj_applyFT(m, d, f_thr, zero3, d.site_xpos[sid], bid, d.qfrc_applied)
 
     # -- observation -----------------------------------------------------------

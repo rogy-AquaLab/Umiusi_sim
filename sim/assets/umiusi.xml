@@ -73,36 +73,38 @@
       <!-- Coarse octagonal-prism hull, placed at the bbox center (visual only). -->
       <geom name="hull" type="mesh" mesh="hull_prism" pos="-0.23098 0.100 0.0" rgba="0.95 0.85 0.12 1"/>
 
-      <!-- Thruster 1 (id=1) at (+x,-z), neutral yaw -45 deg -->
-      <body name="thruster_1" pos="-0.022777 0.09815 -0.187224" euler="0 -45 0">
-        <joint name="servo_1" type="hinge" axis="0 0 1" range="-90 90"/>
-        <geom name="t1_housing" type="cylinder" fromto="0 0 0 0.15 0 0" size="0.030" mass="0.5"/>
-        <geom name="t1_duct" type="cylinder" fromto="0.15 0 0 0.19 0 0" size="0.038" mass="0.129177"/>
-        <site name="t1_thrust" pos="0.19 0 0" size="0.012" rgba="1 0 0 1"/>
+      <!-- Azimuth thrusters (T-shaped ducted props), matching sinsei_umiusi_control's allocation:
+           the servo tilts the thrust between HORIZONTAL (tangential, servo=0) and VERTICAL
+           (servo=+90, up), i.e. phi = atan(f_vertical / f_horizontal). The hinge axis is the
+           mounting ARM (joint -> prop, ~0.15 m, 45deg outboard + slight up); the ducted-prop
+           barrel and thrust are perpendicular to it. Body pos = measured joint (CAD placement.txt);
+           arm/thrust vectors derived from CAD. Geom mass ~0.63 kg/unit; MuJoCo derives inertia. -->
+      <body name="thruster_1" pos="-0.02278 0.09815 -0.18722">
+        <joint name="servo_1" type="hinge" axis="-0.70110 -0.11891 0.70308" range="-90 90"/>
+        <geom name="t1_arm" type="cylinder" fromto="0 0 0  0.10436 0.01770 -0.10465" size="0.018" mass="0.13"/>
+        <geom name="t1_duct" type="cylinder" fromto="0.07780 0.01770 -0.13113  0.13091 0.01770 -0.07817" size="0.055" mass="0.5"/>
+        <site name="t1_thrust" pos="0.10436 0.01770 -0.10465" size="0.012" rgba="1 0 0 1"/>
       </body>
 
-      <!-- Thruster 2 (id=2) at (-x,-z), neutral yaw -135 deg -->
-      <body name="thruster_2" pos="-0.397223 0.09815 -0.187224" euler="0 -135 0">
-        <joint name="servo_2" type="hinge" axis="0 0 1" range="-90 90"/>
-        <geom name="t2_housing" type="cylinder" fromto="0 0 0 0.15 0 0" size="0.030" mass="0.5"/>
-        <geom name="t2_duct" type="cylinder" fromto="0.15 0 0 0.19 0 0" size="0.038" mass="0.129177"/>
-        <site name="t2_thrust" pos="0.19 0 0" size="0.012" rgba="1 0 0 1"/>
+      <body name="thruster_2" pos="-0.39722 0.09815 -0.18722">
+        <joint name="servo_2" type="hinge" axis="0.70110 -0.11891 0.70308" range="-90 90"/>
+        <geom name="t2_arm" type="cylinder" fromto="0 0 0  -0.10436 0.01770 -0.10465" size="0.018" mass="0.13"/>
+        <geom name="t2_duct" type="cylinder" fromto="-0.13091 0.01770 -0.07817  -0.07780 0.01770 -0.13113" size="0.055" mass="0.5"/>
+        <site name="t2_thrust" pos="-0.10436 0.01770 -0.10465" size="0.012" rgba="1 0 0 1"/>
       </body>
 
-      <!-- Thruster 3 (id=3) at (+x,+z), neutral yaw +45 deg -->
-      <body name="thruster_3" pos="-0.022777 0.09815 0.187224" euler="0 45 0">
-        <joint name="servo_3" type="hinge" axis="0 0 1" range="-90 90"/>
-        <geom name="t3_housing" type="cylinder" fromto="0 0 0 0.15 0 0" size="0.030" mass="0.5"/>
-        <geom name="t3_duct" type="cylinder" fromto="0.15 0 0 0.19 0 0" size="0.038" mass="0.129177"/>
-        <site name="t3_thrust" pos="0.19 0 0" size="0.012" rgba="1 0 0 1"/>
+      <body name="thruster_3" pos="-0.02278 0.09815 0.18722">
+        <joint name="servo_3" type="hinge" axis="-0.70110 -0.11891 -0.70308" range="-90 90"/>
+        <geom name="t3_arm" type="cylinder" fromto="0 0 0  0.10436 0.01770 0.10465" size="0.018" mass="0.13"/>
+        <geom name="t3_duct" type="cylinder" fromto="0.13091 0.01770 0.07817  0.07780 0.01770 0.13113" size="0.055" mass="0.5"/>
+        <site name="t3_thrust" pos="0.10436 0.01770 0.10465" size="0.012" rgba="1 0 0 1"/>
       </body>
 
-      <!-- Thruster 4 (id=4) at (-x,+z), neutral yaw +135 deg -->
-      <body name="thruster_4" pos="-0.397223 0.09815 0.187224" euler="0 135 0">
-        <joint name="servo_4" type="hinge" axis="0 0 1" range="-90 90"/>
-        <geom name="t4_housing" type="cylinder" fromto="0 0 0 0.15 0 0" size="0.030" mass="0.5"/>
-        <geom name="t4_duct" type="cylinder" fromto="0.15 0 0 0.19 0 0" size="0.038" mass="0.129177"/>
-        <site name="t4_thrust" pos="0.19 0 0" size="0.012" rgba="1 0 0 1"/>
+      <body name="thruster_4" pos="-0.39722 0.09815 0.18722">
+        <joint name="servo_4" type="hinge" axis="0.70110 -0.11891 -0.70308" range="-90 90"/>
+        <geom name="t4_arm" type="cylinder" fromto="0 0 0  -0.10436 0.01770 0.10465" size="0.018" mass="0.13"/>
+        <geom name="t4_duct" type="cylinder" fromto="-0.07780 0.01770 0.13113  -0.13091 0.01770 0.07817" size="0.055" mass="0.5"/>
+        <site name="t4_thrust" pos="-0.10436 0.01770 0.10465" size="0.012" rgba="1 0 0 1"/>
       </body>
     </body>
   </worldbody>

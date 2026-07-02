@@ -40,24 +40,23 @@ added_mass:
 # --- thrusters (azimuth: servo angle + ESC thrust), measured pivots -------------
 thrusters:
   mass: 0.629177               # kg per thruster (629.177 g)
-  # Servo TILTS the thrust up/down: hinge about each thruster's local Z (horizontal, perp
-  # to the cylinder/thrust axis). Thrust stays parallel to the cylinder (local +X).
-  servo_axis: [0.0, 0.0, 1.0]  # local Z (documentation; MJCF joint axis is authoritative)
+  # Azimuth thruster (T-shaped ducted prop). The servo rotates the whole unit about the mounting
+  # ARM (joint->prop, ~0.15 m, 45deg outboard); the thrust (prop axis) is PERPENDICULAR to the arm.
+  # So the servo tilts thrust between HORIZONTAL tangential (servo=0) and VERTICAL (servo=+90, up),
+  # i.e. phi = atan(f_vertical / f_horizontal) — matching sinsei_umiusi_control's FeedForward
+  # allocation (horizontal comp -> surge/sway/yaw, vertical comp -> heave/roll/pitch).
   servo_range_deg: [-90.0, 90.0]
   # Servo = Hitec HS-646WP. Datasheet no-load speed 0.20 s/60deg @6V .. 0.17 s/60deg @7.4V
   # (= ~300..350 deg/s). Derated to 250 deg/s as an in-water/loaded estimate; stall torque
   # ~0.94..1.14 N*m is modeled as the actuator forcerange in sim/assets/umiusi.xml.
   servo_slew_deg_per_s: 250.0  # servo rate limit (mirrors max_duty_step_per_sec concept)
-  thrust_axis: [1.0, 0.0, 0.0] # thrust direction in each thruster's local frame; refine in validation
   thrust_per_cmd: 30.0         # N per unit command; F = clamp(esc_cmd, -1, 1) * thrust_per_cmd
-  # id -> reference name mapping (sinsei_umiusi controllers.yaml): 1=lf 2=lb 3=rb 4=rf (ASSUMED, verify).
-  # neutral_deg is the mounting yaw about +Y (sets the horizontal outward direction, 45 deg
-  # diagonal from pivot->thruster-origin); the servo then tilts thrust up/down about local Z.
-  # Pivots are in the base_link frame: placement.txt gives joints in the assembly-global frame
-  # (thruster1 x=187.223 mm, etc.) and base_link's origin is at (210, 0, 0) mm there, so
-  # x_base = x_global - 0.210 m. (The y/z offsets of base_link's origin are zero.)
+  # Per-unit: pivot = measured servo joint (base_link frame; from CAD placement.txt), and
+  # thrust_axis = the NEUTRAL (servo=0) thrust direction = horizontal tangential (perp to the arm),
+  # expressed in the thruster body frame (= base frame at servo=0). The MJCF hinge axis (= arm) is
+  # authoritative for how the servo rotates this. id -> name: 1=lf 2=lb 3=rb 4=rf (ASSUMED, verify).
   units:
-    - {id: 1, pivot: [-0.022777, 0.09815, -0.187224], neutral_deg:  -45.0}
-    - {id: 2, pivot: [-0.397223, 0.09815, -0.187224], neutral_deg: -135.0}
-    - {id: 3, pivot: [-0.022777, 0.09815,  0.187224], neutral_deg:   45.0}
-    - {id: 4, pivot: [-0.397223, 0.09815,  0.187224], neutral_deg:  135.0}
+    - {id: 1, pivot: [-0.022777, 0.09815, -0.187224], thrust_axis: [ 0.7081, 0.0,  0.7061]}
+    - {id: 2, pivot: [-0.397223, 0.09815, -0.187224], thrust_axis: [ 0.7081, 0.0, -0.7061]}
+    - {id: 3, pivot: [-0.022777, 0.09815,  0.187224], thrust_axis: [-0.7081, 0.0,  0.7061]}
+    - {id: 4, pivot: [-0.397223, 0.09815,  0.187224], thrust_axis: [-0.7081, 0.0, -0.7061]}
