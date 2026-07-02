@@ -31,3 +31,7 @@ venv/
 .idea/
 *.swp
 .DS_Store
+
+# --- RL run outputs at repo root (videos, logs, run dirs) ---
+*.mp4
+*.log
