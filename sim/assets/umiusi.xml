@@ -82,28 +82,28 @@
       <body name="thruster_1" pos="-0.02278 0.09815 -0.18722">
         <joint name="servo_1" type="hinge" axis="-0.70110 -0.11891 0.70308" range="-90 90"/>
         <geom name="t1_arm" type="cylinder" fromto="0 0 0  0.10436 0.01770 -0.10465" size="0.038" mass="0.13"/>
-        <geom name="t1_duct" type="cylinder" fromto="0.06895 0.01770 -0.13996  0.13976 0.01770 -0.06935" size="0.09" mass="0.5"/>
+        <geom name="t1_duct" type="cylinder" fromto="0.04488 0.01770 -0.16397  0.16384 0.01770 -0.04534" size="0.049" mass="0.5"/>
         <site name="t1_thrust" pos="0.10436 0.01770 -0.10465" size="0.012" rgba="1 0 0 1"/>
       </body>
 
       <body name="thruster_2" pos="-0.39722 0.09815 -0.18722">
         <joint name="servo_2" type="hinge" axis="0.70110 -0.11891 0.70308" range="-90 90"/>
         <geom name="t2_arm" type="cylinder" fromto="0 0 0  -0.10436 0.01770 -0.10465" size="0.038" mass="0.13"/>
-        <geom name="t2_duct" type="cylinder" fromto="-0.13976 0.01770 -0.06935  -0.06895 0.01770 -0.13996" size="0.09" mass="0.5"/>
+        <geom name="t2_duct" type="cylinder" fromto="-0.16384 0.01770 -0.04534  -0.04488 0.01770 -0.16397" size="0.049" mass="0.5"/>
         <site name="t2_thrust" pos="-0.10436 0.01770 -0.10465" size="0.012" rgba="1 0 0 1"/>
       </body>
 
       <body name="thruster_3" pos="-0.02278 0.09815 0.18722">
         <joint name="servo_3" type="hinge" axis="-0.70110 -0.11891 -0.70308" range="-90 90"/>
         <geom name="t3_arm" type="cylinder" fromto="0 0 0  0.10436 0.01770 0.10465" size="0.038" mass="0.13"/>
-        <geom name="t3_duct" type="cylinder" fromto="0.13976 0.01770 0.06935  0.06895 0.01770 0.13996" size="0.09" mass="0.5"/>
+        <geom name="t3_duct" type="cylinder" fromto="0.16384 0.01770 0.04534  0.04488 0.01770 0.16397" size="0.049" mass="0.5"/>
         <site name="t3_thrust" pos="0.10436 0.01770 0.10465" size="0.012" rgba="1 0 0 1"/>
       </body>
 
       <body name="thruster_4" pos="-0.39722 0.09815 0.18722">
         <joint name="servo_4" type="hinge" axis="0.70110 -0.11891 -0.70308" range="-90 90"/>
         <geom name="t4_arm" type="cylinder" fromto="0 0 0  -0.10436 0.01770 0.10465" size="0.038" mass="0.13"/>
-        <geom name="t4_duct" type="cylinder" fromto="-0.06895 0.01770 0.13996  -0.13976 0.01770 0.06935" size="0.09" mass="0.5"/>
+        <geom name="t4_duct" type="cylinder" fromto="-0.04488 0.01770 0.16397  -0.16384 0.01770 0.04534" size="0.049" mass="0.5"/>
         <site name="t4_thrust" pos="-0.10436 0.01770 0.10465" size="0.012" rgba="1 0 0 1"/>
       </body>
     </body>
