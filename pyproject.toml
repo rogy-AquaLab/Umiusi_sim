@@ -15,7 +15,7 @@ dependencies = [
 dev = ["fast-simplification", "imageio[ffmpeg]", "tensorboard"]
 
 [tool.setuptools]
-packages = ["sim", "sim.physics", "tools"]
+packages = ["sim", "sim.physics", "tools", "rl", "rl.envs"]
 
 [tool.ruff]
 line-length = 119

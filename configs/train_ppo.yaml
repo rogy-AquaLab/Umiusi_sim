@@ -1,0 +1,53 @@
+# Training / RL config for UmiusiPoseEnv (go-to-pose + station-keeping).
+# Task: reach and hold a target pose. Target POSITION is randomized each episode;
+# target ORIENTATION is upright (the +Y-up model's identity orientation).
+# Consumed by rl/train.py (PPO default; --algo sac/td3 to switch). Sim params: configs/umiusi.yaml.
+
+sim_config: configs/umiusi.yaml   # physical model params (resolved relative to repo root)
+
+env:
+  horizon: 600                    # control steps per episode (12 s at 50 Hz)
+  target_box: [0.75, 0.50, 0.75]  # target sampled uniformly in +/- these [m] around the origin (x, y, z)
+  workspace_bounds: [2.0, 1.5, 2.0]  # episode ends (out-of-bounds) if |pos| exceeds these [m]
+  start_jitter: 0.10              # start position uniformly jittered by +/- this [m] (0 = always origin)
+  pos_tol: 0.15                   # within this position error [m] AND ori_tol -> goal bonus / success
+  ori_tol: 0.20                   # orientation error tolerance [rad]
+  near_goal_dist: 0.50            # velocity is penalized only within this distance of the goal [m]
+
+reward:
+  w_pos: 1.0                      # -w_pos * ||position_error||
+  w_ori: 0.5                      # -w_ori * orientation_error (rotation-vector norm)
+  w_vel: 0.10                     # -w_vel * ||velocity|| near the goal (encourages holding)
+  w_effort: 0.02                  # -w_effort * ||esc_command||
+  w_action_rate: 0.02             # -w_action_rate * ||action - prev_action|| (smoothness)
+  goal_bonus: 10.0                # +goal_bonus per step while within tolerance
+  out_of_bounds_penalty: 50.0     # one-time penalty when leaving the workspace
+
+# Domain randomization for sim-to-real robustness. DEFAULT OFF (all fracs used only if enabled).
+# Applied at each reset as a multiplicative/additive perturbation around the config values.
+domain_rand:
+  enabled: false
+  buoyancy_frac: 0.10             # displaced_volume *= 1 + U(-frac, frac)
+  thrust_frac: 0.10               # thrust_per_cmd  *= 1 + U(-frac, frac)
+  drag_frac: 0.20                 # linear & quadratic drag *= 1 + U(-frac, frac)
+  obs_noise: 0.0                  # gaussian obs noise std (in obs units)
+
+# --- Algorithm ---------------------------------------------------------------
+algo: ppo                         # ppo (default) | sac | td3  (override with --algo)
+n_envs: 8                         # parallel environments (CPU vectorization)
+total_timesteps: 300000           # override with --timesteps
+seed: 0
+
+policy:
+  net_arch: [256, 256]            # MLP hidden sizes for actor/critic
+
+# PPO hyperparameters (used when algo == ppo). SAC/TD3 fall back to SB3 defaults + net_arch.
+ppo:
+  n_steps: 2048                   # rollout length per env
+  batch_size: 512
+  n_epochs: 10
+  gamma: 0.99
+  gae_lambda: 0.95
+  ent_coef: 0.0
+  learning_rate: 0.0003
+  clip_range: 0.2

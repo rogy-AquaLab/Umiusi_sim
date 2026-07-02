@@ -23,7 +23,7 @@ Design docs: [`ai/project_spec.yaml`](ai/project_spec.yaml) and [`ai/architectur
 | 0 | Project spec, architecture, ROS metapackage | ✅ done |
 | 1 | `sim/` — MJCF model + analytical physics + simulator API | ✅ done |
 | 2 | `tools/validate_sim.py` — simulator validation (gate before RL) | ✅ done |
-| 3 | `rl/` — Gymnasium env + PPO training + eval | ⏳ next |
+| 3 | `rl/` — Gymnasium env + PPO training + eval | 🟡 scaffold done (env/train/eval, smoke-tested); real training pending |
 | 4 | `ros2_ws/` — ROS 2 policy bridge (optional) | ⬜ planned |
 
 ---
@@ -37,7 +37,10 @@ mujoco_ws/                # workspace container (NOT version-controlled)
       assets/umiusi.xml     #   MJCF model: free base + 4 azimuth servos + 4 thrust sites
       physics/              #   analytical hydrodynamics + thruster model
       simulator.py          #   UmiusiSimulator: reset() / step(action) / get_state()
-    configs/umiusi.yaml     # all physical parameters (mass, drag, thrust, servo, buoyancy)
+    rl/                     # gymnasium env + training + eval (algorithm-agnostic)
+      envs/umiusi_pose_env.py #   UmiusiPoseEnv: go-to-pose / station-keeping
+      train.py  eval.py     #   PPO default (--algo sac/td3); models/ is gitignored
+    configs/                # umiusi.yaml (physics) + train_ppo.yaml (env/reward/algo)
     tools/                  # view (GUI), snapshot, mesh decimation
     media/                  # rendered placement screenshots
     umiusi_model/           # measured CAD data (STL + mass/placement notes)
@@ -105,6 +108,27 @@ python -m tools.validate_sim -v     # also print per-thruster detail + calibrati
 Checks buoyancy float/sink, self-leveling, drag opposing velocity, per-thruster thrust direction,
 servo tracking + tilt, and open-loop stability. The `-v` calibration section reports the numbers to
 tune the `PLACEHOLDER` values (buoyancy `displaced_volume`, drag, thrust map). Runs headless.
+
+### Train / evaluate a policy (RL)
+
+The task is **go-to-pose / station-keeping**: reach and hold a target pose. The target position is
+randomized each episode; the target orientation is upright. Training is CPU-only and scales with the
+number of parallel environments (not a GPU — the MuJoCo sim is the bottleneck and runs on CPU).
+
+```bash
+python -m rl.train                                  # PPO (config: configs/train_ppo.yaml)
+python -m rl.train --n-envs 12 --run-name ppo_v1    # more parallel envs, named run
+python -m rl.train --algo sac --timesteps 200000    # switch algorithm
+
+tensorboard --logdir models/ppo/tb                  # watch training curves
+
+python -m rl.eval --model models/ppo/final.zip              # headless metrics
+python -m rl.eval --model models/ppo/final.zip --render     # watch in the GUI viewer
+```
+
+Reward weights, target/workspace box, episode horizon, tolerances, domain-randomization hooks
+(default off), and the algorithm hyperparameters all live in [`configs/train_ppo.yaml`](configs/train_ppo.yaml).
+Checkpoints, tensorboard logs, and the final policy go to the gitignored `models/<run-name>/`.
 
 ### Drive the simulator from Python
 
