@@ -35,9 +35,11 @@ reward:
   w_vel: 0.10                     # -w_vel * ||linear velocity|| near the goal (pose, holding)
   w_angvel: 0.05                  # -w_angvel * ||angular velocity||       (attitude tasks, hold still)
   w_depth: 2.0                    # -w_depth * |depth error|              (attitude_depth)
-  w_effort: 0.02                  # -w_effort * ||esc_command||
-  w_action_rate: 0.05             # -w_action_rate * ||action - prev_action|| (command smoothness)
-  w_servo_rate: 0.50              # -w_servo_rate * ||servo_angle - prev|| (damp servo chatter/vibration)
+  # --- economy / smoothness (minimize thrust, servo vibration, thrust changes) ---
+  w_effort: 0.05                  # -w_effort * ||esc_command||            (thrust magnitude)
+  w_servo_rate: 0.60              # -w_servo_rate * ||servo_angle - prev|| (servo vibration)
+  w_thrust_rate: 0.30             # -w_thrust_rate * ||esc - prev_esc||    (thrust change)
+  w_action_rate: 0.02             # -w_action_rate * ||action - prev_action|| (mild overall smoothness)
   # Dense "closeness" bonuses: + w_*_bonus * exp(-(err / *_scale)^2)  (smooth pull to the goal)
   w_ori_bonus: 3.0
   ori_scale: 0.35                 # rad

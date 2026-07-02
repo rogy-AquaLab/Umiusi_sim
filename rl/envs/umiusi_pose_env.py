@@ -221,9 +221,10 @@ class UmiusiPoseEnv(gym.Env):
         depth_err = float(self.target_pos[1] - state["pos"][1])
         speed = float(np.linalg.norm(state["lin_vel"]))
         ang_speed = float(np.linalg.norm(state["ang_vel"]))
-        effort = float(np.linalg.norm(action[4:8]))
+        effort = float(np.linalg.norm(action[4:8]))              # thrust magnitude
         action_rate = float(np.linalg.norm(action - self.prev_action))
-        servo_rate = float(np.linalg.norm(state["servo"] - self.prev_servo))  # actual servo motion
+        servo_rate = float(np.linalg.norm(state["servo"] - self.prev_servo))       # actual servo motion
+        thrust_rate = float(np.linalg.norm(action[4:8] - self.prev_action[4:8]))   # thrust command change
         rw = self.rw
 
         # Penalty terms give a gradient everywhere; dense exp() "closeness" bonuses add a smooth
@@ -232,7 +233,8 @@ class UmiusiPoseEnv(gym.Env):
             return float(np.exp(-((err / scale) ** 2)))
 
         reward = -rw["w_effort"] * effort - rw["w_action_rate"] * action_rate
-        reward -= rw.get("w_servo_rate", 0.0) * servo_rate  # penalize servo chatter (smooth steering)
+        reward -= rw.get("w_servo_rate", 0.0) * servo_rate      # penalize servo chatter (smooth steering)
+        reward -= rw.get("w_thrust_rate", 0.0) * thrust_rate    # penalize thrust command changes
         reward -= rw["w_ori"] * ori_err
         reward += rw.get("w_ori_bonus", 0.0) * prox(ori_err, rw.get("ori_scale", 0.35))
         if self.track_position:
