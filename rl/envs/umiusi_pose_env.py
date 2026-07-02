@@ -12,10 +12,10 @@ sensor set simply leaves part of the task unobservable:
                             AHRS + pressure/depth sensor.               obs_mode "imu_depth".
     task = "pose"           go-to-pose: random target POSITION (upright orientation).
                             Needs velocity (DVL) + a position reference. obs_mode "full".
-    task = "attitude_velocity"  hold a random target orientation (feedback) AND cruise at a random
-                            commanded world velocity. obs adds measured velocity (DVL feedback) +
-                            the 3-D velocity command (feedforward) — closing the velocity loop, since
-                            pure feedforward cannot achieve a velocity. obs_mode "imu".
+    task = "attitude_velocity"  hold an upright + random-yaw orientation (feedback) AND cruise at a
+                            random commanded horizontal velocity (feedforward: obs adds the 3-D
+                            velocity command, NOT measured velocity — the deterministic sim makes the
+                            v_cmd->thrust map static, so no DVL is needed). obs_mode "imu".
 
 Observation = exteroceptive (sensor-suite dependent) ++ proprioception (ALWAYS):
     proprioception: servo/range (4) + thrust/thrust_per_cmd (4) + previous action (8) = 16
@@ -111,8 +111,8 @@ class UmiusiPoseEnv(gym.Env):
             "drag_quad": self.sim.drag_quad.copy(),
         }
 
-        # attitude_velocity adds measured velocity (DVL, 3) + velocity command (3) = 6.
-        obs_dim = _EXTERO_DIM[self.obs_mode] + PROPRIO_DIM + (6 if self.task == "attitude_velocity" else 0)
+        # attitude_velocity adds the feedforward velocity command (3), no measured velocity (no DVL).
+        obs_dim = _EXTERO_DIM[self.obs_mode] + PROPRIO_DIM + (3 if self.task == "attitude_velocity" else 0)
         self.action_space = spaces.Box(-1.0, 1.0, shape=(ACT_DIM,), dtype=np.float32)
         self.observation_space = spaces.Box(-np.inf, np.inf, shape=(obs_dim,), dtype=np.float32)
 
@@ -134,10 +134,11 @@ class UmiusiPoseEnv(gym.Env):
         self.step_count = 0
 
     # -- target sampling -------------------------------------------------------
-    def _sample_target_quat(self):
+    def _sample_target_quat(self, tilt_deg=None):
         """Random target orientation: yaw about +Y plus a bounded tilt about a random horizontal axis."""
+        tilt_deg = self.tilt_target_deg if tilt_deg is None else tilt_deg
         yaw = np.radians(self.np_random.uniform(-self.yaw_target_deg, self.yaw_target_deg))
-        tilt = np.radians(self.np_random.uniform(0.0, self.tilt_target_deg))
+        tilt = np.radians(self.np_random.uniform(0.0, tilt_deg))
         phi = self.np_random.uniform(0.0, 2.0 * np.pi)
         tilt_axis = np.array([np.cos(phi), 0.0, np.sin(phi)])
         q_yaw, q_tilt, q = np.zeros(4), np.zeros(4), np.zeros(4)
@@ -196,8 +197,8 @@ class UmiusiPoseEnv(gym.Env):
         else:  # imu_depth_dvl: adds body-frame velocity (DVL) for drift rejection
             extero = [ori_err, w_body, np.array([self.target_pos[1] - state["pos"][1]]), R.T @ state["lin_vel"]]
 
-        if self.track_velocity:  # measured world velocity (DVL feedback) + velocity command (feedforward)
-            extero = extero + [state["lin_vel"], self.v_cmd]
+        if self.track_velocity:  # feedforward velocity command only (no measured velocity / DVL)
+            extero = extero + [self.v_cmd]
         obs = np.concatenate(extero + [servo_n, thrust_n, self.prev_action])
         if self.dr.get("enabled", False) and self.dr.get("obs_noise", 0.0) > 0.0:
             obs = obs + self.np_random.normal(0.0, self.dr["obs_noise"], size=obs.shape)
@@ -213,7 +214,8 @@ class UmiusiPoseEnv(gym.Env):
             self.target_pos = self.np_random.uniform(-self.target_box, self.target_box)
             self.target_quat = np.array([1.0, 0.0, 0.0, 0.0])  # upright
         else:
-            self.target_quat = self._sample_target_quat()
+            # attitude_velocity: hold UPRIGHT + random yaw (tilt=0); other attitude tasks use the config tilt.
+            self.target_quat = self._sample_target_quat(0.0 if self.track_velocity else self.tilt_target_deg)
             depth = self.np_random.uniform(-self.depth_target_range, self.depth_target_range)
             self.target_pos = np.array([start[0], depth if self.track_depth else start[1], start[2]])
         if self.track_velocity:  # feedforward: a random world-frame velocity command to hold
