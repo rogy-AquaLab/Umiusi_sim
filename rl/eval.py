@@ -84,7 +84,7 @@ def main():
             ep_ret += reward
             steps += 1
             in_tol += int(info.get("is_success", False))
-            esc, servo = info["esc_cmd"], info["servo"]
+            esc, servo = info["esc_applied"], info["servo"]  # slew-limited actual thrust
             thrust_sum += float(np.mean(np.abs(esc)))
             if prev_esc is not None:
                 thrust_chg_sum += float(np.mean(np.abs(esc - prev_esc)))
