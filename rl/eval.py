@@ -40,6 +40,8 @@ def main():
     config = args.config or meta.get("config", "configs/train_ppo.yaml")
 
     cfg = load_config(config)
+    if "obs_mode" in meta:  # match the sensor suite the policy was trained with
+        cfg["env"]["obs_mode"] = meta["obs_mode"]
     env = UmiusiPoseEnv(cfg, render_mode="human" if args.render else None)
     control_dt = 1.0 / env.sim.cfg["sim"]["control_rate_hz"]
     model = ALGOS[algo].load(str(model_path), device="cpu")

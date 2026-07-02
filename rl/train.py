@@ -45,6 +45,8 @@ def main():
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     ap.add_argument("--config", default="configs/train_ppo.yaml")
     ap.add_argument("--algo", choices=list(ALGOS), default=None, help="override config algo")
+    ap.add_argument("--obs-mode", choices=["full", "imu", "imu_depth"], default=None,
+                    help="override sensor suite (env.obs_mode)")
     ap.add_argument("--timesteps", type=int, default=None, help="override total_timesteps")
     ap.add_argument("--n-envs", type=int, default=None, help="override number of parallel envs")
     ap.add_argument("--seed", type=int, default=None)
@@ -53,6 +55,9 @@ def main():
     args = ap.parse_args()
 
     cfg = load_config(args.config)
+    if args.obs_mode:
+        cfg["env"]["obs_mode"] = args.obs_mode
+    obs_mode = cfg["env"].get("obs_mode", "full")
     algo = args.algo or cfg.get("algo", "ppo")
     total_timesteps = args.timesteps or cfg["total_timesteps"]
     n_envs = args.n_envs or cfg["n_envs"]
@@ -73,12 +78,13 @@ def main():
     ckpt = CheckpointCallback(save_freq=save_freq, save_path=str(run_dir / "checkpoints"),
                               name_prefix=algo)
 
-    print(f"[train] algo={algo} n_envs={n_envs} timesteps={total_timesteps} seed={seed} -> {run_dir}")
+    print(f"[train] algo={algo} obs_mode={obs_mode} n_envs={n_envs} "
+          f"timesteps={total_timesteps} seed={seed} -> {run_dir}")
     model.learn(total_timesteps=total_timesteps, callback=ckpt)
 
     model.save(str(run_dir / "final"))
     with open(run_dir / "meta.yaml", "w") as f:
-        yaml.safe_dump({"algo": algo, "config": args.config, "seed": seed,
+        yaml.safe_dump({"algo": algo, "obs_mode": obs_mode, "config": args.config, "seed": seed,
                         "total_timesteps": total_timesteps}, f)
     venv.close()
     print(f"[train] done. policy -> {run_dir / 'final.zip'}")

@@ -6,6 +6,11 @@
 sim_config: configs/umiusi.yaml   # physical model params (resolved relative to repo root)
 
 env:
+  # Sensor suite for the observation (reward/success always use the true pose):
+  #   full       privileged / full-state (position + attitude + full twist)   [28-D]
+  #   imu        IMU only: attitude + gyro (NO position/depth -> horizontal drifts)  [22-D]
+  #   imu_depth  IMU + depth: adds vertical (depth) position only              [23-D]
+  obs_mode: full                  # override per run with `--obs-mode`
   horizon: 600                    # control steps per episode (12 s at 50 Hz)
   target_box: [0.75, 0.50, 0.75]  # target sampled uniformly in +/- these [m] around the origin (x, y, z)
   workspace_bounds: [2.0, 1.5, 2.0]  # episode ends (out-of-bounds) if |pos| exceeds these [m]

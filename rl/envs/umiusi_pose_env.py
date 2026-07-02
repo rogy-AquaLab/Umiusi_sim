@@ -6,16 +6,28 @@ standalone UmiusiSimulator. The agent commands the 8-D per-thruster action
 POSITION is randomized each episode; the target ORIENTATION is upright (the +Y-up
 model's identity orientation).
 
-Observation (28-D, float32):
-    position error to target, body frame   (3)
-    orientation error to target (rot-vec)  (3)
-    body linear velocity                   (3)
-    body angular velocity                  (3)
-    servo angles / servo range             (4)
-    thrust estimate / thrust_per_cmd       (4)
-    previous action                        (8)
+Observation is sensor-suite selectable via ``env.obs_mode`` (the reward/success are always
+computed from the true pose, so limited sensors just make part of the task unobservable):
 
-See ai/project_spec.yaml (rl section) and ai/architecture.md (section 7).
+    proprioception (ALWAYS): servo/range (4) + thrust/thrust_per_cmd (4) + previous action (8)
+
+    obs_mode = "full"        privileged / full-state (default):
+        + position error to target, body frame  (3)
+        + orientation error to upright (rot-vec) (3)
+        + body linear velocity                   (3)
+        + body angular velocity                  (3)                        -> 28-D
+    obs_mode = "imu"         IMU only (attitude + gyro; NO position/depth):
+        + orientation error to upright (rot-vec) (3)
+        + body angular velocity                  (3)                        -> 22-D
+    obs_mode = "imu_depth"   IMU + depth (adds vertical/depth position only):
+        + orientation error to upright (rot-vec) (3)
+        + body angular velocity                  (3)
+        + vertical (depth) position error        (1)                        -> 23-D
+
+Note: with "imu"/"imu_depth" the horizontal position (X, Z) is NOT observable (no GPS
+underwater), so pure station-keeping in the horizontal plane is not achievable from sensors
+alone — the vehicle can hold attitude (imu) and attitude + depth (imu_depth) but drifts
+horizontally. See ai/project_spec.yaml (rl section) and ai/architecture.md (section 7).
 """
 
 from pathlib import Path
@@ -31,8 +43,10 @@ from sim.simulator import UmiusiSimulator
 _ROOT = Path(__file__).resolve().parents[2]
 _IDENTITY_QUAT = np.array([1.0, 0.0, 0.0, 0.0])
 
-OBS_DIM = 28  # 3 pos_err + 3 ori_err + 3 lin_vel + 3 ang_vel + 4 servo + 4 thrust + 8 prev_action
 ACT_DIM = 8
+PROPRIO_DIM = 16  # servo(4) + thrust(4) + prev_action(8), always present
+# Exteroceptive (navigation-sensor) dimensions per observation mode.
+_EXTERO_DIM = {"full": 12, "imu": 6, "imu_depth": 7}
 
 
 def load_config(path):
@@ -67,6 +81,9 @@ class UmiusiPoseEnv(gym.Env):
         self.near_goal_dist = float(e["near_goal_dist"])
         self.rw = cfg["reward"]
         self.dr = cfg.get("domain_rand", {"enabled": False})
+        self.obs_mode = e.get("obs_mode", "full")
+        if self.obs_mode not in _EXTERO_DIM:
+            raise ValueError(f"unknown obs_mode {self.obs_mode!r}; expected one of {list(_EXTERO_DIM)}")
 
         # Base physical values, kept so domain randomization perturbs around them each reset.
         self._base = {
@@ -76,8 +93,9 @@ class UmiusiPoseEnv(gym.Env):
             "drag_quad": self.sim.drag_quad.copy(),
         }
 
+        obs_dim = _EXTERO_DIM[self.obs_mode] + PROPRIO_DIM
         self.action_space = spaces.Box(-1.0, 1.0, shape=(ACT_DIM,), dtype=np.float32)
-        self.observation_space = spaces.Box(-np.inf, np.inf, shape=(OBS_DIM,), dtype=np.float32)
+        self.observation_space = spaces.Box(-np.inf, np.inf, shape=(obs_dim,), dtype=np.float32)
 
         self.render_mode = render_mode
         self._viewer = None
@@ -108,15 +126,24 @@ class UmiusiPoseEnv(gym.Env):
         mujoco.mju_quat2Mat(R, state["quat"])
         R = R.reshape(3, 3)
 
-        pos_err_body = R.T @ (self.target_pos - state["pos"])
         ori_err = np.zeros(3)
-        mujoco.mju_subQuat(ori_err, _IDENTITY_QUAT, state["quat"])  # rot-vec from current to upright
-        v_body = R.T @ state["lin_vel"]
-        w_body = R.T @ state["ang_vel"]
+        mujoco.mju_subQuat(ori_err, _IDENTITY_QUAT, state["quat"])  # rot-vec from current to upright (IMU)
+        w_body = R.T @ state["ang_vel"]  # gyro
         servo_n = state["servo"] / self.sim.servo_range_rad
         thrust_n = state["thrust"] / max(self.sim.thrust_per_cmd, 1e-9)
 
-        obs = np.concatenate([pos_err_body, ori_err, v_body, w_body, servo_n, thrust_n, self.prev_action])
+        # Exteroceptive part depends on the sensor suite (obs_mode).
+        if self.obs_mode == "full":
+            pos_err_body = R.T @ (self.target_pos - state["pos"])
+            v_body = R.T @ state["lin_vel"]
+            extero = [pos_err_body, ori_err, v_body, w_body]
+        elif self.obs_mode == "imu":
+            extero = [ori_err, w_body]
+        else:  # imu_depth: IMU + a scalar depth (vertical) position error
+            depth_err = np.array([self.target_pos[1] - state["pos"][1]])
+            extero = [ori_err, w_body, depth_err]
+
+        obs = np.concatenate(extero + [servo_n, thrust_n, self.prev_action])
         if self.dr.get("enabled", False) and self.dr.get("obs_noise", 0.0) > 0.0:
             obs = obs + self.np_random.normal(0.0, self.dr["obs_noise"], size=obs.shape)
         return obs.astype(np.float32)
