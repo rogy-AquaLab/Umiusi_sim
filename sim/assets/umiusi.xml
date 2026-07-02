@@ -33,10 +33,10 @@
 
   <asset>
     <!-- Octagonal-prism hull: an 8-sided octagon in the X-Z plane extruded along Y (height),
-         16 vertices; MuJoCo builds the convex hull. The vertices span the full vehicle bbox
-         (0.70196 x 0.220 x 0.52998 m); `scale` shrinks it toward its center to a central-body
-         size so the measured-position thrusters protrude instead of being swallowed (visual only). -->
-    <mesh name="hull_prism" scale="0.85 1.0 0.60"
+         16 vertices; MuJoCo builds the convex hull. Vertices span the full measured hull bbox
+         (0.70196 x 0.220 x 0.52998 m, from CAD). The thrusters now reach out on arms, so the hull
+         is drawn at true size (no shrink). Visual only; dynamics use the measured inertial. -->
+    <mesh name="hull_prism"
           vertex="0.32426 0.11000 0.10141 0.32426 -0.11000 0.10141 0.13431 0.11000 0.24482
                   0.13431 -0.11000 0.24482 -0.13431 0.11000 0.24482 -0.13431 -0.11000 0.24482
                   -0.32426 0.11000 0.10141 -0.32426 -0.11000 0.10141 -0.32426 0.11000 -0.10141
@@ -81,29 +81,29 @@
            arm/thrust vectors derived from CAD. Geom mass ~0.63 kg/unit; MuJoCo derives inertia. -->
       <body name="thruster_1" pos="-0.02278 0.09815 -0.18722">
         <joint name="servo_1" type="hinge" axis="-0.70110 -0.11891 0.70308" range="-90 90"/>
-        <geom name="t1_arm" type="cylinder" fromto="0 0 0  0.10436 0.01770 -0.10465" size="0.018" mass="0.13"/>
-        <geom name="t1_duct" type="cylinder" fromto="0.07780 0.01770 -0.13113  0.13091 0.01770 -0.07817" size="0.055" mass="0.5"/>
+        <geom name="t1_arm" type="cylinder" fromto="0 0 0  0.10436 0.01770 -0.10465" size="0.038" mass="0.13"/>
+        <geom name="t1_duct" type="cylinder" fromto="0.06895 0.01770 -0.13996  0.13976 0.01770 -0.06935" size="0.09" mass="0.5"/>
         <site name="t1_thrust" pos="0.10436 0.01770 -0.10465" size="0.012" rgba="1 0 0 1"/>
       </body>
 
       <body name="thruster_2" pos="-0.39722 0.09815 -0.18722">
         <joint name="servo_2" type="hinge" axis="0.70110 -0.11891 0.70308" range="-90 90"/>
-        <geom name="t2_arm" type="cylinder" fromto="0 0 0  -0.10436 0.01770 -0.10465" size="0.018" mass="0.13"/>
-        <geom name="t2_duct" type="cylinder" fromto="-0.13091 0.01770 -0.07817  -0.07780 0.01770 -0.13113" size="0.055" mass="0.5"/>
+        <geom name="t2_arm" type="cylinder" fromto="0 0 0  -0.10436 0.01770 -0.10465" size="0.038" mass="0.13"/>
+        <geom name="t2_duct" type="cylinder" fromto="-0.13976 0.01770 -0.06935  -0.06895 0.01770 -0.13996" size="0.09" mass="0.5"/>
         <site name="t2_thrust" pos="-0.10436 0.01770 -0.10465" size="0.012" rgba="1 0 0 1"/>
       </body>
 
       <body name="thruster_3" pos="-0.02278 0.09815 0.18722">
         <joint name="servo_3" type="hinge" axis="-0.70110 -0.11891 -0.70308" range="-90 90"/>
-        <geom name="t3_arm" type="cylinder" fromto="0 0 0  0.10436 0.01770 0.10465" size="0.018" mass="0.13"/>
-        <geom name="t3_duct" type="cylinder" fromto="0.13091 0.01770 0.07817  0.07780 0.01770 0.13113" size="0.055" mass="0.5"/>
+        <geom name="t3_arm" type="cylinder" fromto="0 0 0  0.10436 0.01770 0.10465" size="0.038" mass="0.13"/>
+        <geom name="t3_duct" type="cylinder" fromto="0.13976 0.01770 0.06935  0.06895 0.01770 0.13996" size="0.09" mass="0.5"/>
         <site name="t3_thrust" pos="0.10436 0.01770 0.10465" size="0.012" rgba="1 0 0 1"/>
       </body>
 
       <body name="thruster_4" pos="-0.39722 0.09815 0.18722">
         <joint name="servo_4" type="hinge" axis="0.70110 -0.11891 -0.70308" range="-90 90"/>
-        <geom name="t4_arm" type="cylinder" fromto="0 0 0  -0.10436 0.01770 0.10465" size="0.018" mass="0.13"/>
-        <geom name="t4_duct" type="cylinder" fromto="-0.07780 0.01770 0.13113  -0.13091 0.01770 0.07817" size="0.055" mass="0.5"/>
+        <geom name="t4_arm" type="cylinder" fromto="0 0 0  -0.10436 0.01770 0.10465" size="0.038" mass="0.13"/>
+        <geom name="t4_duct" type="cylinder" fromto="-0.06895 0.01770 0.13996  -0.13976 0.01770 0.06935" size="0.09" mass="0.5"/>
         <site name="t4_thrust" pos="-0.10436 0.01770 0.10465" size="0.012" rgba="1 0 0 1"/>
       </body>
     </body>
