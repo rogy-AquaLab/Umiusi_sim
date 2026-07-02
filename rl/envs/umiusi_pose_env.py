@@ -267,7 +267,9 @@ class UmiusiPoseEnv(gym.Env):
         reward = -rw["w_effort"] * effort - rw["w_action_rate"] * action_rate
         reward -= rw.get("w_servo_rate", 0.0) * servo_rate      # penalize servo chatter (smooth steering)
         reward -= rw.get("w_thrust_rate", 0.0) * thrust_rate    # penalize thrust command changes
-        if ori_err < self.near_goal_ori:  # near the target: press hard to stop moving (kill limit cycles)
+        # Near the target orientation, press hard to stop moving (kills limit cycles). NOT for the
+        # velocity task, where the vehicle must keep modulating thrust to cruise.
+        if ori_err < self.near_goal_ori and not self.track_velocity:
             reward -= rw.get("w_settle_servo", 0.0) * servo_rate
             reward -= rw.get("w_settle_thrust", 0.0) * thrust_rate
         # Deadband: no orientation reward gradient once inside ori_deadband, so the policy has no
