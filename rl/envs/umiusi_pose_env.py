@@ -94,6 +94,7 @@ class UmiusiPoseEnv(gym.Env):
         self.yaw_target_deg = float(e.get("yaw_target_deg", 180.0))
         self.vel_cmd_max = float(e.get("vel_cmd_max", 0.4))  # max commanded speed [m/s] (attitude_velocity)
         self.vel_cmd_horizontal = bool(e.get("vel_cmd_horizontal", True))  # sample v_cmd in the x-z plane
+        self.vel_cmd_cone_deg = float(e.get("vel_cmd_cone_deg", 180.0))  # v_cmd dir within +/- this of +X (curriculum)
         self.vel_tol = float(e.get("vel_tol", 0.10))         # velocity match tolerance [m/s]
         self.pos_tol = float(e["pos_tol"])
         self.ori_tol = float(e["ori_tol"])
@@ -218,11 +219,10 @@ class UmiusiPoseEnv(gym.Env):
             self.target_quat = self._sample_target_quat(0.0 if self.track_velocity else self.tilt_target_deg)
             depth = self.np_random.uniform(-self.depth_target_range, self.depth_target_range)
             self.target_pos = np.array([start[0], depth if self.track_depth else start[1], start[2]])
-        if self.track_velocity:  # feedforward: a random world-frame velocity command to hold
-            d = self.np_random.normal(size=3)
-            if self.vel_cmd_horizontal:
-                d[1] = 0.0  # horizontal cruise command (x-z plane)
-            self.v_cmd = d / (np.linalg.norm(d) + 1e-9) * self.np_random.uniform(0.0, self.vel_cmd_max)
+        if self.track_velocity:  # feedforward horizontal velocity command within +/- cone of +X
+            ang = np.radians(self.np_random.uniform(-self.vel_cmd_cone_deg, self.vel_cmd_cone_deg))
+            dhat = np.array([np.cos(ang), 0.0, np.sin(ang)])
+            self.v_cmd = dhat * self.np_random.uniform(0.0, self.vel_cmd_max)
 
         state = self.sim.reset(pos=tuple(start), quat=(1.0, 0.0, 0.0, 0.0))
         self.prev_action = np.zeros(ACT_DIM)

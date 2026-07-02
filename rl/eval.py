@@ -43,8 +43,9 @@ def main():
     config = args.config or meta.get("config", "configs/train_ppo.yaml")
 
     cfg = load_config(config)
-    for k in ("task", "obs_mode"):  # match the task + sensor suite the policy was trained with
-        if k in meta:
+    # match the task + sensor suite + curriculum condition the policy was trained with
+    for k in ("task", "obs_mode", "vel_cmd_cone_deg", "yaw_target_deg"):
+        if meta.get(k) is not None:
             cfg["env"][k] = meta[k]
     env = UmiusiPoseEnv(cfg, render_mode="human" if args.render else None)
     control_dt = 1.0 / env.sim.cfg["sim"]["control_rate_hz"]

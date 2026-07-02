@@ -49,6 +49,8 @@ def main():
                     help="override task (attitude | attitude_depth | pose)")
     ap.add_argument("--obs-mode", choices=["auto", "full", "imu", "imu_depth", "imu_depth_dvl"],
                     default=None, help="override sensor suite (env.obs_mode)")
+    ap.add_argument("--vel-cone", type=float, default=None, help="override env.vel_cmd_cone_deg [deg]")
+    ap.add_argument("--yaw-target", type=float, default=None, help="override env.yaw_target_deg [deg]")
     ap.add_argument("--timesteps", type=int, default=None, help="override total_timesteps")
     ap.add_argument("--n-envs", type=int, default=None, help="override number of parallel envs")
     ap.add_argument("--seed", type=int, default=None)
@@ -62,6 +64,10 @@ def main():
     task = cfg["env"].get("task", "pose")
     if args.obs_mode:
         cfg["env"]["obs_mode"] = args.obs_mode
+    if args.vel_cone is not None:
+        cfg["env"]["vel_cmd_cone_deg"] = args.vel_cone
+    if args.yaw_target is not None:
+        cfg["env"]["yaw_target_deg"] = args.yaw_target
     obs_mode = cfg["env"].get("obs_mode", "auto")
     if obs_mode == "auto":
         obs_mode = _DEFAULT_OBS[task]
@@ -97,6 +103,8 @@ def main():
     venv.save(str(run_dir / "vecnormalize.pkl"))  # obs/reward normalization stats for eval
     with open(run_dir / "meta.yaml", "w") as f:
         yaml.safe_dump({"algo": algo, "task": task, "obs_mode": obs_mode, "vecnormalize": True,
+                        "vel_cmd_cone_deg": cfg["env"].get("vel_cmd_cone_deg"),
+                        "yaw_target_deg": cfg["env"].get("yaw_target_deg"),
                         "config": args.config, "seed": seed, "total_timesteps": total_timesteps}, f)
     venv.close()
     print(f"[train] done. policy -> {run_dir / 'final.zip'}")

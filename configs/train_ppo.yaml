@@ -25,6 +25,7 @@ env:
   depth_target_range: 0.50        # target depth sampled in +/- this [m] (attitude_depth)
   vel_cmd_max: 0.40               # max commanded world speed [m/s] (attitude_velocity, feedforward)
   vel_cmd_horizontal: true        # sample the velocity command in the x-z plane (horizontal cruise)
+  vel_cmd_cone_deg: 180.0         # v_cmd direction within +/- this of +X (0 = fixed +X; curriculum widens it)
   vel_tol: 0.10                   # velocity match tolerance [m/s] for success
   # tolerances / shaping:
   pos_tol: 0.15                   # position within this [m] for success (pose)
