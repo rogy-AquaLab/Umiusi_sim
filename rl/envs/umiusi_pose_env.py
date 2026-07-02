@@ -130,7 +130,8 @@ class UmiusiPoseEnv(gym.Env):
         self.track_position = self.task == "pose"  # full 3-D position (vertical included)
         self.track_depth = self.task == "attitude_depth"  # depth is a separate objective only here
         self.track_velocity = self.task == "attitude_velocity"  # feedforward velocity command
-        self.v_cmd = np.zeros(3)  # commanded world velocity (attitude_velocity)
+        self.v_cmd = np.zeros(3)        # commanded velocity in the TARGET-BODY frame (obs; yaw-independent)
+        self.v_cmd_world = np.zeros(3)  # same command rotated to world (for the reward/direction)
         self.prev_action = np.zeros(ACT_DIM)
         self.step_count = 0
 
@@ -219,10 +220,13 @@ class UmiusiPoseEnv(gym.Env):
             self.target_quat = self._sample_target_quat(0.0 if self.track_velocity else self.tilt_target_deg)
             depth = self.np_random.uniform(-self.depth_target_range, self.depth_target_range)
             self.target_pos = np.array([start[0], depth if self.track_depth else start[1], start[2]])
-        if self.track_velocity:  # feedforward horizontal velocity command within +/- cone of +X
+        if self.track_velocity:  # body-frame horizontal command within +/- cone of body +X (yaw-independent)
             ang = np.radians(self.np_random.uniform(-self.vel_cmd_cone_deg, self.vel_cmd_cone_deg))
             dhat = np.array([np.cos(ang), 0.0, np.sin(ang)])
             self.v_cmd = dhat * self.np_random.uniform(0.0, self.vel_cmd_max)
+            Rt = np.zeros(9)
+            mujoco.mju_quat2Mat(Rt, self.target_quat)
+            self.v_cmd_world = Rt.reshape(3, 3) @ self.v_cmd  # command expressed in world for the reward
 
         state = self.sim.reset(pos=tuple(start), quat=(1.0, 0.0, 0.0, 0.0))
         self.prev_action = np.zeros(ACT_DIM)
@@ -247,8 +251,8 @@ class UmiusiPoseEnv(gym.Env):
         v_along = v_perp = vcn = 0.0
         if self.track_velocity:
             v = state["lin_vel"]
-            vcn = float(np.linalg.norm(self.v_cmd))
-            dhat = self.v_cmd / vcn if vcn > 1e-6 else np.zeros(3)
+            vcn = float(np.linalg.norm(self.v_cmd_world))  # world-frame command (norm == body command)
+            dhat = self.v_cmd_world / vcn if vcn > 1e-6 else np.zeros(3)
             v_along = float(v @ dhat)
             v_perp = float(np.linalg.norm(v - v_along * dhat)) if vcn > 1e-6 else speed
         vel_err = v_perp  # only the perpendicular drift is a controllable error (magnitude isn't observable)
