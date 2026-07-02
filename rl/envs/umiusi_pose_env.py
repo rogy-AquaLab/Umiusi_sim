@@ -12,9 +12,10 @@ sensor set simply leaves part of the task unobservable:
                             AHRS + pressure/depth sensor.               obs_mode "imu_depth".
     task = "pose"           go-to-pose: random target POSITION (upright orientation).
                             Needs velocity (DVL) + a position reference. obs_mode "full".
-    task = "attitude_velocity"  hold a random target orientation (feedback) AND move at a random
-                            commanded world velocity (feedforward). obs adds the 3-D velocity
-                            command (but NOT measured linear velocity). obs_mode "imu".
+    task = "attitude_velocity"  hold a random target orientation (feedback) AND cruise at a random
+                            commanded world velocity. obs adds measured velocity (DVL feedback) +
+                            the 3-D velocity command (feedforward) — closing the velocity loop, since
+                            pure feedforward cannot achieve a velocity. obs_mode "imu".
 
 Observation = exteroceptive (sensor-suite dependent) ++ proprioception (ALWAYS):
     proprioception: servo/range (4) + thrust/thrust_per_cmd (4) + previous action (8) = 16
@@ -110,7 +111,8 @@ class UmiusiPoseEnv(gym.Env):
             "drag_quad": self.sim.drag_quad.copy(),
         }
 
-        obs_dim = _EXTERO_DIM[self.obs_mode] + PROPRIO_DIM + (3 if self.task == "attitude_velocity" else 0)
+        # attitude_velocity adds measured velocity (DVL, 3) + velocity command (3) = 6.
+        obs_dim = _EXTERO_DIM[self.obs_mode] + PROPRIO_DIM + (6 if self.task == "attitude_velocity" else 0)
         self.action_space = spaces.Box(-1.0, 1.0, shape=(ACT_DIM,), dtype=np.float32)
         self.observation_space = spaces.Box(-np.inf, np.inf, shape=(obs_dim,), dtype=np.float32)
 
@@ -194,8 +196,8 @@ class UmiusiPoseEnv(gym.Env):
         else:  # imu_depth_dvl: adds body-frame velocity (DVL) for drift rejection
             extero = [ori_err, w_body, np.array([self.target_pos[1] - state["pos"][1]]), R.T @ state["lin_vel"]]
 
-        if self.track_velocity:  # feedforward velocity command (no measured linear velocity in obs)
-            extero = extero + [self.v_cmd]
+        if self.track_velocity:  # measured world velocity (DVL feedback) + velocity command (feedforward)
+            extero = extero + [state["lin_vel"], self.v_cmd]
         obs = np.concatenate(extero + [servo_n, thrust_n, self.prev_action])
         if self.dr.get("enabled", False) and self.dr.get("obs_noise", 0.0) > 0.0:
             obs = obs + self.np_random.normal(0.0, self.dr["obs_noise"], size=obs.shape)
