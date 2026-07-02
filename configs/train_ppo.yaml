@@ -58,9 +58,8 @@ reward:
   pos_scale: 0.50                 # m
   w_depth_bonus: 2.0              # attitude_depth
   depth_scale: 0.25               # m
-  w_vel_cmd: 5.0                  # -w_vel_cmd * ||v - v_cmd||  (attitude_velocity)
-  w_vel_bonus: 4.0                # + w_vel_bonus * exp(-(vel_err/vel_scale)^2)
-  vel_scale: 0.20                 # m/s
+  w_vel_dir: 8.0                  # + reward speed ALONG the commanded direction, capped at desired (attitude_velocity)
+  w_vel_perp: 4.0                 # - penalize velocity PERPENDICULAR to the command (sideways drift)
   goal_bonus: 5.0                 # +goal_bonus per step while within tolerance
   out_of_bounds_penalty: 50.0     # one-time penalty when leaving the workspace (pose)
 

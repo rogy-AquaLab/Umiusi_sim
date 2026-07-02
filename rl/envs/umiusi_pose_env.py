@@ -242,7 +242,16 @@ class UmiusiPoseEnv(gym.Env):
         ori_err = float(np.linalg.norm(ori_err_vec))
         depth_err = float(self.target_pos[1] - state["pos"][1])
         speed = float(np.linalg.norm(state["lin_vel"]))
-        vel_err = float(np.linalg.norm(state["lin_vel"] - self.v_cmd)) if self.track_velocity else 0.0
+        # Velocity command is DIRECTION-only controllable without a velocity sensor: split the actual
+        # velocity into the along-command speed and the perpendicular (sideways) drift.
+        v_along = v_perp = vcn = 0.0
+        if self.track_velocity:
+            v = state["lin_vel"]
+            vcn = float(np.linalg.norm(self.v_cmd))
+            dhat = self.v_cmd / vcn if vcn > 1e-6 else np.zeros(3)
+            v_along = float(v @ dhat)
+            v_perp = float(np.linalg.norm(v - v_along * dhat)) if vcn > 1e-6 else speed
+        vel_err = v_perp  # only the perpendicular drift is a controllable error (magnitude isn't observable)
         ang_speed = float(np.linalg.norm(state["ang_vel"]))
         effort = float(np.linalg.norm(action[4:8]))              # thrust magnitude
         action_rate = float(np.linalg.norm(action - self.prev_action))
@@ -276,9 +285,9 @@ class UmiusiPoseEnv(gym.Env):
         if self.track_depth:
             reward -= rw.get("w_depth", 1.0) * abs(depth_err)
             reward += rw.get("w_depth_bonus", 0.0) * prox(abs(depth_err), rw.get("depth_scale", 0.25))
-        if self.track_velocity:  # reward matching the commanded world velocity (feedforward)
-            reward -= rw.get("w_vel_cmd", 2.0) * vel_err
-            reward += rw.get("w_vel_bonus", 0.0) * prox(vel_err, rw.get("vel_scale", 0.20))
+        if self.track_velocity:  # aim propulsion in the commanded DIRECTION (speed is not observable)
+            reward += rw.get("w_vel_dir", 8.0) * min(max(v_along, 0.0), vcn)  # move toward goal, cap at desired
+            reward -= rw.get("w_vel_perp", 4.0) * v_perp                       # no sideways drift
 
         success = ori_err < self.ori_tol
         if self.track_position:
@@ -286,7 +295,10 @@ class UmiusiPoseEnv(gym.Env):
         if self.track_depth:
             success = success and abs(depth_err) < self.depth_tol
         if self.track_velocity:
-            success = success and vel_err < self.vel_tol
+            if vcn > 1e-6:  # moving the right way, up to speed, without sideways drift
+                success = success and v_along > 0.7 * vcn and v_perp < self.vel_tol
+            else:
+                success = success and speed < self.vel_tol  # zero command -> hold still
         if success:
             reward += rw["goal_bonus"]
 
@@ -302,7 +314,9 @@ class UmiusiPoseEnv(gym.Env):
         self._place_marker(state)
         info = self._info(state, pos_err, ori_err, depth_err, success)
         info["out_of_bounds"] = out_of_bounds
-        info["vel_err"] = vel_err                          # ||v - v_cmd|| (attitude_velocity)
+        info["vel_err"] = vel_err                          # perpendicular drift (attitude_velocity)
+        info["vel_along"] = v_along                         # speed along the commanded direction [m/s]
+        info["vel_cmd_speed"] = vcn                         # commanded (desired) speed [m/s]
         info["servo"] = state["servo"].copy()             # actual servo angles (motion diagnostics)
         info["esc_cmd"] = action[4:8].copy()               # raw policy command (thrust use)
         info["esc_applied"] = self.sim.esc_current.copy()  # slew-limited applied esc (true thrust change)

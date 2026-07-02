@@ -71,6 +71,7 @@ def main():
             return o
 
     returns, pos_errs, ori_errs, depth_errs, vel_errs, hold_fracs, successes = [], [], [], [], [], [], []
+    vel_alongs, vel_cmds = [], []
     thrust_uses, servo_motions, thrust_changes = [], [], []
     for ep in range(args.episodes):
         obs, info = env.reset(seed=args.seed + ep)
@@ -102,6 +103,8 @@ def main():
         ori_errs.append(info["ori_err"])
         depth_errs.append(abs(info["depth_err"]))
         vel_errs.append(info.get("vel_err", 0.0))
+        vel_alongs.append(info.get("vel_along", 0.0))
+        vel_cmds.append(info.get("vel_cmd_speed", 0.0))
         hold_fracs.append(in_tol / max(steps, 1))
         successes.append(info.get("is_success", False))
         thrust_uses.append(thrust_sum / max(steps, 1))
@@ -124,7 +127,8 @@ def main():
     print(f"mean final ori err : {np.mean(ori_errs):.3f} rad")
     print(f"mean final pos err : {np.mean(pos_errs):.3f} m")
     print(f"mean final depth err: {np.mean(depth_errs):.3f} m")
-    print(f"mean final vel err : {np.mean(vel_errs):.3f} m/s   (attitude_velocity)")
+    print(f"attitude_velocity  : speed along cmd {np.mean(vel_alongs):.3f} / desired {np.mean(vel_cmds):.3f} m/s"
+          f"   sideways drift {np.mean(vel_errs):.3f} m/s")
     print(f"mean hold fraction : {np.mean(hold_fracs) * 100:.0f}%   (steps within tolerance)")
     print(f"final-step success : {np.mean(successes) * 100:.0f}%")
     print(f"mean thrust use    : {np.mean(thrust_uses):.3f}   (mean |esc|, 0..1 -> minimize)")
