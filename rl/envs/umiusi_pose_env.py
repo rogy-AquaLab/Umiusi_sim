@@ -259,7 +259,8 @@ class UmiusiPoseEnv(gym.Env):
 
             self._viewer = mujoco.viewer.launch_passive(self.sim.model, self.sim.data)
             self._viewer.cam.type = mujoco.mjtCamera.mjCAMERA_FIXED
-            self._viewer.cam.fixedcamid = self.sim.model.camera("iso").id
+            # "track" follows the vehicle so it stays in frame even as it drifts.
+            self._viewer.cam.fixedcamid = self.sim.model.camera("track").id
         self._viewer.sync()
 
     def close(self):

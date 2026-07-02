@@ -131,8 +131,14 @@ python -m rl.train --algo sac --task attitude                                # s
 
 tensorboard --logdir models/att/tb                          # watch training curves
 python -m rl.eval --model models/att/final.zip              # headless metrics (task auto-loaded)
-python -m rl.eval --model models/att/final.zip --render     # watch in the GUI viewer
+python -m rl.eval --model models/att/final.zip --render     # watch live in the GUI viewer (WSLg)
+MUJOCO_GL=egl python -m rl.eval --model models/att/final.zip --record out.mp4   # headless video
 ```
+
+`--render`/`--record` use a **tracking camera** that follows the vehicle, so it stays in frame
+even when it drifts (attitude/attitude_depth tasks don't control horizontal position, so the
+vehicle holds its commanded attitude while floating away — that drift is the expected,
+sensor-limited behavior). `--record` renders offscreen, so run it with `MUJOCO_GL=egl`.
 
 `eval` reads the task + sensor suite from the run's `meta.yaml`, so it always matches training.
 Reward weights, target/workspace ranges, tolerances, domain-randomization hooks (default off), and

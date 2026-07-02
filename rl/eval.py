@@ -31,6 +31,8 @@ def main():
     ap.add_argument("--algo", choices=list(ALGOS), default=None, help="default: from run meta.yaml")
     ap.add_argument("--episodes", type=int, default=5)
     ap.add_argument("--render", action="store_true", help="watch in the MuJoCo GUI viewer")
+    ap.add_argument("--record", default=None,
+                    help="write an mp4 of the rollout (headless; run with MUJOCO_GL=egl)")
     ap.add_argument("--seed", type=int, default=1000)
     args = ap.parse_args()
 
@@ -46,6 +48,12 @@ def main():
             cfg["env"][k] = meta[k]
     env = UmiusiPoseEnv(cfg, render_mode="human" if args.render else None)
     control_dt = 1.0 / env.sim.cfg["sim"]["control_rate_hz"]
+
+    recorder, frames = None, []
+    if args.record:
+        import mujoco  # local import; only needed when recording
+
+        recorder = mujoco.Renderer(env.sim.model, 480, 640)
     model = ALGOS[algo].load(str(model_path), device="cpu")
 
     # Reapply the training-time observation normalization (VecNormalize stats), if any.
@@ -76,6 +84,9 @@ def main():
             if args.render:
                 env.render()
                 time.sleep(control_dt)
+            if recorder is not None:
+                recorder.update_scene(env.sim.data, camera="track")
+                frames.append(recorder.render())
             done = terminated or truncated
         returns.append(ep_ret)
         pos_errs.append(info["pos_err"])
@@ -88,6 +99,12 @@ def main():
               f"hold={hold_fracs[-1] * 100:4.0f}%")
 
     env.close()
+    if recorder is not None:
+        import imageio
+
+        imageio.mimsave(args.record, frames, fps=round(1.0 / control_dt))
+        recorder.close()
+        print(f"wrote {args.record}  ({len(frames)} frames)")
     print("-" * 64)
     print(f"episodes={args.episodes}  task={meta.get('task', '?')}  algo={algo}  obs_mode={meta.get('obs_mode', '?')}")
     print(f"mean return        : {np.mean(returns):8.1f} +/- {np.std(returns):.1f}")

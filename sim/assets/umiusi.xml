@@ -53,6 +53,8 @@
          robot fits without clipping. xyaxes keeps +Y up for this Y-up model. -->
     <camera name="iso" pos="0.688 0.742 0.919" xyaxes="0.707 0 -0.707  -0.313 0.897 -0.313"/>
     <camera name="top" pos="-0.2 1.8 0" xyaxes="1 0 0  0 0 -1"/>
+    <!-- Follows the vehicle CoM (keeps it centred and upright even as it drifts) — used by RL eval. -->
+    <camera name="track" mode="trackcom" pos="0.92 0.65 0.92" xyaxes="0.707 0 -0.707  -0.313 0.897 -0.313"/>
 
     <body name="base_link" pos="0 0 0">
       <freejoint name="floating_base"/>
