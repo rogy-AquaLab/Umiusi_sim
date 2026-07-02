@@ -23,6 +23,8 @@ env:
   tilt_target_deg: 45.0           # max target tilt (roll/pitch) [deg]
   yaw_target_deg: 180.0           # target yaw sampled in +/- this [deg]
   depth_target_range: 0.50        # target depth sampled in +/- this [m] (attitude_depth)
+  vel_cmd_max: 0.40               # max commanded world speed [m/s] (attitude_velocity, feedforward)
+  vel_tol: 0.10                   # velocity match tolerance [m/s] for success
   # tolerances / shaping:
   pos_tol: 0.15                   # position within this [m] for success (pose)
   ori_tol: 0.20                   # orientation within this [rad] for success
@@ -55,6 +57,9 @@ reward:
   pos_scale: 0.50                 # m
   w_depth_bonus: 2.0              # attitude_depth
   depth_scale: 0.25               # m
+  w_vel_cmd: 3.0                  # -w_vel_cmd * ||v - v_cmd||  (attitude_velocity)
+  w_vel_bonus: 3.0                # + w_vel_bonus * exp(-(vel_err/vel_scale)^2)
+  vel_scale: 0.20                 # m/s
   goal_bonus: 5.0                 # +goal_bonus per step while within tolerance
   out_of_bounds_penalty: 50.0     # one-time penalty when leaving the workspace (pose)
 

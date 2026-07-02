@@ -12,6 +12,9 @@ sensor set simply leaves part of the task unobservable:
                             AHRS + pressure/depth sensor.               obs_mode "imu_depth".
     task = "pose"           go-to-pose: random target POSITION (upright orientation).
                             Needs velocity (DVL) + a position reference. obs_mode "full".
+    task = "attitude_velocity"  hold a random target orientation (feedback) AND move at a random
+                            commanded world velocity (feedforward). obs adds the 3-D velocity
+                            command (but NOT measured linear velocity). obs_mode "imu".
 
 Observation = exteroceptive (sensor-suite dependent) ++ proprioception (ALWAYS):
     proprioception: servo/range (4) + thrust/thrust_per_cmd (4) + previous action (8) = 16
@@ -45,7 +48,8 @@ PROPRIO_DIM = 16  # servo(4) + thrust(4) + prev_action(8), always present
 # Exteroceptive (navigation-sensor) dimensions per observation mode.
 _EXTERO_DIM = {"full": 12, "imu": 6, "imu_depth": 7, "imu_depth_dvl": 10}
 # Default sensor suite per task (overridable with obs_mode / --obs-mode).
-_DEFAULT_OBS = {"pose": "full", "attitude": "imu", "attitude_depth": "imu_depth"}
+_DEFAULT_OBS = {"pose": "full", "attitude": "imu", "attitude_depth": "imu_depth",
+                "attitude_velocity": "imu"}
 _Y_UP = np.array([0.0, 1.0, 0.0])
 
 
@@ -87,6 +91,8 @@ class UmiusiPoseEnv(gym.Env):
         self.depth_target_range = float(e.get("depth_target_range", 0.5))
         self.tilt_target_deg = float(e.get("tilt_target_deg", 45.0))
         self.yaw_target_deg = float(e.get("yaw_target_deg", 180.0))
+        self.vel_cmd_max = float(e.get("vel_cmd_max", 0.4))  # max commanded speed [m/s] (attitude_velocity)
+        self.vel_tol = float(e.get("vel_tol", 0.10))         # velocity match tolerance [m/s]
         self.pos_tol = float(e["pos_tol"])
         self.ori_tol = float(e["ori_tol"])
         self.depth_tol = float(e.get("depth_tol", 0.10))
@@ -103,7 +109,7 @@ class UmiusiPoseEnv(gym.Env):
             "drag_quad": self.sim.drag_quad.copy(),
         }
 
-        obs_dim = _EXTERO_DIM[self.obs_mode] + PROPRIO_DIM
+        obs_dim = _EXTERO_DIM[self.obs_mode] + PROPRIO_DIM + (3 if self.task == "attitude_velocity" else 0)
         self.action_space = spaces.Box(-1.0, 1.0, shape=(ACT_DIM,), dtype=np.float32)
         self.observation_space = spaces.Box(-np.inf, np.inf, shape=(obs_dim,), dtype=np.float32)
 
@@ -119,6 +125,8 @@ class UmiusiPoseEnv(gym.Env):
         self.target_quat = np.array([1.0, 0.0, 0.0, 0.0])
         self.track_position = self.task == "pose"  # full 3-D position (vertical included)
         self.track_depth = self.task == "attitude_depth"  # depth is a separate objective only here
+        self.track_velocity = self.task == "attitude_velocity"  # feedforward velocity command
+        self.v_cmd = np.zeros(3)  # commanded world velocity (attitude_velocity)
         self.prev_action = np.zeros(ACT_DIM)
         self.step_count = 0
 
@@ -185,6 +193,8 @@ class UmiusiPoseEnv(gym.Env):
         else:  # imu_depth_dvl: adds body-frame velocity (DVL) for drift rejection
             extero = [ori_err, w_body, np.array([self.target_pos[1] - state["pos"][1]]), R.T @ state["lin_vel"]]
 
+        if self.track_velocity:  # feedforward velocity command (no measured linear velocity in obs)
+            extero = extero + [self.v_cmd]
         obs = np.concatenate(extero + [servo_n, thrust_n, self.prev_action])
         if self.dr.get("enabled", False) and self.dr.get("obs_noise", 0.0) > 0.0:
             obs = obs + self.np_random.normal(0.0, self.dr["obs_noise"], size=obs.shape)
@@ -203,6 +213,9 @@ class UmiusiPoseEnv(gym.Env):
             self.target_quat = self._sample_target_quat()
             depth = self.np_random.uniform(-self.depth_target_range, self.depth_target_range)
             self.target_pos = np.array([start[0], depth if self.track_depth else start[1], start[2]])
+        if self.track_velocity:  # feedforward: a random world-frame velocity command to hold
+            d = self.np_random.normal(size=3)
+            self.v_cmd = d / (np.linalg.norm(d) + 1e-9) * self.np_random.uniform(0.0, self.vel_cmd_max)
 
         state = self.sim.reset(pos=tuple(start), quat=(1.0, 0.0, 0.0, 0.0))
         self.prev_action = np.zeros(ACT_DIM)
@@ -222,6 +235,7 @@ class UmiusiPoseEnv(gym.Env):
         ori_err = float(np.linalg.norm(ori_err_vec))
         depth_err = float(self.target_pos[1] - state["pos"][1])
         speed = float(np.linalg.norm(state["lin_vel"]))
+        vel_err = float(np.linalg.norm(state["lin_vel"] - self.v_cmd)) if self.track_velocity else 0.0
         ang_speed = float(np.linalg.norm(state["ang_vel"]))
         effort = float(np.linalg.norm(action[4:8]))              # thrust magnitude
         action_rate = float(np.linalg.norm(action - self.prev_action))
@@ -255,12 +269,17 @@ class UmiusiPoseEnv(gym.Env):
         if self.track_depth:
             reward -= rw.get("w_depth", 1.0) * abs(depth_err)
             reward += rw.get("w_depth_bonus", 0.0) * prox(abs(depth_err), rw.get("depth_scale", 0.25))
+        if self.track_velocity:  # reward matching the commanded world velocity (feedforward)
+            reward -= rw.get("w_vel_cmd", 2.0) * vel_err
+            reward += rw.get("w_vel_bonus", 0.0) * prox(vel_err, rw.get("vel_scale", 0.20))
 
         success = ori_err < self.ori_tol
         if self.track_position:
             success = success and pos_err < self.pos_tol
         if self.track_depth:
             success = success and abs(depth_err) < self.depth_tol
+        if self.track_velocity:
+            success = success and vel_err < self.vel_tol
         if success:
             reward += rw["goal_bonus"]
 
@@ -276,6 +295,7 @@ class UmiusiPoseEnv(gym.Env):
         self._place_marker(state)
         info = self._info(state, pos_err, ori_err, depth_err, success)
         info["out_of_bounds"] = out_of_bounds
+        info["vel_err"] = vel_err                          # ||v - v_cmd|| (attitude_velocity)
         info["servo"] = state["servo"].copy()             # actual servo angles (motion diagnostics)
         info["esc_cmd"] = action[4:8].copy()               # raw policy command (thrust use)
         info["esc_applied"] = self.sim.esc_current.copy()  # slew-limited applied esc (true thrust change)
