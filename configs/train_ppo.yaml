@@ -6,27 +6,39 @@
 sim_config: configs/umiusi.yaml   # physical model params (resolved relative to repo root)
 
 env:
-  # Sensor suite for the observation (reward/success always use the true pose):
-  #   full       privileged / full-state (position + attitude + full twist)   [28-D]
-  #   imu        IMU only: attitude + gyro (NO position/depth -> horizontal drifts)  [22-D]
-  #   imu_depth  IMU + depth: adds vertical (depth) position only              [23-D]
-  obs_mode: full                  # override per run with `--obs-mode`
+  # Task (choose with --task): what target the agent must reach and hold.
+  #   attitude        random target orientation (roll/pitch/yaw)         sensor: AHRS (e.g. BNO055)
+  #   attitude_depth  random orientation + random depth                  sensor: AHRS + depth
+  #   pose            go-to-pose: random position, upright orientation    sensor: AHRS + depth + DVL + position
+  task: attitude_depth
+  # Sensor suite for the observation ("auto" = the task default; reward/success ALWAYS use the
+  # true state). full=28 | imu=22 | imu_depth=23 | imu_depth_dvl=26. Override with --obs-mode.
+  obs_mode: auto
   horizon: 600                    # control steps per episode (12 s at 50 Hz)
-  target_box: [0.75, 0.50, 0.75]  # target sampled uniformly in +/- these [m] around the origin (x, y, z)
-  workspace_bounds: [2.0, 1.5, 2.0]  # episode ends (out-of-bounds) if |pos| exceeds these [m]
   start_jitter: 0.10              # start position uniformly jittered by +/- this [m] (0 = always origin)
-  pos_tol: 0.15                   # within this position error [m] AND ori_tol -> goal bonus / success
-  ori_tol: 0.20                   # orientation error tolerance [rad]
-  near_goal_dist: 0.50            # velocity is penalized only within this distance of the goal [m]
+  # go-to-pose (task=pose) target:
+  target_box: [0.75, 0.50, 0.75]  # target position sampled uniformly in +/- these [m] (x, y, z)
+  workspace_bounds: [2.0, 1.5, 2.0]  # pose episode ends (out-of-bounds) if |pos| exceeds these [m]
+  # attitude / attitude_depth targets:
+  tilt_target_deg: 45.0           # max target tilt (roll/pitch) [deg]
+  yaw_target_deg: 180.0           # target yaw sampled in +/- this [deg]
+  depth_target_range: 0.50        # target depth sampled in +/- this [m] (attitude_depth)
+  # tolerances / shaping:
+  pos_tol: 0.15                   # position within this [m] for success (pose)
+  ori_tol: 0.20                   # orientation within this [rad] for success
+  depth_tol: 0.10                 # depth within this [m] for success (attitude_depth)
+  near_goal_dist: 0.50            # linear velocity penalized only within this distance (pose) [m]
 
 reward:
-  w_pos: 1.0                      # -w_pos * ||position_error||
-  w_ori: 0.5                      # -w_ori * orientation_error (rotation-vector norm)
-  w_vel: 0.10                     # -w_vel * ||velocity|| near the goal (encourages holding)
+  w_pos: 1.0                      # -w_pos * ||position_error||            (pose)
+  w_ori: 1.0                      # -w_ori * orientation_error (rot-vec norm to target)
+  w_vel: 0.10                     # -w_vel * ||linear velocity|| near the goal (pose, holding)
+  w_angvel: 0.05                  # -w_angvel * ||angular velocity||       (attitude tasks, hold still)
+  w_depth: 2.0                    # -w_depth * |depth error|              (attitude_depth)
   w_effort: 0.02                  # -w_effort * ||esc_command||
   w_action_rate: 0.02             # -w_action_rate * ||action - prev_action|| (smoothness)
   goal_bonus: 10.0                # +goal_bonus per step while within tolerance
-  out_of_bounds_penalty: 50.0     # one-time penalty when leaving the workspace
+  out_of_bounds_penalty: 50.0     # one-time penalty when leaving the workspace (pose)
 
 # Domain randomization for sim-to-real robustness. DEFAULT OFF (all fracs used only if enabled).
 # Applied at each reset as a multiplicative/additive perturbation around the config values.

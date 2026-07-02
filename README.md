@@ -111,24 +111,38 @@ tune the `PLACEHOLDER` values (buoyancy `displaced_volume`, drag, thrust map). R
 
 ### Train / evaluate a policy (RL)
 
-The task is **go-to-pose / station-keeping**: reach and hold a target pose. The target position is
-randomized each episode; the target orientation is upright. Training is CPU-only and scales with the
-number of parallel environments (not a GPU — the MuJoCo sim is the bottleneck and runs on CPU).
+Three selectable **tasks** (`--task`), each matched to a realistic (cheap) sensor suite. The reward
+and success are always computed from the true state, so a limited sensor set just leaves part of the
+task unobservable. Training is CPU-only and scales with the number of parallel environments (not a
+GPU — the MuJoCo sim is the bottleneck and runs on CPU).
+
+| `--task` | goal | sensor suite (default `obs_mode`) | notes |
+| --- | --- | --- | --- |
+| `attitude` | track a random target **orientation** | AHRS, e.g. BNO055 (`imu`) | horizontal & depth drift (unobserved) |
+| `attitude_depth` | random orientation **+ depth** | AHRS + pressure/depth (`imu_depth`) | horizontal drifts |
+| `pose` | go-to-pose: random **position** (upright) | AHRS + depth + DVL + position (`full`) | needs a position reference |
 
 ```bash
-python -m rl.train                                  # PPO (config: configs/train_ppo.yaml)
-python -m rl.train --n-envs 12 --run-name ppo_v1    # more parallel envs, named run
-python -m rl.train --algo sac --timesteps 200000    # switch algorithm
+python -m rl.train --task attitude       --run-name att       --n-envs 12   # AHRS only
+python -m rl.train --task attitude_depth --run-name attdepth   --n-envs 12   # AHRS + depth
+python -m rl.train --task pose           --run-name pose       --n-envs 12   # + DVL + position
+python -m rl.train --task pose --obs-mode imu_depth_dvl --run-name pose_dvl  # DVL velocity, no abs. XZ
+python -m rl.train --algo sac --task attitude                                # switch algorithm
 
-tensorboard --logdir models/ppo/tb                  # watch training curves
-
-python -m rl.eval --model models/ppo/final.zip              # headless metrics
-python -m rl.eval --model models/ppo/final.zip --render     # watch in the GUI viewer
+tensorboard --logdir models/att/tb                          # watch training curves
+python -m rl.eval --model models/att/final.zip              # headless metrics (task auto-loaded)
+python -m rl.eval --model models/att/final.zip --render     # watch in the GUI viewer
 ```
 
-Reward weights, target/workspace box, episode horizon, tolerances, domain-randomization hooks
-(default off), and the algorithm hyperparameters all live in [`configs/train_ppo.yaml`](configs/train_ppo.yaml).
+`eval` reads the task + sensor suite from the run's `meta.yaml`, so it always matches training.
+Reward weights, target/workspace ranges, tolerances, domain-randomization hooks (default off), and
+the algorithm hyperparameters live in [`configs/train_ppo.yaml`](configs/train_ppo.yaml).
 Checkpoints, tensorboard logs, and the final policy go to the gitignored `models/<run-name>/`.
+
+**Sensor note:** underwater there is no GPS, so horizontal position (X, Z) is only observable in
+`full`. A 9-DOF AHRS (BNO055) gives absolute orientation incl. magnetometer heading (cheap → attitude
+tasks are well-posed); a pressure sensor gives depth; a DVL gives body velocity (enables drift/current
+rejection without an absolute position). `imu`/`imu_depth` therefore cannot hold horizontal position.
 
 ### Drive the simulator from Python
 

@@ -40,13 +40,14 @@ def main():
     config = args.config or meta.get("config", "configs/train_ppo.yaml")
 
     cfg = load_config(config)
-    if "obs_mode" in meta:  # match the sensor suite the policy was trained with
-        cfg["env"]["obs_mode"] = meta["obs_mode"]
+    for k in ("task", "obs_mode"):  # match the task + sensor suite the policy was trained with
+        if k in meta:
+            cfg["env"][k] = meta[k]
     env = UmiusiPoseEnv(cfg, render_mode="human" if args.render else None)
     control_dt = 1.0 / env.sim.cfg["sim"]["control_rate_hz"]
     model = ALGOS[algo].load(str(model_path), device="cpu")
 
-    returns, final_errs, hold_fracs, successes = [], [], [], []
+    returns, pos_errs, ori_errs, depth_errs, hold_fracs, successes = [], [], [], [], [], []
     for ep in range(args.episodes):
         obs, info = env.reset(seed=args.seed + ep)
         ep_ret, steps, in_tol = 0.0, 0, 0
@@ -62,19 +63,24 @@ def main():
                 time.sleep(control_dt)
             done = terminated or truncated
         returns.append(ep_ret)
-        final_errs.append(info["pos_err"])
+        pos_errs.append(info["pos_err"])
+        ori_errs.append(info["ori_err"])
+        depth_errs.append(abs(info["depth_err"]))
         hold_fracs.append(in_tol / max(steps, 1))
         successes.append(info.get("is_success", False))
-        print(f"ep {ep:2d}: return={ep_ret:8.1f}  final_pos_err={info['pos_err']:.3f} m  "
-              f"hold={hold_fracs[-1] * 100:4.0f}%  target={np.round(info['target_pos'], 2)}")
+        print(f"ep {ep:2d}: return={ep_ret:8.1f}  ori_err={info['ori_err']:.3f} rad  "
+              f"pos_err={info['pos_err']:.3f} m  depth_err={abs(info['depth_err']):.3f} m  "
+              f"hold={hold_fracs[-1] * 100:4.0f}%")
 
     env.close()
-    print("-" * 60)
-    print(f"episodes={args.episodes}  algo={algo}")
-    print(f"mean return       : {np.mean(returns):8.1f} +/- {np.std(returns):.1f}")
-    print(f"mean final pos err: {np.mean(final_errs):.3f} m")
-    print(f"mean hold fraction: {np.mean(hold_fracs) * 100:.0f}%   (steps within tolerance)")
-    print(f"final-step success: {np.mean(successes) * 100:.0f}%")
+    print("-" * 64)
+    print(f"episodes={args.episodes}  task={meta.get('task', '?')}  algo={algo}  obs_mode={meta.get('obs_mode', '?')}")
+    print(f"mean return        : {np.mean(returns):8.1f} +/- {np.std(returns):.1f}")
+    print(f"mean final ori err : {np.mean(ori_errs):.3f} rad")
+    print(f"mean final pos err : {np.mean(pos_errs):.3f} m")
+    print(f"mean final depth err: {np.mean(depth_errs):.3f} m")
+    print(f"mean hold fraction : {np.mean(hold_fracs) * 100:.0f}%   (steps within tolerance)")
+    print(f"final-step success : {np.mean(successes) * 100:.0f}%")
 
 
 if __name__ == "__main__":
