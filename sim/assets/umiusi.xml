@@ -27,8 +27,8 @@
          <1 deg); forcerange = its stall torque (~0.94 N*m @6V .. ~1.14 N*m @7.4V, so +/-1.0 N*m).
          The thruster bodies are left under gravity on purpose (nearly-neutral hull, but the motor
          sinks): the ~0.58 N*m hinge load stays within the servo's stall torque, so it holds. -->
-    <joint damping="0.05"/>
-    <position kp="40.0" kv="0.5" forcerange="-1.0 1.0"/>
+    <joint damping="0.15"/>
+    <position kp="40.0" kv="2.0" forcerange="-1.0 1.0"/>
   </default>
 
   <asset>
