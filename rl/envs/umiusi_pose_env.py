@@ -216,8 +216,7 @@ class UmiusiPoseEnv(gym.Env):
             self.target_pos = self.np_random.uniform(-self.target_box, self.target_box)
             self.target_quat = np.array([1.0, 0.0, 0.0, 0.0])  # upright
         else:
-            # attitude_velocity: hold UPRIGHT + random yaw (tilt=0); other attitude tasks use the config tilt.
-            self.target_quat = self._sample_target_quat(0.0 if self.track_velocity else self.tilt_target_deg)
+            self.target_quat = self._sample_target_quat(self.tilt_target_deg)
             depth = self.np_random.uniform(-self.depth_target_range, self.depth_target_range)
             self.target_pos = np.array([start[0], depth if self.track_depth else start[1], start[2]])
         if self.track_velocity:  # body-frame horizontal command within +/- cone of body +X (yaw-independent)

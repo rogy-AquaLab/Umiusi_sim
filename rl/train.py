@@ -33,9 +33,9 @@ class CurriculumCallback(BaseCallback):
     config targets over the first `frac` of training, so the policy first learns to cruise in a
     single direction (easy) and then generalizes. Avoids the from-scratch do-nothing local optimum."""
 
-    def __init__(self, total, cone_max, yaw_max, frac):
+    def __init__(self, total, cone_max, yaw_max, tilt_max, frac):
         super().__init__()
-        self.total, self.cone_max, self.yaw_max, self.frac = total, cone_max, yaw_max, frac
+        self.total, self.cone_max, self.yaw_max, self.tilt_max, self.frac = total, cone_max, yaw_max, tilt_max, frac
         self._last_pct = -1
 
     def _on_step(self):
@@ -45,6 +45,7 @@ class CurriculumCallback(BaseCallback):
             self._last_pct = pct
             self.training_env.set_attr("vel_cmd_cone_deg", p * self.cone_max)
             self.training_env.set_attr("yaw_target_deg", p * self.yaw_max)
+            self.training_env.set_attr("tilt_target_deg", p * self.tilt_max)
         return True
 
 
@@ -123,10 +124,13 @@ def main():
     if task == "attitude_velocity" and cfrac > 0:
         cone_max = float(cfg["env"].get("vel_cmd_cone_deg", 180.0))
         yaw_max = float(cfg["env"].get("yaw_target_deg", 180.0))
+        tilt_max = float(cfg["env"].get("tilt_target_deg", 45.0))
         venv.set_attr("vel_cmd_cone_deg", 0.0)
         venv.set_attr("yaw_target_deg", 0.0)
-        callbacks.append(CurriculumCallback(total_timesteps, cone_max, yaw_max, cfrac))
-        print(f"[train] curriculum: cone/yaw 0 -> {cone_max:.0f}/{yaw_max:.0f} over {cfrac * 100:.0f}% of steps")
+        venv.set_attr("tilt_target_deg", 0.0)
+        callbacks.append(CurriculumCallback(total_timesteps, cone_max, yaw_max, tilt_max, cfrac))
+        print(f"[train] curriculum: cone/yaw/tilt 0 -> {cone_max:.0f}/{yaw_max:.0f}/{tilt_max:.0f}"
+              f" over {cfrac * 100:.0f}% of steps")
 
     print(f"[train] task={task} algo={algo} obs_mode={obs_mode} n_envs={n_envs} "
           f"timesteps={total_timesteps} seed={seed} -> {run_dir}")
