@@ -32,6 +32,8 @@ def main():
     ap.add_argument("--episodes", type=int, default=5)
     ap.add_argument("--domain-rand", action="store_true",
                     help="evaluate under domain randomization too (default: nominal model, disturbance from meta)")
+    ap.add_argument("--no-disturb", action="store_true",
+                    help="force disturbances OFF at eval (isolate the policy's own steadiness/wobble)")
     ap.add_argument("--render", action="store_true", help="watch in the MuJoCo GUI viewer")
     ap.add_argument("--record", default=None,
                     help="write an mp4 of the rollout (headless; run with MUJOCO_GL=egl)")
@@ -49,8 +51,10 @@ def main():
     for k in ("task", "obs_mode", "vel_cmd_cone_deg", "yaw_target_deg"):
         if meta.get(k) is not None:
             cfg["env"][k] = meta[k]
-    if meta.get("disturbance"):  # evaluate under the same disturbances it trained with
+    if meta.get("disturbance") and not args.no_disturb:  # evaluate under the same disturbances it trained with
         cfg.setdefault("disturbance", {})["enabled"] = True
+    elif args.no_disturb:  # isolate the policy's own steadiness (no current/impulses)
+        cfg.setdefault("disturbance", {})["enabled"] = False
     # Domain randomization is OFF at eval by default (measure clean performance); --domain-rand tests
     # robustness to model mismatch (randomized buoyancy/thrust/drag + obs noise + action latency).
     cfg.setdefault("domain_rand", {})["enabled"] = bool(args.domain_rand)
