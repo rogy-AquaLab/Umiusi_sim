@@ -2,7 +2,7 @@
 
 Each effect is an explicit, individually testable function operating on plain numpy
 arrays (SI units). This is deliberately simple and readable so it can be tuned and
-validated before RL (see ai/project_spec.yaml, task_request #3/#5).
+validated before RL (see the project README).
 
 Body-frame 6-vectors use the order [x, y, z, roll, pitch, yaw] = [linear(3), angular(3)].
 Gravity is applied by the MuJoCo engine via body mass; only buoyancy/drag/added-mass

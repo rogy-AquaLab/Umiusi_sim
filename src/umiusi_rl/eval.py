@@ -30,6 +30,8 @@ def main():
     ap.add_argument("--config", default=None, help="env config (default: from run meta.yaml)")
     ap.add_argument("--algo", choices=list(ALGOS), default=None, help="default: from run meta.yaml")
     ap.add_argument("--episodes", type=int, default=5)
+    ap.add_argument("--domain-rand", action="store_true",
+                    help="evaluate under domain randomization too (default: nominal model, disturbance from meta)")
     ap.add_argument("--render", action="store_true", help="watch in the MuJoCo GUI viewer")
     ap.add_argument("--record", default=None,
                     help="write an mp4 of the rollout (headless; run with MUJOCO_GL=egl)")
@@ -49,6 +51,9 @@ def main():
             cfg["env"][k] = meta[k]
     if meta.get("disturbance"):  # evaluate under the same disturbances it trained with
         cfg.setdefault("disturbance", {})["enabled"] = True
+    # Domain randomization is OFF at eval by default (measure clean performance); --domain-rand tests
+    # robustness to model mismatch (randomized buoyancy/thrust/drag + obs noise + action latency).
+    cfg.setdefault("domain_rand", {})["enabled"] = bool(args.domain_rand)
     env = UmiusiPoseEnv(cfg, render_mode="human" if args.render else None)
     control_dt = 1.0 / env.sim.cfg["sim"]["control_rate_hz"]
 
@@ -75,11 +80,11 @@ def main():
 
     returns, pos_errs, ori_errs, depth_errs, vel_errs, hold_fracs, successes = [], [], [], [], [], [], []
     vel_alongs, vel_cmds = [], []
-    thrust_uses, servo_motions, thrust_changes = [], [], []
+    thrust_uses, servo_motions, thrust_changes, ang_speeds = [], [], [], []
     for ep in range(args.episodes):
         obs, info = env.reset(seed=args.seed + ep)
         ep_ret, steps, in_tol = 0.0, 0, 0
-        thrust_sum, servo_mot_sum, thrust_chg_sum = 0.0, 0.0, 0.0
+        thrust_sum, servo_mot_sum, thrust_chg_sum, ang_speed_sum = 0.0, 0.0, 0.0, 0.0
         prev_servo, prev_esc = None, None
         done = False
         while not done:
@@ -89,6 +94,7 @@ def main():
             steps += 1
             in_tol += int(info.get("is_success", False))
             esc, servo = info["esc_applied"], info["servo"]  # slew-limited actual thrust
+            ang_speed_sum += float(info.get("ang_speed", 0.0))
             thrust_sum += float(np.mean(np.abs(esc)))
             if prev_esc is not None:
                 thrust_chg_sum += float(np.mean(np.abs(esc - prev_esc)))
@@ -111,6 +117,7 @@ def main():
         hold_fracs.append(in_tol / max(steps, 1))
         successes.append(info.get("is_success", False))
         thrust_uses.append(thrust_sum / max(steps, 1))
+        ang_speeds.append(ang_speed_sum / max(steps, 1))  # mean ||angular velocity|| [rad/s]
         servo_motions.append(np.degrees(servo_mot_sum / max(steps - 1, 1)))  # deg/step
         thrust_changes.append(thrust_chg_sum / max(steps - 1, 1))
         print(f"ep {ep:2d}: return={ep_ret:8.1f}  ori_err={info['ori_err']:.3f} rad  "
@@ -135,6 +142,7 @@ def main():
     print(f"mean hold fraction : {np.mean(hold_fracs) * 100:.0f}%   (steps within tolerance)")
     print(f"final-step success : {np.mean(successes) * 100:.0f}%")
     print(f"mean thrust use    : {np.mean(thrust_uses):.3f}   (mean |esc|, 0..1 -> minimize)")
+    print(f"mean angular vel   : {np.mean(ang_speeds):.3f} rad/s   (wobble -> minimize)")
     print(f"mean servo motion  : {np.mean(servo_motions):.2f} deg/step   (vibration -> minimize)")
     print(f"mean thrust change : {np.mean(thrust_changes):.3f} /step     (|Δesc| -> minimize)")
 

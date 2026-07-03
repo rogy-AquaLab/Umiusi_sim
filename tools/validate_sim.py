@@ -4,7 +4,7 @@ Standalone (no RL, no ROS). Runs the analytical simulator through a set of physi
 sanity checks and prints a PASS/FAIL report plus calibration numbers for the values
 still marked PLACEHOLDER in configs/umiusi.yaml (buoyancy volume, drag, thrust map).
 
-Checks (see ai/project_spec.yaml "validation"):
+Checks (see the project README):
   1. buoyancy       — net vertical force sign matches the configured volume vs. neutral,
                       i.e. the vehicle floats/sinks as configured (near-neutral by design).
   2. restoring      — a tilt produces a righting moment back toward upright (CoB above CoM).

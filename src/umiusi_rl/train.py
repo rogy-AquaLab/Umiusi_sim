@@ -75,6 +75,8 @@ def main():
     ap.add_argument("--curriculum-frac", type=float, default=None,
                     help="attitude_velocity: widen cone/yaw 0->config over this fraction of training (0=off)")
     ap.add_argument("--disturb", action="store_true", help="enable disturbances (water current + impulses)")
+    ap.add_argument("--domain-rand", action="store_true",
+                    help="enable domain randomization (buoyancy/thrust/drag + obs noise + action latency; sim2real)")
     ap.add_argument("--timesteps", type=int, default=None, help="override total_timesteps")
     ap.add_argument("--n-envs", type=int, default=None, help="override number of parallel envs")
     ap.add_argument("--seed", type=int, default=None)
@@ -90,6 +92,8 @@ def main():
         cfg["env"]["obs_mode"] = args.obs_mode
     if args.disturb:
         cfg.setdefault("disturbance", {})["enabled"] = True
+    if args.domain_rand:
+        cfg.setdefault("domain_rand", {})["enabled"] = True
     if args.vel_cone is not None:
         cfg["env"]["vel_cmd_cone_deg"] = args.vel_cone
     if args.yaw_target is not None:
@@ -146,6 +150,7 @@ def main():
                         "vel_cmd_cone_deg": cfg["env"].get("vel_cmd_cone_deg"),
                         "yaw_target_deg": cfg["env"].get("yaw_target_deg"),
                         "disturbance": cfg.get("disturbance", {}).get("enabled", False),
+                        "domain_rand": cfg.get("domain_rand", {}).get("enabled", False),
                         "config": args.config, "seed": seed, "total_timesteps": total_timesteps}, f)
     venv.close()
     print(f"[train] done. policy -> {run_dir / 'final.zip'}")

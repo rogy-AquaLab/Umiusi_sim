@@ -39,14 +39,15 @@ reward:
   w_pos: 1.0                      # -w_pos * ||position_error||            (pose)
   w_ori: 1.0                      # -w_ori * orientation_error (rot-vec norm to target)
   w_vel: 0.10                     # -w_vel * ||linear velocity|| near the goal (pose, holding)
-  w_angvel: 0.05                  # -w_angvel * ||angular velocity||       (attitude tasks, hold still)
+  w_angvel: 0.20                  # -w_angvel * ||angular velocity||  (damp rotation/wobble; higher = steadier
+                                  # attitude, esp. under disturbance. Was 0.05; raised to cut angular velocity.)
   w_depth: 2.0                    # -w_depth * |depth error|              (attitude_depth)
   # --- economy / smoothness (minimize thrust, servo vibration, thrust changes) ---
   # NOTE: kept LIGHT so they don't freeze the servos and break attitude tracking (att_v3 lesson).
   # Raise gradually once tracking is solid.
   w_effort: 0.03                  # -w_effort * ||esc_command||            (thrust magnitude)
-  w_servo_rate: 0.25              # -w_servo_rate * ||servo_angle - prev|| (servo vibration)
-  w_thrust_rate: 0.15             # -w_thrust_rate * ||esc - prev_esc||    (thrust change)
+  w_servo_rate: 0.30              # -w_servo_rate * ||servo_angle - prev|| (servo vibration; was 0.25)
+  w_thrust_rate: 0.18             # -w_thrust_rate * ||esc - prev_esc||    (thrust change; was 0.15)
   w_action_rate: 0.02             # -w_action_rate * ||action - prev_action|| (mild overall smoothness)
   # Extra penalties applied ONLY near the target (ori_err < near_goal_ori) to kill steady-state
   # limit cycles / servo chatter without discouraging the initial slew to the target.
@@ -67,11 +68,12 @@ reward:
 # Domain randomization for sim-to-real robustness. DEFAULT OFF (all fracs used only if enabled).
 # Applied at each reset as a multiplicative/additive perturbation around the config values.
 domain_rand:
-  enabled: false
+  enabled: false                  # enable at train/eval time with --domain-rand (sim2real robustness)
   buoyancy_frac: 0.10             # displaced_volume *= 1 + U(-frac, frac)
   thrust_frac: 0.10               # thrust_per_cmd  *= 1 + U(-frac, frac)
   drag_frac: 0.20                 # linear & quadratic drag *= 1 + U(-frac, frac)
-  obs_noise: 0.0                  # gaussian obs noise std (in obs units)
+  obs_noise: 0.01                 # gaussian obs noise std (in obs units; ~0.6deg / 0.01 rad·s⁻¹ sensor noise)
+  action_latency_steps: 1         # control->actuation delay [control steps] (~20 ms at 50 Hz)
 
 # External disturbances (steady water current + random force impulses). DEFAULT OFF; --disturb enables.
 # A current is modeled as a water velocity (drag uses v - current), so it drags the vehicle along.

@@ -29,7 +29,7 @@ ori_err is the rotation-vector error to the (task-dependent) TARGET orientation,
 AHRS supplies (absolute attitude incl. magnetometer heading). Horizontal position (X, Z) is
 only in "full" — with imu/imu_depth/imu_depth_dvl it is unobservable (no GPS underwater), so
 imu* modes cannot do absolute horizontal station-keeping (imu_depth_dvl can still reject
-drift via velocity). See ai/project_spec.yaml (rl section) and ai/architecture.md (section 7).
+drift via velocity). See the project README (sensor / observability notes).
 """
 
 from pathlib import Path
@@ -104,8 +104,12 @@ class UmiusiPoseEnv(gym.Env):
         self.ori_deadband = float(e.get("ori_deadband", 0.0))     # rad: no ori reward gradient inside this
         self.rw = cfg["reward"]
         self.dr = cfg.get("domain_rand", {"enabled": False})
+        # sim2real: control->actuation delay (steps); only applied when domain_rand is enabled.
+        self.action_latency = int(self.dr.get("action_latency_steps", 0))
         self.dist = cfg.get("disturbance", {"enabled": False})  # water current + random impulses
         self._impulse_left = 0
+        self._act_buf = []      # delayed-action buffer (sim2real latency); filled in reset()
+        self._act_latency = 0
 
         self._base = {
             "volume": self.sim.volume,
@@ -258,6 +262,9 @@ class UmiusiPoseEnv(gym.Env):
 
         state = self.sim.reset(pos=tuple(start), quat=(1.0, 0.0, 0.0, 0.0))
         self._sample_current()
+        # sim2real action latency: only when domain_rand is enabled (a control->actuation delay).
+        self._act_latency = self.action_latency if self.dr.get("enabled", False) else 0
+        self._act_buf = [np.zeros(ACT_DIM) for _ in range(self._act_latency)]
         self.prev_action = np.zeros(ACT_DIM)
         self.prev_servo = np.zeros(4)
         self.step_count = 0
@@ -267,6 +274,9 @@ class UmiusiPoseEnv(gym.Env):
 
     def step(self, action):
         action = np.clip(np.asarray(action, dtype=float), -1.0, 1.0)
+        if self._act_latency > 0:  # sim2real: apply a delayed command (control->actuation lag)
+            self._act_buf.append(action)
+            action = self._act_buf.pop(0)
         self._apply_disturbance()
         state = self.sim.step(action)
         self.step_count += 1
@@ -353,6 +363,7 @@ class UmiusiPoseEnv(gym.Env):
         info["vel_err"] = vel_err                          # perpendicular drift (attitude_velocity)
         info["vel_along"] = v_along                         # speed along the commanded direction [m/s]
         info["vel_cmd_speed"] = vcn                         # commanded (desired) speed [m/s]
+        info["ang_speed"] = ang_speed                       # ||angular velocity|| [rad/s] (wobble diagnostic)
         info["servo"] = state["servo"].copy()             # actual servo angles (motion diagnostics)
         info["esc_cmd"] = action[4:8].copy()               # raw policy command (thrust use)
         info["esc_applied"] = self.sim.esc_current.copy()  # slew-limited applied esc (true thrust change)
