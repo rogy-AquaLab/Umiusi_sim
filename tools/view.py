@@ -23,7 +23,7 @@ import mujoco
 import mujoco.viewer
 import numpy as np
 
-from sim.simulator import UmiusiSimulator
+from umiusi_sim.simulator import UmiusiSimulator
 
 
 def demo_action(t):

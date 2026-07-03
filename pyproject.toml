@@ -1,25 +1,52 @@
+# umiusi_sim — MuJoCo simulation + RL for the UMIUSI azimuth-thruster underwater robot.
+#
+# Two installable packages under src/ (clean responsibility split):
+#   umiusi_sim  — reusable simulator + analytical hydrodynamics + robot description (MJCF)
+#   umiusi_rl   — Gymnasium env + PPO/SAC/TD3 training + evaluation (depends on umiusi_sim)
+#
+# Setup (recommended, no manual venv):  uv sync          then  uv run python -m tools.validate_sim
+# CPU-only torch is pinned via the PyTorch CPU index below (this host has no CUDA GPU).
+
 [project]
 name = "umiusi_sim"
-version = "0.0.0"
+version = "0.1.0"
 description = "MuJoCo simulation + RL for the UMIUSI azimuth-thruster underwater robot"
 requires-python = ">=3.10"
 dependencies = [
     "mujoco>=3.2",
-    "numpy",
-    "pyyaml",
+    "numpy>=1.24",
+    "pyyaml>=6.0",
     "gymnasium>=0.29",
     "stable-baselines3>=2.3",
+    "torch>=2.2",
 ]
 
 [project.optional-dependencies]
-dev = ["fast-simplification", "imageio[ffmpeg]", "tensorboard"]
-
-[tool.setuptools]
-packages = ["sim", "sim.physics", "tools", "rl", "rl.envs"]
-
-[tool.ruff]
-line-length = 119
+# Tooling for videos/snapshots (imageio), training curves (tensorboard), mesh decimation, lint.
+dev = ["imageio[ffmpeg]>=2.31", "tensorboard>=2.15", "fast-simplification", "ruff>=0.5"]
 
 [build-system]
 requires = ["setuptools>=61"]
 build-backend = "setuptools.build_meta"
+
+# --- Package discovery (src-layout: two top-level packages) -------------------
+[tool.setuptools.packages.find]
+where = ["src"]
+
+# Ship the MJCF robot description with the umiusi_sim package (for non-editable installs).
+[tool.setuptools.package-data]
+"umiusi_sim" = ["description/*.xml"]
+
+# --- uv: CPU-only torch --------------------------------------------------------
+# This host has no CUDA GPU (MuJoCo sim is CPU-bound, the policy MLP is tiny). Pin torch to
+# the PyTorch CPU wheel so `uv sync` pulls the small CPU build instead of the CUDA build.
+[[tool.uv.index]]
+name = "pytorch-cpu"
+url = "https://download.pytorch.org/whl/cpu"
+explicit = true
+
+[tool.uv.sources]
+torch = { index = "pytorch-cpu" }
+
+[tool.ruff]
+line-length = 119

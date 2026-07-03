@@ -1,9 +1,9 @@
 """Evaluate / watch a trained go-to-pose policy on UmiusiPoseEnv.
 
 Usage:
-    python -m rl.eval --model models/ppo/final.zip                 # headless metrics
-    python -m rl.eval --model models/ppo/final.zip --episodes 20   # more episodes
-    python -m rl.eval --model models/ppo/final.zip --render        # watch in the GUI viewer
+    python -m umiusi_rl.eval --model models/ppo/final.zip                 # headless metrics
+    python -m umiusi_rl.eval --model models/ppo/final.zip --episodes 20   # more episodes
+    python -m umiusi_rl.eval --model models/ppo/final.zip --render        # watch in the GUI viewer
 
 The algorithm and config are read from the run's meta.yaml when present; override with
 --algo / --config. Reports per-episode return, final position error, and the fraction of
@@ -19,7 +19,7 @@ import yaml
 from stable_baselines3 import PPO, SAC, TD3
 from stable_baselines3.common.vec_env import DummyVecEnv, VecNormalize
 
-from rl.envs.umiusi_pose_env import UmiusiPoseEnv, load_config
+from umiusi_rl.envs.umiusi_pose_env import UmiusiPoseEnv, load_config
 
 ALGOS = {"ppo": PPO, "sac": SAC, "td3": TD3}
 

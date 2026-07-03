@@ -9,7 +9,7 @@ import pathlib
 import imageio
 import mujoco
 
-from sim.simulator import _DEFAULT_MODEL
+from umiusi_sim.simulator import _DEFAULT_MODEL
 
 # Fixed cameras defined in the MJCF (upright for the +Y-up frame), plus free-camera angles.
 FIXED_CAMS = ["iso", "top"]

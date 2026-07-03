@@ -17,7 +17,7 @@ import yaml
 from stable_baselines3 import PPO, SAC, TD3
 from stable_baselines3.common.vec_env import DummyVecEnv, VecNormalize
 
-from rl.envs.umiusi_pose_env import UmiusiPoseEnv, load_config
+from umiusi_rl.envs.umiusi_pose_env import UmiusiPoseEnv, load_config
 
 ALGOS = {"ppo": PPO, "sac": SAC, "td3": TD3}
 

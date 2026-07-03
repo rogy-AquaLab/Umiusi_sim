@@ -1,10 +1,10 @@
 """Train a go-to-pose policy on UmiusiPoseEnv (algorithm-agnostic; PPO default).
 
 Usage:
-    python -m rl.train                                   # PPO, config defaults
-    python -m rl.train --config configs/train_ppo.yaml   # explicit config
-    python -m rl.train --algo sac --timesteps 200000     # switch algorithm
-    python -m rl.train --n-envs 12 --run-name ppo_v1     # more parallel envs, named run
+    python -m umiusi_rl.train                                   # PPO, config defaults
+    python -m umiusi_rl.train --config configs/train_ppo.yaml   # explicit config
+    python -m umiusi_rl.train --algo sac --timesteps 200000     # switch algorithm
+    python -m umiusi_rl.train --n-envs 12 --run-name ppo_v1     # more parallel envs, named run
 
 Artifacts (all under the gitignored models/<run-name>/):
     final.zip          trained policy
@@ -22,9 +22,9 @@ from stable_baselines3.common.callbacks import BaseCallback, CheckpointCallback
 from stable_baselines3.common.env_util import make_vec_env
 from stable_baselines3.common.vec_env import DummyVecEnv, SubprocVecEnv, VecNormalize
 
-from rl.envs.umiusi_pose_env import _DEFAULT_OBS, UmiusiPoseEnv, load_config
+from umiusi_rl.envs.umiusi_pose_env import _DEFAULT_OBS, UmiusiPoseEnv, load_config
 
-_ROOT = Path(__file__).resolve().parents[1]
+_ROOT = Path(__file__).resolve().parents[2]        # repo root (src/umiusi_rl/..)
 ALGOS = {"ppo": PPO, "sac": SAC, "td3": TD3}
 
 
@@ -149,7 +149,7 @@ def main():
                         "config": args.config, "seed": seed, "total_timesteps": total_timesteps}, f)
     venv.close()
     print(f"[train] done. policy -> {run_dir / 'final.zip'}")
-    print(f"[train] eval:  python -m rl.eval --model {run_dir / 'final.zip'}")
+    print(f"[train] eval:  python -m umiusi_rl.eval --model {run_dir / 'final.zip'}")
 
 
 if __name__ == "__main__":

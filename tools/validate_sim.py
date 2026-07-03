@@ -31,7 +31,7 @@ import sys
 import mujoco
 import numpy as np
 
-from sim.simulator import UmiusiSimulator
+from umiusi_sim.simulator import UmiusiSimulator
 
 # Tolerances kept loose on purpose: these are direction/sign checks, not precision tests.
 _EPS = 1e-6
@@ -153,7 +153,7 @@ def check_restoring(sim, rep):
 
 def check_drag(sim, rep):
     """Damping opposes velocity on every axis (analytic), and horizontal motion decays (sim)."""
-    from sim.physics import hydrodynamics as hydro
+    from umiusi_sim.physics import hydrodynamics as hydro
 
     # Analytic: for a unit velocity on each of the 6 axes, the drag wrench must oppose it.
     signs_ok = True

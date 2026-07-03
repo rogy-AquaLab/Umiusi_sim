@@ -21,10 +21,11 @@ Design docs: [`ai/project_spec.yaml`](ai/project_spec.yaml) and [`ai/architectur
 | Phase | What | State |
 | ----- | ---- | ----- |
 | 0 | Project spec, architecture, ROS metapackage | ✅ done |
-| 1 | `sim/` — MJCF model + analytical physics + simulator API | ✅ done |
-| 2 | `tools/validate_sim.py` — simulator validation (gate before RL) | ✅ done |
-| 3 | `rl/` — Gymnasium env + PPO training + eval | 🟡 scaffold done (env/train/eval, smoke-tested); real training pending |
+| 1 | `umiusi_sim/` — MJCF model + analytical physics + simulator API | ✅ done |
+| 2 | `tools/validate_sim.py` — simulator validation (gate before RL) | ✅ done (8/8) |
+| 3 | `umiusi_rl/` — Gymnasium env + PPO training + eval | ✅ done — attitude hold+cruise + disturbance robustness |
 | 4 | `ros2_ws/` — ROS 2 policy bridge (optional) | ⬜ planned |
+| 5 | Perception (camera in sim) + high-level control (balloon track/pop), Pi 4 deploy | ⬜ future |
 
 ---
 
@@ -32,44 +33,53 @@ Design docs: [`ai/project_spec.yaml`](ai/project_spec.yaml) and [`ai/architectur
 
 ```
 mujoco_ws/                # workspace container (NOT version-controlled)
-  umiusi_sim/             # ← THIS git repo: the standalone Python project
-    sim/                    # simulator core (standalone Python, no ROS)
-      assets/umiusi.xml     #   MJCF model: free base + 4 azimuth servos + 4 thrust sites
-      physics/              #   analytical hydrodynamics + thruster model
-      simulator.py          #   UmiusiSimulator: reset() / step(action) / get_state()
-    rl/                     # gymnasium env + training + eval (algorithm-agnostic)
-      envs/umiusi_pose_env.py #   UmiusiPoseEnv: go-to-pose / station-keeping
-      train.py  eval.py     #   PPO default (--algo sac/td3); models/ is gitignored
+  umiusi_sim/             # ← THIS git repo (monorepo: two installable packages under src/)
+    src/
+      umiusi_sim/           # PACKAGE 1: reusable simulator (no ROS, no RL) — usable by other robots/tasks
+        simulator.py        #   UmiusiSimulator: reset() / step(action) / get_state()
+        physics/            #   analytical hydrodynamics + thruster model
+        description/        #   robot description: umiusi.xml (MJCF); extractable later
+      umiusi_rl/            # PACKAGE 2: RL experiments (depends on umiusi_sim)
+        envs/umiusi_pose_env.py #   UmiusiPoseEnv: attitude / depth / pose / attitude_velocity
+        train.py  eval.py   #   PPO default (--algo sac/td3); models/ is gitignored
     configs/                # umiusi.yaml (physics) + train_ppo.yaml (env/reward/algo)
-    tools/                  # view (GUI), snapshot, mesh decimation
+    tools/                  # validate_sim, view (GUI), snapshot, analyze_steady, mesh decimation
     media/                  # rendered placement screenshots
-    umiusi_model/           # measured CAD data (STL + mass/placement notes)
+    umiusi_model/           # measured CAD provenance (STL[gitignored] + mass/placement notes)
     ai/                     # project_spec.yaml, architecture.md, review_policy.yaml
+    pyproject.toml  uv.lock # uv-managed deps (CPU torch pinned); reproducible via `uv sync`
   ros2_ws/                 # separate ROS 2 workspace (bridge, later phases; its own repo when needed)
 ```
+
+The split keeps the **reusable simulation** (`umiusi_sim`) independent of the **RL experiments**
+(`umiusi_rl`): `umiusi_rl` imports `umiusi_sim` as a library. If a second consumer appears (e.g. a
+perception / Pi 4 stack), `umiusi_sim` can be promoted to its own repo consumed via a normal
+`pip install` git dependency with no churn to the import paths.
 
 ---
 
 ## Setup
 
-WSL Ubuntu 24.04, Python 3.12, CPU-only. ROS 2 is **not** needed for the simulation/RL.
+WSL Ubuntu 24.04, Python ≥3.10, CPU-only. ROS 2 is **not** needed for the simulation/RL.
+
+The project uses [**uv**](https://docs.astral.sh/uv/) — one command builds a reproducible virtual
+environment from `pyproject.toml` + `uv.lock` (CPU-only torch is pinned, so no CUDA download).
 
 ```bash
-# system deps (MuJoCo GUI + build)
-sudo apt update
-sudo apt install -y python3-venv python3-pip build-essential libglfw3 libglfw3-dev
+# 1. system deps (MuJoCo GUI + video encoding)
+sudo apt update && sudo apt install -y build-essential libglfw3 libglfw3-dev ffmpeg
 
-# python env
+# 2. install uv (once)
+curl -LsSf https://astral.sh/uv/install.sh | sh
+
+# 3. create the environment (installs both packages editable + all deps)
 cd ~/mujoco_ws/umiusi_sim
-python3 -m venv .venv
-source .venv/bin/activate
-python -m pip install -U pip
-pip install torch --index-url https://download.pytorch.org/whl/cpu   # CPU wheel (no GPU)
-pip install "mujoco>=3.2" "gymnasium>=0.29" "stable-baselines3[extra]>=2.3" \
-            numpy pyyaml tensorboard glfw "imageio[ffmpeg]"
+uv sync --extra dev
 ```
 
-Everything below assumes `source .venv/bin/activate` and running from the repo root (`~/mujoco_ws/umiusi_sim`).
+Run any command with `uv run` (it uses the managed `.venv` automatically), e.g.
+`uv run python -m tools.validate_sim`. All commands below assume the repo root
+(`~/mujoco_ws/umiusi_sim`); drop the `uv run` prefix if you `source .venv/bin/activate` first.
 
 ---
 
@@ -123,16 +133,16 @@ GPU — the MuJoCo sim is the bottleneck and runs on CPU).
 | `pose` | go-to-pose: random **position** (upright) | AHRS + depth + DVL + position (`full`) | needs a position reference |
 
 ```bash
-python -m rl.train --task attitude       --run-name att       --n-envs 12   # AHRS only
-python -m rl.train --task attitude_depth --run-name attdepth   --n-envs 12   # AHRS + depth
-python -m rl.train --task pose           --run-name pose       --n-envs 12   # + DVL + position
-python -m rl.train --task pose --obs-mode imu_depth_dvl --run-name pose_dvl  # DVL velocity, no abs. XZ
-python -m rl.train --algo sac --task attitude                                # switch algorithm
+python -m umiusi_rl.train --task attitude       --run-name att       --n-envs 12   # AHRS only
+python -m umiusi_rl.train --task attitude_depth --run-name attdepth   --n-envs 12   # AHRS + depth
+python -m umiusi_rl.train --task pose           --run-name pose       --n-envs 12   # + DVL + position
+python -m umiusi_rl.train --task pose --obs-mode imu_depth_dvl --run-name pose_dvl  # DVL velocity, no abs. XZ
+python -m umiusi_rl.train --algo sac --task attitude                                # switch algorithm
 
 tensorboard --logdir models/att/tb                          # watch training curves
-python -m rl.eval --model models/att/final.zip              # headless metrics (task auto-loaded)
-python -m rl.eval --model models/att/final.zip --render     # watch live in the GUI viewer (WSLg)
-MUJOCO_GL=egl python -m rl.eval --model models/att/final.zip --record out.mp4   # headless video
+python -m umiusi_rl.eval --model models/att/final.zip              # headless metrics (task auto-loaded)
+python -m umiusi_rl.eval --model models/att/final.zip --render     # watch live in the GUI viewer (WSLg)
+MUJOCO_GL=egl python -m umiusi_rl.eval --model models/att/final.zip --record out.mp4   # headless video
 ```
 
 An **RGB target marker** (red=X, green=Y, blue=Z axis triad) shows the commanded pose next to the
@@ -156,9 +166,9 @@ rejection without an absolute position). `imu`/`imu_depth` therefore cannot hold
 
 ```python
 import numpy as np
-from sim.simulator import UmiusiSimulator
+from umiusi_sim.simulator import UmiusiSimulator
 
-sim = UmiusiSimulator()                 # loads sim/assets/umiusi.xml + configs/umiusi.yaml
+sim = UmiusiSimulator()                 # loads src/umiusi_sim/description/umiusi.xml + configs/umiusi.yaml
 sim.reset(pos=(0.0, 0.5, 0.0))          # +Y is up
 
 # action = [servo_1..4, esc_1..4], each in [-1, 1]
@@ -173,7 +183,7 @@ print(state["pos"], state["quat"], state["lin_vel"], state["servo"], state["thru
 Quick smoke test of the physics loop:
 
 ```bash
-python -m sim.simulator
+uv run python -m umiusi_sim.simulator
 ```
 
 ---
@@ -185,7 +195,7 @@ buoyancy offset, diagonal linear+quadratic drag, added mass (off by default), th
 measured hull mass/CoM/inertia. Values marked `PLACEHOLDER` (drag, thrust, buoyancy volume) still need calibration in
 phase-2 validation.
 
-The robot geometry lives in [`sim/assets/umiusi.xml`](sim/assets/umiusi.xml). It is intentionally coarse (octahedron
+The robot geometry lives in [`src/umiusi_sim/description/umiusi.xml`](src/umiusi_sim/description/umiusi.xml). It is intentionally coarse (octahedron
 hull + cylinder thrusters) for speed; **dynamics use the measured mass/inertia**, not the coarse shapes.
 
 **Coordinate frame:** the CAD frame with **+Y up** (the 4 thrusters lie in the X-Z plane). Gravity is `(0, -9.81, 0)`.
