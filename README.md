@@ -48,7 +48,7 @@ mujoco_ws/                # workspace container (NOT version-controlled)
         envs/umiusi_pose_env.py #   UmiusiPoseEnv: attitude / depth / pose / attitude_velocity
         train.py  eval.py   #   PPO default (--algo sac/td3); models/ is gitignored
     configs/                # umiusi.yaml (physics) + train_ppo.yaml (env/reward/algo)
-    tools/                  # validate_sim, view, snapshot, camera_demo, scenario_demo, competition_run, analyze_steady
+    tools/                  # validate_sim, view, drive, snapshot, camera_demo, scenario_demo, competition_run, analyze_steady
     media/                  # rendered placement screenshots
     pyproject.toml  uv.lock # uv-managed deps (CPU torch pinned); reproducible via `uv sync`
     # local-only (gitignored / outside the repo): models/ (trained policies), umiusi_model/ (CAD provenance),
@@ -123,18 +123,26 @@ python -m tools.validate_sim -v     # + per-thruster detail and calibration numb
 Covers buoyancy float/sink, self-leveling, drag, per-thruster thrust direction, servo tracking + tilt,
 feed-forward allocation (heave/surge decoupling), and open-loop stability. Headless.
 
-**Watch it live** (GUI — no `MUJOCO_GL`):
+**Watch it live** (GUI — needs a display, no `MUJOCO_GL`). All viewers share one module
+(`umiusi_sim.viewer`), so the camera + controls are identical everywhere: the default is the fixed
+**track** camera (upright for +Y-up, follows the vehicle); press `[` / `]` to cycle cameras; the free
+camera is mouse-controllable but looks tilted (the model is +Y-up — the fixed cameras are correct).
 ```bash
-python -m tools.view          # float freely and self-level (zero action)
-python -m tools.view --demo   # sweep the azimuth servos and pulse the thrusters
-python -m tools.view --free   # start on the mouse-controllable free camera
+python -m tools.view                                  # robot in the default world (grid floor + axis triad)
+python -m tools.view --demo                           # sweep the servos and pulse the thrusters
+python -m tools.view --bare                           # plain robot, no world
+python -m tools.view --scenario competition_balloon   # view inside the competition pool
 ```
 
-`tools.view` is a **standalone** viewer: it opens a fresh sim of the bare robot in empty space (there is
-no default "world" yet) and does **not** attach to a running training/eval process. To watch a *specific*
-run live, pass `--render` to that command (`eval --render`, `competition_run --render`); training itself
-is headless (watch curves in tensorboard, then `eval --render`). An interactive drive tool (viewer + a
-trained policy + keyboard target commands) and a default world are planned — see the Roadmap.
+**Drive a trained policy** — command a target orientation/direction and watch it respond:
+```bash
+python -m tools.drive --model models/cruise/final.zip            # keys: A/D or ←/→ steer, Q/E yaw, R/F tilt, Space stop
+python -m tools.drive --model models/cruise/final.zip --headless 150   # headless self-test (command +X → cosine ~1)
+```
+
+`tools.view`/`tools.drive` are **standalone** (a fresh sim, not attached to a running process). To watch a
+*specific* run live instead, pass `--render` to that command (`eval --render`, `competition_run --render`);
+training is headless (watch curves in tensorboard, then `eval --render`).
 
 **Onboard cameras** — two fixed cameras move with the vehicle: `front_cam` (+X, forward) and `down_cam`
 (nadir, −Y). `UmiusiSimulator.render_camera(camera, w, h)` returns an `(H, W, 3)` uint8 RGB frame:
@@ -227,8 +235,9 @@ absolute position). `imu`/`imu_depth` therefore cannot hold horizontal position.
 
 **What works today** (standalone Python, CPU): the analytical simulator + validation gate, the four RL
 tasks with trained attitude-hold and attitude+direction-cruise policies (incl. disturbance + light
-sim2real domain randomization), onboard cameras, and the competition balloon-popping scenario running
-end-to-end with the analytical feed-forward driver + scoring.
+sim2real domain randomization), onboard cameras, the competition balloon-popping scenario running
+end-to-end with the analytical feed-forward driver + scoring, a unified live viewer with a legible
+default world, and an interactive drive tool (steer a trained policy from the keyboard).
 
 **Not supported yet:**
 - **ROS 2 integration.** The sim is standalone Python — there is no ROS bridge yet (ROS 2 isn't even
@@ -244,14 +253,10 @@ end-to-end with the analytical feed-forward driver + scoring.
 - **Perception + autonomy.** Camera-based balloon detection/localization and a behavior FSM (search →
   approach → ram → reacquire) to replace `competition_run`'s ground-truth greedy driver are still in
   design. The feed-forward frame mapping (`Vx→−X` etc., see `control.py`) also needs reconciling.
-- **Tooling.** An interactive drive tool (viewer + a trained policy + keyboard target-orientation/direction
-  commands) and a default world for the free viewer are planned; `tools.view` is currently a bare-robot
-  free-space viewer and does not attach to a running process (use `--render` per run for live viewing).
 - **Sim-to-real + Pi 4 deploy.** Domain-randomization hooks exist; on-hardware tuning is future.
 
-**Planned order:** interactive drive tool + default world → perception + behavior FSM (phase 5b) →
-ROS 2 hardware-plugin bridge (phase 4) → depth-sensor decision + 3-D depth-hold locomotion →
-sim-to-real / Pi 4 (phase 6). See the Status table above.
+**Planned order:** perception + behavior FSM (phase 5b) → ROS 2 hardware-plugin bridge (phase 4) →
+depth-sensor decision + 3-D depth-hold locomotion → sim-to-real / Pi 4 (phase 6). See the Status table above.
 
 ---
 
