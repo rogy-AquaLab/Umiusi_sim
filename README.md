@@ -3,8 +3,9 @@
 MuJoCo simulation + reinforcement learning for the **UMIUSI** azimuth-thruster underwater robot.
 
 It simulates each thruster's **servo drive** (azimuth angle) and **thruster output** (ESC command → thrust) with an
-explicit **analytical hydrodynamic model** (buoyancy, drag, added mass), and is built toward training a policy to reach
-and hold a target pose (go-to-pose / station-keeping).
+explicit **analytical hydrodynamic model** (buoyancy, drag, added mass). It trains policies for attitude hold and
+attitude + direction cruise, and — toward the target competition — hosts a **balloon-popping scenario** that runs
+end-to-end (drive the world, pop balloons, score) with onboard cameras and an analytical feed-forward controller.
 
 - **Training** depends only on Python (MuJoCo + Gymnasium + Stable-Baselines3 + PyTorch) — **no ROS 2 required**.
 - A thin **ROS 2 bridge** (under `ros2_ws/`) is planned only for evaluation / sim-to-real, reusing the existing
@@ -24,9 +25,10 @@ repository; this README plus code comments are the in-repo reference.
 | 0 | Project spec, architecture, ROS metapackage | ✅ done |
 | 1 | `umiusi_sim/` — MJCF model + analytical physics + simulator API | ✅ done |
 | 2 | `tools/validate_sim.py` — simulator validation (gate before RL) | ✅ done (8/8) |
-| 3 | `umiusi_rl/` — Gymnasium env + PPO training + eval | ✅ done — attitude hold+cruise + disturbance robustness |
-| 4 | `ros2_ws/` — ROS 2 policy bridge (optional) | ⬜ planned |
-| 5 | Perception (camera in sim) + high-level control (balloon track/pop), Pi 4 deploy | ⬜ future |
+| 3 | `umiusi_rl/` — Gymnasium env + PPO training + eval | ✅ done — attitude hold + direction cruise + disturbance/sim2real robustness |
+| 5a | Competition sim: balloon world + cameras + analytical FF driver, runnable & scoring (no RL) | ✅ done |
+| 5b | Perception (camera → balloon detect) + behavior FSM (autonomy), Pi 4 deploy | 🟡 next |
+| 4 | `ros2_ws/` — ROS 2 bridge: a custom MuJoCo `ros2_control` hardware plugin (integration phase) | ⬜ planned |
 
 ---
 
@@ -37,18 +39,20 @@ mujoco_ws/                # workspace container (NOT version-controlled)
   umiusi_sim/             # ← THIS git repo (monorepo: two installable packages under src/)
     src/
       umiusi_sim/           # PACKAGE 1: reusable simulator (no ROS, no RL) — usable by other robots/tasks
-        simulator.py        #   UmiusiSimulator: reset() / step(action) / get_state()
+        simulator.py        #   UmiusiSimulator: reset() / step(action) / render_camera()
+        control.py          #   analytical feed-forward allocation (AttitudeController port, no learning)
         physics/            #   analytical hydrodynamics + thruster model
-        description/        #   robot description: umiusi.xml (MJCF); extractable later
+        description/        #   robot description: umiusi.xml (MJCF) + onboard cameras
+          scenarios/        #     composed worlds (MjSpec) — competition_balloon.py (pool+balloons+pin)
       umiusi_rl/            # PACKAGE 2: RL experiments (depends on umiusi_sim)
         envs/umiusi_pose_env.py #   UmiusiPoseEnv: attitude / depth / pose / attitude_velocity
         train.py  eval.py   #   PPO default (--algo sac/td3); models/ is gitignored
     configs/                # umiusi.yaml (physics) + train_ppo.yaml (env/reward/algo)
-    tools/                  # validate_sim, view (GUI), snapshot, analyze_steady, mesh decimation
+    tools/                  # validate_sim, view, snapshot, camera_demo, scenario_demo, competition_run, analyze_steady
     media/                  # rendered placement screenshots
-    umiusi_model/           # measured CAD provenance (STL[gitignored] + mass/placement notes)
-    ai/                     # project_spec.yaml, architecture.md, review_policy.yaml
     pyproject.toml  uv.lock # uv-managed deps (CPU torch pinned); reproducible via `uv sync`
+    # local-only (gitignored / outside the repo): models/ (trained policies), umiusi_model/ (CAD provenance),
+    # and the ~/mujoco_ws/ai/ working docs (project_spec, architecture, sim_spec) kept beside the repo.
   ros2_ws/                 # separate ROS 2 workspace (bridge, later phases; its own repo when needed)
 ```
 
@@ -131,20 +135,28 @@ GPU — the MuJoCo sim is the bottleneck and runs on CPU).
 | --- | --- | --- | --- |
 | `attitude` | track a random target **orientation** | AHRS, e.g. BNO055 (`imu`) | horizontal & depth drift (unobserved) |
 | `attitude_depth` | random orientation **+ depth** | AHRS + pressure/depth (`imu_depth`) | horizontal drifts |
+| `attitude_velocity` | hold orientation **+ cruise in a commanded direction** | AHRS + body-frame velocity command (`imu`) | **direction-only** (speed magnitude unobservable without a DVL) |
 | `pose` | go-to-pose: random **position** (upright) | AHRS + depth + DVL + position (`full`) | needs a position reference |
 
 ```bash
-python -m umiusi_rl.train --task attitude       --run-name att       --n-envs 12   # AHRS only
-python -m umiusi_rl.train --task attitude_depth --run-name attdepth   --n-envs 12   # AHRS + depth
-python -m umiusi_rl.train --task pose           --run-name pose       --n-envs 12   # + DVL + position
-python -m umiusi_rl.train --task pose --obs-mode imu_depth_dvl --run-name pose_dvl  # DVL velocity, no abs. XZ
-python -m umiusi_rl.train --algo sac --task attitude                                # switch algorithm
+python -m umiusi_rl.train --task attitude          --run-name att      --n-envs 12   # AHRS only
+python -m umiusi_rl.train --task attitude_velocity --run-name cruise   --n-envs 12   # hold + direction cruise (auto-curriculum)
+python -m umiusi_rl.train --task attitude_velocity --run-name cruise_dr --disturb --domain-rand   # + water current/impulses + sim2real DR
+python -m umiusi_rl.train --task pose --obs-mode imu_depth_dvl --run-name pose_dvl   # DVL velocity, no abs. XZ
+python -m umiusi_rl.train --algo sac --task attitude                                 # switch algorithm
 
-tensorboard --logdir models/att/tb                          # watch training curves
-python -m umiusi_rl.eval --model models/att/final.zip              # headless metrics (task auto-loaded)
-python -m umiusi_rl.eval --model models/att/final.zip --render     # watch live in the GUI viewer (WSLg)
-MUJOCO_GL=egl python -m umiusi_rl.eval --model models/att/final.zip --record out.mp4   # headless video
+tensorboard --logdir models/cruise/tb                             # watch training curves
+python -m umiusi_rl.eval --model models/cruise/final.zip                  # headless metrics (task/flags auto-loaded from meta)
+python -m umiusi_rl.eval --model models/cruise/final.zip --no-disturb     # isolate the policy's own steadiness (no current/impulses)
+python -m umiusi_rl.eval --model models/cruise/final.zip --domain-rand    # stress-test under model mismatch (sim2real)
+MUJOCO_GL=egl python -m umiusi_rl.eval --model models/cruise/final.zip --record out.mp4   # headless video
 ```
+
+Flags: `--disturb` adds a per-episode water current + random force impulses; `--domain-rand` randomizes
+buoyancy/thrust/drag + adds observation noise + a 1-step control→actuation latency (sim2real robustness).
+Both are recorded in `meta.yaml` so `eval` reproduces the training condition; `eval --no-disturb` /
+`--domain-rand` override it. `eval` also reports **mean angular velocity** (cruise wobble) alongside
+speed-along-command, sideways drift, thrust use, and servo motion.
 
 An **RGB target marker** (red=X, green=Y, blue=Z axis triad) shows the commanded pose next to the
 vehicle so you can see it tracking the target orientation. `--render`/`--record` use a **tracking
@@ -162,6 +174,40 @@ Checkpoints, tensorboard logs, and the final policy go to the gitignored `models
 `full`. A 9-DOF AHRS (BNO055) gives absolute orientation incl. magnetometer heading (cheap → attitude
 tasks are well-posed); a pressure sensor gives depth; a DVL gives body velocity (enables drift/current
 rejection without an absolute position). `imu`/`imu_depth` therefore cannot hold horizontal position.
+
+### Onboard cameras (perception groundwork)
+
+The model carries two fixed cameras that move with the vehicle: **`front_cam`** (looks along +X, the
+cruise/forward axis) and **`down_cam`** (nadir, −Y). `UmiusiSimulator.render_camera(camera, w, h)` returns
+an `(H, W, 3)` uint8 RGB frame (offscreen, so run headless with `MUJOCO_GL=egl`).
+
+```bash
+MUJOCO_GL=egl python -m tools.camera_demo [out.png]   # step, capture a front_cam frame (default ./front_cam.png)
+```
+
+### Competition simulation (balloon-popping, no RL required)
+
+Toward the target competition (fully-autonomous underwater **balloon-popping**), a composed scenario adds a
+3.3 m pool, colour-coded tethered balloons (**red @0.5 m +30, yellow @1.5 m +10, blue @0.7 m −10 decoy**),
+and a pin on the vehicle. It runs **end-to-end without any learning**, driven by an analytical feed-forward
+controller (`umiusi_sim.control`, a port of the real `sinsei_umiusi_control` AttitudeController allocation).
+
+```bash
+MUJOCO_GL=egl python -m tools.scenario_demo                          # render the competition world (front/down cams)
+MUJOCO_GL=egl python -m tools.competition_run --seconds 40           # drive, pop balloons, score, write an mp4
+#   options: --record <path.mp4>  --render (GUI viewer)  --seed <N>
+python -m umiusi_sim.control                                         # feed-forward allocation self-test
+```
+
+`competition_run` uses a ground-truth greedy driver (seek the nearest positive-value balloon, avoid blue),
+geometric pop detection (pin tip vs balloon), and prints a pop timeline + final score (typically 80: both
+reds + both yellows, blue avoided). The composition uses `mujoco.MjSpec` (`description/scenarios/`) and does
+**not** modify the base robot model, so `validate_sim` stays 8/8. Perception (camera → balloon detection)
+and a behavior FSM replace the ground-truth driver in the next phase.
+
+> **Note:** the feed-forward allocation matrix comes from the real controller, whose axes do **not** line up
+> 1:1 with this MuJoCo model (empirically `Vx → −X`, `Vz → +Y`, `Vy → yaw couple`). This frame mapping is
+> documented in `control.py` and must be reconciled before the real `ros2_control` controllers can drive the sim.
 
 ### Drive the simulator from Python
 
@@ -196,8 +242,9 @@ buoyancy offset, diagonal linear+quadratic drag, added mass (off by default), th
 measured hull mass/CoM/inertia. Values marked `PLACEHOLDER` (drag, thrust, buoyancy volume) still need calibration in
 phase-2 validation.
 
-The robot geometry lives in [`src/umiusi_sim/description/umiusi.xml`](src/umiusi_sim/description/umiusi.xml). It is intentionally coarse (octahedron
-hull + cylinder thrusters) for speed; **dynamics use the measured mass/inertia**, not the coarse shapes.
+The robot geometry lives in [`src/umiusi_sim/description/umiusi.xml`](src/umiusi_sim/description/umiusi.xml). It is intentionally coarse
+(octagonal-prism hull + T-shaped azimuth thrusters + two onboard cameras) for speed; **dynamics use the
+measured mass/inertia**, not the coarse shapes.
 
 **Coordinate frame:** the CAD frame with **+Y up** (the 4 thrusters lie in the X-Z plane). Gravity is `(0, -9.81, 0)`.
 
