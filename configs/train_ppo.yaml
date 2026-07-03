@@ -71,10 +71,12 @@ reward:
 # Applied at each reset as a multiplicative/additive perturbation around the config values.
 domain_rand:
   enabled: false                  # enable at train/eval time with --domain-rand (sim2real robustness)
-  buoyancy_frac: 0.10             # displaced_volume *= 1 + U(-frac, frac)
-  thrust_frac: 0.10               # thrust_per_cmd  *= 1 + U(-frac, frac)
-  drag_frac: 0.20                 # linear & quadratic drag *= 1 + U(-frac, frac)
-  obs_noise: 0.01                 # gaussian obs noise std (in obs units; ~0.6deg / 0.01 rad·s⁻¹ sensor noise)
+  # LIGHT by default: moderate DR (0.10/0.10/0.20) regressed cruise DIRECTION tracking (drift 0.04->0.11,
+  # success 100%->60%). These lighter fracs aim to keep av_curr4-level direction while adding some robustness.
+  buoyancy_frac: 0.05             # displaced_volume *= 1 + U(-frac, frac)
+  thrust_frac: 0.05               # thrust_per_cmd  *= 1 + U(-frac, frac)
+  drag_frac: 0.10                 # linear & quadratic drag *= 1 + U(-frac, frac)
+  obs_noise: 0.005                # gaussian obs noise std (in obs units; ~0.3deg / 0.005 rad·s⁻¹ sensor noise)
   action_latency_steps: 1         # control->actuation delay [control steps] (~20 ms at 50 Hz)
 
 # External disturbances (steady water current + random force impulses). DEFAULT OFF; --disturb enables.
