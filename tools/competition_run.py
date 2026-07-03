@@ -136,8 +136,10 @@ def main():
         recorder = mujoco.Renderer(sim.model, height=480, width=640)
     viewer = None
     if args.render:
-        from mujoco import viewer as mj_viewer  # local import; only when a display is available
-        viewer = mj_viewer.launch_passive(sim.model, sim.data)
+        from umiusi_sim.viewer import UmiusiViewer  # local import; only when a display is available
+
+        viewer = UmiusiViewer(sim.model, sim.data, base_id=sim.base_id, cam="track",
+                              control_rate_hz=sim.cfg["sim"]["control_rate_hz"]).launch()
 
     popped_set, score, timeline = set(), 0, []
     for step in range(n_steps):

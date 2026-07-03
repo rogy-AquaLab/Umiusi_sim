@@ -385,12 +385,15 @@ class UmiusiPoseEnv(gym.Env):
         if self.render_mode != "human":
             return
         if self._viewer is None:
-            import mujoco.viewer
+            # Route through the shared viewer so eval --render matches every other tool: the
+            # fixed "track" camera (upright, follows the vehicle). Lazy import keeps headless
+            # eval (no --render) free of any GUI dependency.
+            from umiusi_sim.viewer import UmiusiViewer
 
-            self._viewer = mujoco.viewer.launch_passive(self.sim.model, self.sim.data)
-            self._viewer.cam.type = mujoco.mjtCamera.mjCAMERA_FIXED
-            # "track" follows the vehicle so it stays in frame even as it drifts.
-            self._viewer.cam.fixedcamid = self.sim.model.camera("track").id
+            self._viewer = UmiusiViewer(
+                self.sim.model, self.sim.data, base_id=self.sim.base_id, cam="track",
+                control_rate_hz=self.sim.cfg["sim"]["control_rate_hz"],
+            ).launch()
         self._viewer.sync()
 
     def close(self):
