@@ -130,6 +130,12 @@ python -m tools.view --demo   # sweep the azimuth servos and pulse the thrusters
 python -m tools.view --free   # start on the mouse-controllable free camera
 ```
 
+`tools.view` is a **standalone** viewer: it opens a fresh sim of the bare robot in empty space (there is
+no default "world" yet) and does **not** attach to a running training/eval process. To watch a *specific*
+run live, pass `--render` to that command (`eval --render`, `competition_run --render`); training itself
+is headless (watch curves in tensorboard, then `eval --render`). An interactive drive tool (viewer + a
+trained policy + keyboard target commands) and a default world are planned — see the Roadmap.
+
 **Onboard cameras** — two fixed cameras move with the vehicle: `front_cam` (+X, forward) and `down_cam`
 (nadir, −Y). `UmiusiSimulator.render_camera(camera, w, h)` returns an `(H, W, 3)` uint8 RGB frame:
 ```bash
@@ -214,6 +220,38 @@ gitignored `models/<run-name>/`.
 A 9-DOF AHRS (BNO055) gives absolute orientation incl. magnetometer heading (cheap → attitude tasks are
 well-posed); a pressure sensor gives depth; a DVL gives body velocity (drift/current rejection without an
 absolute position). `imu`/`imu_depth` therefore cannot hold horizontal position.
+
+---
+
+## Roadmap & current limitations
+
+**What works today** (standalone Python, CPU): the analytical simulator + validation gate, the four RL
+tasks with trained attitude-hold and attitude+direction-cruise policies (incl. disturbance + light
+sim2real domain randomization), onboard cameras, and the competition balloon-popping scenario running
+end-to-end with the analytical feed-forward driver + scoring.
+
+**Not supported yet:**
+- **ROS 2 integration.** The sim is standalone Python — there is no ROS bridge yet (ROS 2 isn't even
+  installed here). Driving the sim from the real `sinsei_umiusi_control` controllers is planned as a
+  custom MuJoCo `ros2_control` hardware plugin (mirroring the CAN plugin; `hardware:={can|mock|mujoco}`),
+  so the same controllers/launch run in sim and on the robot. The community `mujoco_ros2_control` was
+  evaluated and ruled out (it exposes only joint/sensor interfaces, not our ESC/servo GPIO + site-force
+  actuation + analytical hydrodynamics).
+- **3-D depth-holding locomotion.** The trained low-level cruise is orientation + *horizontal* direction
+  only. The final drivetrain wants orientation + depth-hold + horizontal cruise, but the depth-sensor
+  choice isn't fixed yet, so that training is on hold. (The env already supports a 3-D velocity command
+  via `vel_cmd_horizontal: false`.)
+- **Perception + autonomy.** Camera-based balloon detection/localization and a behavior FSM (search →
+  approach → ram → reacquire) to replace `competition_run`'s ground-truth greedy driver are still in
+  design. The feed-forward frame mapping (`Vx→−X` etc., see `control.py`) also needs reconciling.
+- **Tooling.** An interactive drive tool (viewer + a trained policy + keyboard target-orientation/direction
+  commands) and a default world for the free viewer are planned; `tools.view` is currently a bare-robot
+  free-space viewer and does not attach to a running process (use `--render` per run for live viewing).
+- **Sim-to-real + Pi 4 deploy.** Domain-randomization hooks exist; on-hardware tuning is future.
+
+**Planned order:** interactive drive tool + default world → perception + behavior FSM (phase 5b) →
+ROS 2 hardware-plugin bridge (phase 4) → depth-sensor decision + 3-D depth-hold locomotion →
+sim-to-real / Pi 4 (phase 6). See the Status table above.
 
 ---
 

@@ -11,6 +11,7 @@
 name = "umiusi_sim"
 version = "0.1.0"
 description = "MuJoCo simulation + RL for the UMIUSI azimuth-thruster underwater robot"
+license = { text = "MIT" }
 requires-python = ">=3.10"
 dependencies = [
     "mujoco>=3.2",
