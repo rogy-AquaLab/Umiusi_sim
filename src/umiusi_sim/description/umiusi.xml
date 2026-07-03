@@ -73,6 +73,13 @@
       <!-- Coarse octagonal-prism hull, placed at the bbox center (visual only). -->
       <geom name="hull" type="mesh" mesh="hull_prism" pos="-0.23098 0.100 0.0" rgba="0.95 0.85 0.12 1"/>
 
+      <!-- Onboard cameras rigidly fixed to the base (move with the robot). Perception groundwork
+           (phase5). A MuJoCo camera looks down its local -Z with +Y as image-up. Cruise/forward
+           axis is +X (the RL v_cmd cone is centred on +X). front_cam: -Z along +X, image-up +Y.
+           down_cam: -Z along -Y (nadir), image-up +X (forward at top of frame). -->
+      <camera name="front_cam" pos="0.10 0.12 0.0" xyaxes="0 0 1  0 1 0" fovy="60"/>
+      <camera name="down_cam" pos="-0.23 -0.02 0.0" xyaxes="0 0 1  1 0 0" fovy="60"/>
+
       <!-- Azimuth thrusters (T-shaped ducted props), matching sinsei_umiusi_control's allocation:
            the servo tilts the thrust between HORIZONTAL (tangential, servo=0) and VERTICAL
            (servo=+90, up), i.e. phi = atan(f_vertical / f_horizontal). The hinge axis is the

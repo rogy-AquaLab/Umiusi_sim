@@ -75,6 +75,8 @@ class UmiusiSimulator:
         sys_com_local = R0.T @ (self.data.subtree_com[self.base_id] - self.data.xpos[self.base_id])
         self.cob_local = sys_com_local + np.array([0.0, self.buoyancy_offset, 0.0])
 
+        self._renderer = None  # lazy mujoco.Renderer for render_camera(); cached per (w, h)
+
         self.reset()
 
     # -- lifecycle -------------------------------------------------------------
@@ -167,6 +169,22 @@ class UmiusiSimulator:
             "servo": np.array([d.qpos[a] for a in self.servo_qadr]),
             "thrust": self.thrust_mag.copy(),
         }
+
+    # -- perception ------------------------------------------------------------
+    def render_camera(self, camera="front_cam", width=320, height=240):
+        """Return an (H, W, 3) uint8 RGB image from an onboard MJCF camera.
+
+        Optional and self-contained: it reads the current physics state but does not
+        advance or alter it. A mujoco.Renderer is created lazily and cached (re-created
+        only if width/height change). Headless use needs an offscreen GL backend, e.g.
+        `MUJOCO_GL=egl` (or osmesa) in the environment; a GUI/desktop GL context works too.
+        """
+        if self._renderer is None or (self._renderer.width, self._renderer.height) != (width, height):
+            if self._renderer is not None:
+                self._renderer.close()
+            self._renderer = mujoco.Renderer(self.model, height=height, width=width)
+        self._renderer.update_scene(self.data, camera=camera)
+        return self._renderer.render()
 
 
 if __name__ == "__main__":
