@@ -41,9 +41,11 @@ def main():
     md = Path(args.model).parent
     meta = yaml.safe_load((md / "meta.yaml").read_text()) if (md / "meta.yaml").exists() else {}
     cfg = load_config(meta.get("config", "configs/train_ppo.yaml"))
-    for k in ("task", "obs_mode"):
-        if k in meta:
+    for k in ("task", "obs_mode", "vel_cmd_cone_deg", "yaw_target_deg", "tilt_target_deg"):
+        if meta.get(k) is not None:
             cfg["env"][k] = meta[k]
+    if meta.get("disturbance"):  # measure steady state under the same disturbances it trained with
+        cfg.setdefault("disturbance", {})["enabled"] = True
     env = UmiusiPoseEnv(cfg)
 
     rms = None

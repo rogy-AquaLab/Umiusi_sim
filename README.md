@@ -126,7 +126,7 @@ tune the `PLACEHOLDER` values (buoyancy `displaced_volume`, drag, thrust map). R
 
 ### Train / evaluate a policy (RL)
 
-Three selectable **tasks** (`--task`), each matched to a realistic (cheap) sensor suite. The reward
+Four selectable **tasks** (`--task`), each matched to a realistic (cheap) sensor suite. The reward
 and success are always computed from the true state, so a limited sensor set just leaves part of the
 task unobservable. Training is CPU-only and scales with the number of parallel environments (not a
 GPU — the MuJoCo sim is the bottleneck and runs on CPU).
@@ -239,8 +239,8 @@ uv run python -m umiusi_sim.simulator
 
 All physical parameters live in [`configs/umiusi.yaml`](configs/umiusi.yaml): water density / displaced volume /
 buoyancy offset, diagonal linear+quadratic drag, added mass (off by default), thrust map, servo range/slew, and the
-measured hull mass/CoM/inertia. Values marked `PLACEHOLDER` (drag, thrust, buoyancy volume) still need calibration in
-phase-2 validation.
+measured hull mass/CoM/inertia. The drag coefficients are still `PLACEHOLDER`; `displaced_volume` and the thrust map
+are first estimates pending hardware confirmation. `validate_sim -v` prints calibration numbers for these.
 
 The robot geometry lives in [`src/umiusi_sim/description/umiusi.xml`](src/umiusi_sim/description/umiusi.xml). It is intentionally coarse
 (octagonal-prism hull + T-shaped azimuth thrusters + two onboard cameras) for speed; **dynamics use the

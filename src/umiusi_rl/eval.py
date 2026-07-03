@@ -48,7 +48,7 @@ def main():
 
     cfg = load_config(config)
     # match the task + sensor suite + curriculum condition the policy was trained with
-    for k in ("task", "obs_mode", "vel_cmd_cone_deg", "yaw_target_deg"):
+    for k in ("task", "obs_mode", "vel_cmd_cone_deg", "yaw_target_deg", "tilt_target_deg"):
         if meta.get(k) is not None:
             cfg["env"][k] = meta[k]
     if meta.get("disturbance") and not args.no_disturb:  # evaluate under the same disturbances it trained with

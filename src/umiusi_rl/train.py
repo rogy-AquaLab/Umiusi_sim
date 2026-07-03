@@ -67,7 +67,7 @@ def main():
     ap.add_argument("--config", default="configs/train_ppo.yaml")
     ap.add_argument("--algo", choices=list(ALGOS), default=None, help="override config algo")
     ap.add_argument("--task", choices=list(_DEFAULT_OBS), default=None,
-                    help="override task (attitude | attitude_depth | pose)")
+                    help="override task (attitude | attitude_depth | attitude_velocity | pose)")
     ap.add_argument("--obs-mode", choices=["auto", "full", "imu", "imu_depth", "imu_depth_dvl"],
                     default=None, help="override sensor suite (env.obs_mode)")
     ap.add_argument("--vel-cone", type=float, default=None, help="override env.vel_cmd_cone_deg [deg]")
@@ -149,6 +149,7 @@ def main():
         yaml.safe_dump({"algo": algo, "task": task, "obs_mode": obs_mode, "vecnormalize": True,
                         "vel_cmd_cone_deg": cfg["env"].get("vel_cmd_cone_deg"),
                         "yaw_target_deg": cfg["env"].get("yaw_target_deg"),
+                        "tilt_target_deg": cfg["env"].get("tilt_target_deg"),
                         "disturbance": cfg.get("disturbance", {}).get("enabled", False),
                         "domain_rand": cfg.get("domain_rand", {}).get("enabled", False),
                         "config": args.config, "seed": seed, "total_timesteps": total_timesteps}, f)

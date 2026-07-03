@@ -23,8 +23,3 @@ def thrust_to_world(magnitude, thrust_axis_local, body_xmat):
     """
     axis = np.asarray(thrust_axis_local, dtype=float)
     return magnitude * (np.asarray(body_xmat, dtype=float).reshape(3, 3) @ axis)
-
-
-def command_to_thrust(esc_cmd, thrust_per_cmd):
-    """Map an ESC command in [-1, 1] to a thrust [N] (linear; clamp the command)."""
-    return float(np.clip(esc_cmd, -1.0, 1.0)) * thrust_per_cmd

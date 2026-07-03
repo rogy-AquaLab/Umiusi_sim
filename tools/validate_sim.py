@@ -1,8 +1,8 @@
 """Simulator validation — the hard gate that must pass before any RL (phase 3).
 
 Standalone (no RL, no ROS). Runs the analytical simulator through a set of physical
-sanity checks and prints a PASS/FAIL report plus calibration numbers for the values
-still marked PLACEHOLDER in configs/umiusi.yaml (buoyancy volume, drag, thrust map).
+sanity checks and prints a PASS/FAIL report plus calibration numbers for the
+hardware-pending values in configs/umiusi.yaml (drag, thrust map, displaced volume).
 
 Checks (see the project README):
   1. buoyancy       — net vertical force sign matches the configured volume vs. neutral,
@@ -12,7 +12,9 @@ Checks (see the project README):
   4. thrust_dir     — a single thruster at neutral servo pushes horizontally along its
                       configured mounting direction (cross-checks configs vs. the MJCF).
   5. servo_tilt     — servos track the command, and a positive servo tilts thrust UP (+Y).
-  6. open_loop      — a scripted command sequence stays finite and bounded (no runaway).
+  6. ff_alloc       — the analytical feed-forward controller yields decoupled motion (pure heave
+                      rises without spinning; pure surge stays horizontal) — guards the 8x6 matrix.
+  7. open_loop      — a scripted command sequence stays finite and bounded (no runaway).
 
 Sign conventions are hard-asserted against their physical design intent, so a wiring or
 sign bug fails the gate. The id -> lf/lb/rb/rf name mapping has no ground truth in the
@@ -226,6 +228,33 @@ def check_servo_tilt(sim, rep):
     rep.note("servo tilt detail (+0.5 command, thrust vertical component)", lines)
 
 
+def check_ff_allocation(sim, rep):
+    """The analytical feed-forward controller (control.py) must produce DECOUPLED motion: a pure
+    heave command rises straight up WITHOUT spinning (guards the f4v allocation symmetry), and a
+    pure surge command moves horizontally. This catches sign/row regressions in the 8x6 allocation
+    matrix that the force-level checks above would miss (e.g. an f_iv V_z that breaks heave)."""
+    from umiusi_sim.control import feedforward_allocation
+
+    def run(ori, vel, steps=150):
+        sim.reset(pos=(0.0, 0.0, 0.0))
+        a = feedforward_allocation(ori, vel)
+        for _ in range(steps):
+            sim.step(a)
+        return _com_vel(sim), float(np.linalg.norm(sim.get_state()["ang_vel"]))
+
+    v, spin = run([0.0, 0.0, 0.0], [0.0, 0.0, 1.0])    # pure heave (+V_z)
+    speed = np.linalg.norm(v)
+    heave_ok = speed > _EPS and v[1] > 0.0 and abs(v[1]) > 0.7 * speed and spin < 0.15
+    rep.check("ff_alloc: pure heave rises without spinning", heave_ok,
+              f"v={np.round(v, 2)} m/s, |ang_vel|={spin:.3f} rad/s (want +Y, low spin)")
+
+    v2, spin2 = run([0.0, 0.0, 0.0], [1.0, 0.0, 0.0])  # pure surge (+V_x)
+    speed2 = np.linalg.norm(v2)
+    surge_ok = speed2 > _EPS and abs(v2[1]) < 0.35 * speed2 and spin2 < 0.20
+    rep.check("ff_alloc: pure surge stays horizontal", surge_ok,
+              f"v={np.round(v2, 2)} m/s, |ang_vel|={spin2:.3f} rad/s (want horizontal, low spin)")
+
+
 def check_open_loop(sim, rep):
     """A scripted servo sweep + thrust pulse must stay finite and bounded (no runaway)."""
     sim.reset(pos=(0.0, 0.5, 0.0))
@@ -259,6 +288,7 @@ def main():
     check_drag(sim, rep)
     check_thrust_direction(sim, rep)
     check_servo_tilt(sim, rep)
+    check_ff_allocation(sim, rep)
     check_open_loop(sim, rep)
 
     # No ground truth in the model for the id -> name mapping; report the assumption.

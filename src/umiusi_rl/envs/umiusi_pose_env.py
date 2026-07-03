@@ -12,10 +12,12 @@ sensor set simply leaves part of the task unobservable:
                             AHRS + pressure/depth sensor.               obs_mode "imu_depth".
     task = "pose"           go-to-pose: random target POSITION (upright orientation).
                             Needs velocity (DVL) + a position reference. obs_mode "full".
-    task = "attitude_velocity"  hold an upright + random-yaw orientation (feedback) AND cruise at a
-                            random commanded horizontal velocity (feedforward: obs adds the 3-D
-                            velocity command, NOT measured velocity — the deterministic sim makes the
-                            v_cmd->thrust map static, so no DVL is needed). obs_mode "imu".
+    task = "attitude_velocity"  hold a random target orientation (upright + random yaw, plus bounded
+                            tilt) (feedback) AND cruise in a commanded DIRECTION (feedforward: obs adds
+                            the 3-D velocity command, NOT measured velocity — speed magnitude is
+                            unobservable without a DVL, so only the direction is controlled). The
+                            command is horizontal by default, or 3-D when vel_cmd_horizontal=false
+                            (needed to reach different depths). obs_mode "imu".
 
 Observation = exteroceptive (sensor-suite dependent) ++ proprioception (ALWAYS):
     proprioception: servo/range (4) + thrust/thrust_per_cmd (4) + previous action (8) = 16
@@ -252,9 +254,14 @@ class UmiusiPoseEnv(gym.Env):
             self.target_quat = self._sample_target_quat(self.tilt_target_deg)
             depth = self.np_random.uniform(-self.depth_target_range, self.depth_target_range)
             self.target_pos = np.array([start[0], depth if self.track_depth else start[1], start[2]])
-        if self.track_velocity:  # body-frame horizontal command within +/- cone of body +X (yaw-independent)
+        if self.track_velocity:  # body-frame velocity command within +/- cone of body +X (yaw-independent)
             ang = np.radians(self.np_random.uniform(-self.vel_cmd_cone_deg, self.vel_cmd_cone_deg))
-            dhat = np.array([np.cos(ang), 0.0, np.sin(ang)])
+            if self.vel_cmd_horizontal:
+                dhat = np.array([np.cos(ang), 0.0, np.sin(ang)])  # horizontal cruise (x-z plane)
+            else:  # 3-D command: also tilt in elevation — needed to reach balloons at different depths
+                elev = np.clip(np.radians(self.np_random.uniform(-self.vel_cmd_cone_deg, self.vel_cmd_cone_deg)),
+                               -np.pi / 2, np.pi / 2)
+                dhat = np.array([np.cos(elev) * np.cos(ang), np.sin(elev), np.cos(elev) * np.sin(ang)])
             self.v_cmd = dhat * self.np_random.uniform(0.0, self.vel_cmd_max)
             Rt = np.zeros(9)
             mujoco.mju_quat2Mat(Rt, self.target_quat)
@@ -266,7 +273,7 @@ class UmiusiPoseEnv(gym.Env):
         self._act_latency = self.action_latency if self.dr.get("enabled", False) else 0
         self._act_buf = [np.zeros(ACT_DIM) for _ in range(self._act_latency)]
         self.prev_action = np.zeros(ACT_DIM)
-        self.prev_servo = np.zeros(4)
+        self.prev_servo = state["servo"].copy()  # from the post-reset state (avoid a step-1 servo-rate spike)
         self.step_count = 0
         self._place_marker(state)
         R, ori_err = self._errors(state)

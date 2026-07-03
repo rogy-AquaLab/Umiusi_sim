@@ -1,7 +1,7 @@
-# Training / RL config for UmiusiPoseEnv (go-to-pose + station-keeping).
-# Task: reach and hold a target pose. Target POSITION is randomized each episode;
-# target ORIENTATION is upright (the +Y-up model's identity orientation).
-# Consumed by rl/train.py (PPO default; --algo sac/td3 to switch). Sim params: configs/umiusi.yaml.
+# Training / RL config for UmiusiPoseEnv (multi-task: attitude / attitude_depth / attitude_velocity / pose).
+# The task is selected with --task (default below). Reward/success always use the TRUE state; a limited
+# obs_mode just leaves part of the task unobservable. See the env docstring for the four tasks.
+# Consumed by umiusi_rl/train.py (PPO default; --algo sac/td3 to switch). Sim params: configs/umiusi.yaml.
 
 sim_config: configs/umiusi.yaml   # physical model params (resolved relative to repo root)
 
@@ -24,7 +24,7 @@ env:
   yaw_target_deg: 180.0           # target yaw sampled in +/- this [deg]
   depth_target_range: 0.50        # target depth sampled in +/- this [m] (attitude_depth)
   vel_cmd_max: 0.40               # max commanded world speed [m/s] (attitude_velocity, feedforward)
-  vel_cmd_horizontal: true        # sample the velocity command in the x-z plane (horizontal cruise)
+  vel_cmd_horizontal: true        # true: horizontal (x-z) cruise cmd; false: 3-D (adds elevation, for depth approach)
   vel_cmd_cone_deg: 180.0         # v_cmd direction within +/- this of +X (0 = fixed +X; curriculum widens it)
   vel_tol: 0.10                   # velocity match tolerance [m/s] for success
   # tolerances / shaping:
