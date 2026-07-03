@@ -14,7 +14,7 @@ log/
 models/
 
 # --- CAD raw meshes (huge: base_link.stl ~52M; sim uses primitives. Keep description/ text) ---
-umiusi_model/STL/
+umiusi_model/
 
 # --- MuJoCo runtime log ---
 MUJOCO_LOG.TXT

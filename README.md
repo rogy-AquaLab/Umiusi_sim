@@ -10,7 +10,8 @@ and hold a target pose (go-to-pose / station-keeping).
 - A thin **ROS 2 bridge** (under `ros2_ws/`) is planned only for evaluation / sim-to-real, reusing the existing
   `sinsei_umiusi_control` interfaces.
 
-Design docs: [`ai/project_spec.yaml`](ai/project_spec.yaml) and [`ai/architecture.md`](ai/architecture.md).
+Design rationale and architecture notes are maintained as separate working docs outside this
+repository; this README plus code comments are the in-repo reference.
 
 ![UMIUSI model](media/umiusi_iso.png)
 
