@@ -30,8 +30,9 @@ _R = math.sqrt(2.0)
 
 # 8x6 allocation matrix. Rows: [f1h, f1v, f2h, f2v, f3h, f3v, f4h, f4v].
 # Columns (input order): [Phi_x, Phi_y, Phi_z, V_x, V_y, V_z].
-# The last row (f4v) intentionally has a 0 in the V_z column: this mirrors the authoritative
-# feed_forward.hpp (an asymmetry in the real code we port faithfully, not a typo here).
+# Verified against the authoritative source (sinsei_umiusi_control feed_forward.hpp): every vertical
+# row (f_iv) has V_z = 1.0, so a pure heave (+V_z) drives all four thrusters up symmetrically (no yaw
+# couple). (An earlier port had f4v's V_z = 0, which made pure heave spin the vehicle ~0.84 rad/s.)
 _ALLOC = np.array(
     [
         [0.0, 0.0, 1.0, -_R,  _R, 0.0],  # f1h
@@ -41,7 +42,7 @@ _ALLOC = np.array(
         [0.0, 0.0, 1.0,  _R, -_R, 0.0],  # f3h
         [-1.0, 1.0, 0.0, 0.0, 0.0, 1.0],  # f3v
         [0.0, 0.0, 1.0,  _R,  _R, 0.0],  # f4h
-        [-1.0, -1.0, 0.0, 0.0, 0.0, 0.0],  # f4v  (V_z column is 0 in the authoritative code)
+        [-1.0, -1.0, 0.0, 0.0, 0.0, 1.0],  # f4v
     ],
     dtype=float,
 )
