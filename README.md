@@ -254,9 +254,10 @@ balloon detector (colour + bearing + range from the onboard camera).
   scene. The remaining piece is a behavior FSM (search → approach → ram → reacquire) that consumes those
   detections to replace `competition_run`'s ground-truth driver, plus multi-frame tracking. The
   feed-forward frame mapping (`Vx→−X` etc., see `control.py`) still needs reconciling for real control.
-- **Decoupled viewer.** `tools.drive` (and `--render`) each launch their own in-process viewer. An
-  rviz-style standalone viewer that attaches to a *separately-running* sim would need an IPC layer
-  (e.g. shared-memory `MjData`) since the sim isn't ROS-based (no tf/topics) — a possible future addition.
+- **Decoupled viewer — done (ROS path).** For the standalone Python sim, `tools.drive` / `--render`
+  each launch their own in-process viewer. An rviz-style viewer that attaches to a *separately-running*
+  sim now exists once the ROS bridge is up: the C++ `MujocoSystem` plugin publishes the MuJoCo `qpos`,
+  and `tools/ros_view.py` (`uv sync --extra viz`) renders it over **rosbridge** via `roslibpy` (no rclpy).
 - **Sim-to-real + Pi 4 deploy.** Domain-randomization hooks exist; on-hardware tuning is future.
 
 **Planned order:** perception + behavior FSM (phase 5b) → ROS 2 hardware-plugin bridge (phase 4) →

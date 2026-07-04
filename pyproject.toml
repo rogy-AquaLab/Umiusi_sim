@@ -28,6 +28,10 @@ dev = ["imageio[ffmpeg]>=2.31", "tensorboard>=2.15", "fast-simplification", "ruf
 # Perception (phase 5b): classical-CV balloon detector. scipy.ndimage.label gives lightweight
 # connected-component labelling (preferred over pulling in opencv); RGB->HSV is done in numpy.
 perception = ["scipy>=1.10"]
+# Decoupled ROS viewer (tools/ros_view.py): attaches to a running ROS-driven sim over rosbridge
+# (ws://localhost:9090) and renders it live. roslibpy is pure-Python (no ROS install needed), so
+# it installs into this uv venv; the sim publishes /umiusi_sim/qpos which the viewer replays.
+viz = ["roslibpy>=1.5"]
 
 [build-system]
 requires = ["setuptools>=61"]
