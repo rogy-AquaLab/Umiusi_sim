@@ -250,11 +250,17 @@ balloon detector (colour + bearing + range from the onboard camera).
   only. The final drivetrain wants orientation + depth-hold + horizontal cruise, but the depth-sensor
   choice isn't fixed yet, so that training is on hold. (The env already supports a 3-D velocity command
   via `vel_cmd_horizontal: false`.)
-- **Autonomy (behavior FSM).** Camera-based balloon **detection is done** — `tools.perception_demo`
-  (`umiusi_sim.perception`, `uv sync --extra perception`): colour + bearing + range, ~100% on the sim
-  scene. The remaining piece is a behavior FSM (search → approach → ram → reacquire) that consumes those
-  detections to replace `competition_run`'s ground-truth driver, plus multi-frame tracking. The
-  feed-forward frame mapping (`Vx→−X` etc., see `control.py`) still needs reconciling for real control.
+- **Perception.** On the **sim** scene, classical colour detection is done (`tools.perception_demo`,
+  `umiusi_sim.perception`, `uv sync --extra perception`: colour + bearing + range, ~100%). On **real
+  underwater images** classical CV hits a recall wall (red attenuates to near-invisible, blue ≈ pool
+  water); colour + a Hough-circle shape pass cut the false-positive flood but can't recover red. A
+  **learned tiny-CNN detector** (`umiusi_sim.perception.learned_detector`, `tools.perception_train` /
+  `perception_bench`, `uv sync --extra learn`) breaks that wall — a 40-image baseline lifts red recall
+  0.00→0.82, blue→0.63 — and is **Pi-4-safe** (int8 ONNX, ~12–30 fps @320px projected). Next: more
+  labelled frames, then the final int8 export + a real Pi 4 benchmark.
+- **Autonomy (behavior FSM).** The remaining piece is a behavior FSM (search → approach → ram →
+  reacquire) consuming detections to replace `competition_run`'s ground-truth driver, plus multi-frame
+  tracking. The feed-forward frame mapping (`Vx→−X` etc., see `control.py`) still needs reconciling.
 - **Decoupled viewer — done (ROS path).** For the standalone Python sim, `tools.drive` / `--render`
   each launch their own in-process viewer. An rviz-style viewer that attaches to a *separately-running*
   sim now exists once the ROS bridge is up: the C++ `MujocoSystem` plugin publishes the MuJoCo `qpos`,

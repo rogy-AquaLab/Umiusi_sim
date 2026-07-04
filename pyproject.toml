@@ -32,6 +32,22 @@ perception = ["scipy>=1.10", "opencv-python-headless>=4.8"]
 # (ws://localhost:9090) and renders it live. roslibpy is pure-Python (no ROS install needed), so
 # it installs into this uv venv; the sim publishes /umiusi_sim/qpos which the viewer replays.
 viz = ["roslibpy>=1.5"]
+# Learned balloon detector (phase 5c "path B"): tiny-CNN / YOLOv8n / Hough+verifier candidates,
+# benchmarked and exported to ONNX (int8) for the Raspberry Pi 4 target.
+#   ultralytics  — YOLOv8n reference architecture (candidate b) + its ONNX export
+#   torchvision  — pulled by ultralytics; pinned to the CPU wheel like torch (see sources below)
+#   onnx/onnxruntime — the realistic edge runtime we time under (int8 quantized, single-thread)
+#   thop         — FLOP counting for the projection to Pi 4
+#   albumentations — heavy augmentation (colour jitter, blur, underwater colour-cast) to stretch 40 imgs
+learn = [
+    "ultralytics>=8.2",
+    "torchvision>=0.17",
+    "onnx>=1.15",
+    "onnxscript>=0.1",
+    "onnxruntime>=1.17",
+    "thop>=0.1.1",
+    "albumentations>=1.4",
+]
 
 [build-system]
 requires = ["setuptools>=61"]
@@ -55,6 +71,7 @@ explicit = true
 
 [tool.uv.sources]
 torch = { index = "pytorch-cpu" }
+torchvision = { index = "pytorch-cpu" }
 
 [tool.ruff]
 line-length = 119

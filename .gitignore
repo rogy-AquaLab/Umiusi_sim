@@ -35,3 +35,6 @@ venv/
 # --- RL run outputs at repo root (videos, logs, run dirs) ---
 *.mp4
 *.log
+
+# ML export artifacts
+*.onnx
