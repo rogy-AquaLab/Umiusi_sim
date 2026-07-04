@@ -56,6 +56,9 @@ BALLOON_ASPECT = 1.25
 # water/background colour with low alpha. Turbidity blur fades it further with distance.
 TETHER_RGBA = (0.28, 0.42, 0.52, 0.32)
 TETHER_RADIUS = 0.0015  # was 0.003 in the scenario
+# Bright, opaque pool-wall colour (dataset render): the raw scenery walls are low + translucent,
+# leaving a black void above them; a real pool is an enclosed bright box.
+WALL_RGBA = (0.50, 0.60, 0.66, 1.0)
 
 
 def prep_render_spec(spec: mujoco.MjSpec, hide_tethers: bool = False) -> None:
@@ -81,6 +84,56 @@ def prep_render_spec(spec: mujoco.MjSpec, hide_tethers: bool = False) -> None:
             else:
                 g.rgba[:] = TETHER_RGBA
                 g.size[0] = TETHER_RADIUS
+        elif name.startswith("pool_wall_"):
+            # Raise the low (1.2 m) scenery walls to the full water depth and make them bright +
+            # opaque, so the frame is FILLED with pool (no black "over-the-wall" void) — a bright,
+            # enclosed pool look. Height is size[1]/pos[1]; the other dims are left untouched.
+            g.pos[1] = scn.POOL_DEPTH / 2
+            g.size[1] = scn.POOL_DEPTH / 2
+            g.rgba[:] = WALL_RGBA
+    _brighten_like_pool(spec)
+
+
+def _brighten_like_pool(spec: mujoco.MjSpec) -> None:
+    """Light the scene like a real sunlit pool: bright + near-uniform, lit from ABOVE (not the
+    dark, lit-from-below look of the raw scenario). Dataset-render only (this spec is compiled and
+    thrown away per frame — the scenario's own lights / competition_run are untouched).
+
+      * Headlight ambient is raised a lot -> strong orientation-independent fill (uniform brightness,
+        the water-scattering look); diffuse raised for frontal modelling.
+      * A broad DIRECTIONAL overhead light points straight down from above the surface (+Y up),
+        standing in for sunlight through the surface; no shadow so it stays even.
+    """
+    hl = spec.visual.headlight
+    hl.ambient[:] = [0.55, 0.57, 0.60]   # was 0.10 — near-uniform bright fill
+    hl.diffuse[:] = [0.55, 0.55, 0.55]   # was 0.40
+    hl.specular[:] = [0.10, 0.10, 0.10]
+    hl.active = 1
+    sun = spec.worldbody.add_light()
+    sun.name = "dataset_sun"
+    sun.type = mujoco.mjtLightType.mjLIGHT_DIRECTIONAL
+    sun.pos = [scn.POOL_CENTER_X, scn.POOL_DEPTH + 2.0, 0.0]  # above the water surface
+    sun.dir = [0.0, -1.0, 0.0]                                # straight down
+    sun.diffuse = [0.55, 0.55, 0.58]
+    sun.specular = [0.0, 0.0, 0.0]
+    sun.castshadow = False
+    # Water-surface "ceiling" at the top of the pool: caps the open top so a camera tilted/high
+    # up sees a bright surface (as underwater) instead of the black void above the walls.
+    surf = spec.worldbody.add_geom()
+    surf.name = "dataset_surface"
+    surf.type = mujoco.mjtGeom.mjGEOM_BOX
+    surf.pos = [scn.POOL_CENTER_X, scn.POOL_DEPTH, 0.0]
+    surf.size = [scn.POOL_LEN_X / 2, 0.02, scn.POOL_LEN_Z / 2]
+    surf.rgba = [0.60, 0.72, 0.80, 1.0]  # bright surface seen from below
+    surf.contype = 0
+    surf.conaffinity = 0
+    # Underwater fog: fade the far BACKGROUND (the black region above/beyond the pool walls, where
+    # there is no geometry) to a bright water colour so the frame reads as "in water" instead of a
+    # dark room. Kept far (fogstart 6 m) so it barely touches balloons within ~5 m — the real murk
+    # still comes from the depth-based veil in degrade(). Enabled per-pass via mjRND_FOG (RGB only).
+    spec.visual.rgba.fog[:] = [0.18, 0.46, 0.55, 1.0]
+    spec.visual.map.fogstart = 6.0
+    spec.visual.map.fogend = 16.0
 
 
 def randomize_base_pose(data: mujoco.MjData, rng: np.random.Generator, camera: str) -> None:
@@ -170,16 +223,40 @@ def _boxes_from_seg(model, seg, depth, fpx, min_area_px):
     return boxes, drops
 
 
-def render_buffers(renderer, model, data, camera):
-    """Render RGB, metric depth, and per-geom segmentation from one camera (shared scene)."""
-    renderer.update_scene(data, camera=camera)
+def _geom_only_option() -> mujoco.MjvOption:
+    """A visualisation option that renders ONLY real geoms — no decorations.
+
+    Sites (the red ``pin_tip`` marker), camera/light glyphs, contact points, inertia/COM boxes,
+    joints, actuators, etc. are all disabled so they never appear in the RGB, depth, OR
+    segmentation buffers (a decoration in seg would otherwise inject a bogus object id).
+    """
+    opt = mujoco.MjvOption()
+    opt.sitegroup[:] = 0  # sites have no vis-flag; they are gated per group (all off => no sites)
+    for f in (
+        mujoco.mjtVisFlag.mjVIS_CAMERA, mujoco.mjtVisFlag.mjVIS_LIGHT,
+        mujoco.mjtVisFlag.mjVIS_JOINT, mujoco.mjtVisFlag.mjVIS_ACTUATOR,
+        mujoco.mjtVisFlag.mjVIS_CONTACTPOINT, mujoco.mjtVisFlag.mjVIS_CONTACTFORCE,
+        mujoco.mjtVisFlag.mjVIS_INERTIA, mujoco.mjtVisFlag.mjVIS_COM,
+        mujoco.mjtVisFlag.mjVIS_CONSTRAINT, mujoco.mjtVisFlag.mjVIS_PERTFORCE,
+    ):
+        opt.flags[f] = 0
+    return opt
+
+
+def render_buffers(renderer, model, data, camera, opt):
+    """Render RGB, metric depth, and per-geom segmentation from one camera (shared scene).
+
+    ``opt`` (see ``_geom_only_option``) strips all non-geom decorations from every pass.
+    """
+    renderer.update_scene(data, camera=camera, scene_option=opt)
+    renderer.scene.flags[mujoco.mjtRndFlag.mjRND_FOG] = 1  # fog only on the RGB pass
     rgb = renderer.render().copy()
     renderer.enable_depth_rendering()
-    renderer.update_scene(data, camera=camera)
+    renderer.update_scene(data, camera=camera, scene_option=opt)
     depth = renderer.render().copy()
     renderer.disable_depth_rendering()
     renderer.enable_segmentation_rendering()
-    renderer.update_scene(data, camera=camera)
+    renderer.update_scene(data, camera=camera, scene_option=opt)
     seg = renderer.render().copy()
     renderer.disable_segmentation_rendering()
     return rgb, depth, seg
@@ -232,6 +309,7 @@ def main() -> int:
     total_drops = {"size": 0, "occluded": 0, "offscreen": 0}
     depth_lo, depth_hi = np.inf, -np.inf
     seen_balloon_ids = set()
+    scene_opt = _geom_only_option()  # geoms-only (no sites/decorations) for every render pass
 
     for i in range(args.n):
         layout = scn.sample_layout(rng, n_random=int(rng.integers(3, 6)))
@@ -244,7 +322,7 @@ def main() -> int:
 
         renderer = mujoco.Renderer(model, height=args.height, width=args.width)
         try:
-            rgb, depth, seg = render_buffers(renderer, model, data, args.camera)
+            rgb, depth, seg = render_buffers(renderer, model, data, args.camera, scene_opt)
         finally:
             renderer.close()
 
