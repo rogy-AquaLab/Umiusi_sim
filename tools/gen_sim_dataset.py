@@ -48,6 +48,40 @@ DRAW_BGR = {"red": (40, 40, 220), "blue": (220, 120, 40), "yellow": (40, 210, 23
 
 OCCLUSION_MAX = 0.80  # drop a box if >80% of its expected projected area is missing (occluded/clipped)
 
+# Real competition balloons are egg/teardrop-shaped (taller than wide) — matched to
+# ai/balloon/train2017/11.jpg (clear near-field teardrops). We approximate them as ELLIPSOIDS
+# with a vertical (+Y) major axis at this aspect (height/width). ~1.25x. Seg->bbox stays exact.
+BALLOON_ASPECT = 1.25
+# Subtle underwater tether look (near-invisible fishing line): thin + low-contrast, near the
+# water/background colour with low alpha. Turbidity blur fades it further with distance.
+TETHER_RGBA = (0.28, 0.42, 0.52, 0.32)
+TETHER_RADIUS = 0.0015  # was 0.003 in the scenario
+
+
+def prep_render_spec(spec: mujoco.MjSpec, hide_tethers: bool = False) -> None:
+    """Mutate a composed MjSpec IN PLACE for the rendered dataset (competition_balloon.py stays
+    untouched — these edits happen only here, between build_spec and compile):
+
+      * balloon spheres -> vertical ellipsoids (egg-shaped, aspect BALLOON_ASPECT);
+      * hide the base_link pin (foreground needle, not in a real onboard view) via alpha=0 —
+        the geom stays in the model so competition_run pop-detection is unaffected;
+      * make tethers subtle (thin, low-contrast, low alpha) or hide them entirely.
+    """
+    for g in spec.geoms:
+        name = g.name or ""
+        if name.startswith("balloon_") and name.endswith("_geom"):
+            r = float(g.size[0])
+            g.type = mujoco.mjtGeom.mjGEOM_ELLIPSOID
+            g.size[:] = [r, r * BALLOON_ASPECT, r]  # +Y up => vertical major axis
+        elif name == "pin":
+            g.rgba[3] = 0.0  # invisible in renders; geometry/physics unchanged
+        elif name.endswith("_tether"):
+            if hide_tethers:
+                g.rgba[3] = 0.0
+            else:
+                g.rgba[:] = TETHER_RGBA
+                g.size[0] = TETHER_RADIUS
+
 
 def randomize_base_pose(data: mujoco.MjData, rng: np.random.Generator, camera: str) -> None:
     """Randomize the free base pose so the balloon field is seen from varied viewpoints.
@@ -110,10 +144,12 @@ def _boxes_from_seg(model, seg, depth, fpx, min_area_px):
         x0, x1 = int(xs.min()), int(xs.max())
         y0, y1 = int(ys.min()), int(ys.max())
         bw, bh = (x1 - x0 + 1), (y1 - y0 + 1)
-        # expected full projected area of the sphere at its distance (occlusion/clip test)
+        # expected full projected area of the (ellipsoid) balloon at its distance (occlusion/clip
+        # test). Vertical major axis => taller than wide: area ~ pi * a * b.
         d = float(np.median(depth[mask]))
-        r_px = fpx * scn.BALLOON_RADIUS / max(d, 1e-3)
-        full_area = np.pi * r_px * r_px
+        a_px = fpx * scn.BALLOON_RADIUS / max(d, 1e-3)
+        b_px = a_px * BALLOON_ASPECT
+        full_area = np.pi * a_px * b_px
         occ = 1.0 - n_vis / max(full_area, 1.0)
         # off-screen: the balloon touches a frame border AND most of it is missing
         touches_border = x0 == 0 or y0 == 0 or x1 == w - 1 or y1 == h - 1
@@ -171,6 +207,7 @@ def main() -> int:
     ap.add_argument("--seed", type=int, default=0)
     ap.add_argument("--min-area-px", type=int, default=64, help="drop boxes smaller than this (w*h)")
     ap.add_argument("--clean", action="store_true", help="skip degradation (reference render)")
+    ap.add_argument("--hide-tethers", action="store_true", help="hide balloon tethers entirely")
     ap.add_argument("--preview-n", type=int, default=8, help="how many frames to also save as previews")
     args = ap.parse_args()
 
@@ -198,7 +235,9 @@ def main() -> int:
 
     for i in range(args.n):
         layout = scn.sample_layout(rng, n_random=int(rng.integers(3, 6)))
-        model = scn.build_model(layout)
+        spec = scn.build_spec(layout)
+        prep_render_spec(spec, hide_tethers=args.hide_tethers)
+        model = spec.compile()
         data = mujoco.MjData(model)
         randomize_base_pose(data, rng, args.camera)
         mujoco.mj_forward(model, data)
