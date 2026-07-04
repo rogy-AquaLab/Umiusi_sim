@@ -256,7 +256,10 @@ balloon detector (colour + bearing + range from the onboard camera).
   water); colour + a Hough-circle shape pass cut the false-positive flood but can't recover red. A
   **learned tiny-CNN detector** (`umiusi_sim.perception.learned_detector`, `tools.perception_train` /
   `perception_bench`, `uv sync --extra learn`) breaks that wall — a 40-image baseline lifts red recall
-  0.00→0.82, blue→0.63 — and is **Pi-4-safe** (int8 ONNX, ~12–30 fps @320px projected). Next: more
+  0.00→0.82, blue→0.63 — and is **Pi-4-safe** (int8 ONNX, ~12–30 fps @320px projected). An
+  **underwater colour-restoration** preprocess (`perception.underwater`, `tools.underwater_correct`:
+  red-channel compensation + white balance + CLAHE) recovers red-vs-blue — the hardest real-world
+  ambiguity, since deep red attenuates to look blue — for both labelling and detector input. Next: more
   labelled frames, then the final int8 export + a real Pi 4 benchmark.
 - **Autonomy (behavior FSM).** The remaining piece is a behavior FSM (search → approach → ram →
   reacquire) consuming detections to replace `competition_run`'s ground-truth driver, plus multi-frame
