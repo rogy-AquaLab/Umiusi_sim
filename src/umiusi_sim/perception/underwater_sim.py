@@ -104,18 +104,27 @@ DR_RANGES = {
 }
 
 
-def random_params(rng: np.random.Generator, murk: float | None = None) -> WaterParams:
-    """Sample a ``WaterParams`` at a UNIFORM difficulty ``murk`` in [0,1] (0=clear, 1=murky).
+# Murk is sampled around a realistic CENTRE (not uniform 0-1): a normal centred at MURK_CENTRE with
+# MURK_STD spread, so most frames sit at the "just right" difficulty (calibrated to real footage:
+# ~between sim_sample frames 0000=0.68 and 0011=0.47) while the tails still give some clearer and
+# some murkier frames for robustness.
+MURK_CENTRE = 0.57
+MURK_STD = 0.18
 
-    beta/B/turbidity/noise are linearly interpolated CLEAR<->MURKY by ``murk`` (default: uniform),
-    so the dataset/eval difficulty spans easy->hard evenly. caustics/exposure/white-balance/reflection
-    are drawn independently.
+
+def random_params(rng: np.random.Generator, murk: float | None = None) -> WaterParams:
+    """Sample a ``WaterParams``; difficulty ``murk`` in [0,1] (0=clear, 1=murky).
+
+    beta/B/turbidity/noise are linearly interpolated CLEAR<->MURKY by ``murk``. Default draws murk from
+    a normal centred at MURK_CENTRE (realistic level) so difficulty clusters around "just right" with
+    clearer/murkier tails. caustics/exposure/white-balance/reflection are drawn independently.
     """
     def u(key):
         lo, hi = DR_RANGES[key]
         return float(rng.uniform(lo, hi))
 
-    m = float(rng.uniform(0.0, 1.0)) if murk is None else float(np.clip(murk, 0.0, 1.0))
+    m = (float(np.clip(rng.normal(MURK_CENTRE, MURK_STD), 0.03, 0.97))
+         if murk is None else float(np.clip(murk, 0.0, 1.0)))
     beta = CLEAR["beta"] * (1 - m) + MURKY["beta"] * m   # already ordered red>green>blue at both ends
     B = CLEAR["B"] * (1 - m) + MURKY["B"] * m
     turbidity = CLEAR["turbidity"] * (1 - m) + MURKY["turbidity"] * m

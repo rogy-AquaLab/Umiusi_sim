@@ -48,6 +48,7 @@ COLOUR_TO_CAT = {"red": 1, "blue": 2, "yellow": 3}
 DRAW_BGR = {"red": (40, 40, 220), "blue": (220, 120, 40), "yellow": (40, 210, 230)}
 
 OCCLUSION_MAX = 0.80  # drop a box if >80% of its expected projected area is missing (occluded/clipped)
+CLOSEUP_KEEP_FRAC = 0.02  # a frame-clipped balloon covering >=2% of the frame is a close-up -> KEEP it
 
 # Real competition balloons are egg/teardrop-shaped (taller than wide) — matched to
 # ai/balloon/train2017/11.jpg (clear near-field teardrops). We approximate them as ELLIPSOIDS
@@ -214,14 +215,47 @@ PITCH_BUCKETS = {
     "down": (-45.0, -14.0),  # look toward the floor
 }
 
+# Extreme close-up ("about to ram") frames: place the camera right in front of one balloon so it
+# fills much of the frame. ~30% of front_cam frames. The real robot approaches until a balloon is
+# this close, so the detector (and eval) must cover it — including the frame-clipped case.
+CLOSEUP_PROB = 0.30
+# camera-to-balloon-CENTRE distance [m]. Balloon radius is 0.10 m: stay well outside it (and outside
+# the renderer near-plane) while filling much of the frame — 0.25 m ~= 70% frame height, 0.6 m ~= 30%.
+CLOSEUP_DIST = (0.25, 0.6)
+CAM_OFFSET = np.array([0.10, 0.12, 0.0])  # front_cam pos in the base frame (from umiusi.xml)
 
-def randomize_base_pose(data: mujoco.MjData, rng: np.random.Generator, camera: str) -> dict:
+
+def _closeup_pose(data: mujoco.MjData, rng: np.random.Generator, layout) -> dict:
+    """Place the base so the CAMERA is ~0.25-0.6 m in front of one balloon (ram-approach view).
+
+    Base orientation is identity (base +X = world +X = camera look axis, +Y = up), and the base is
+    positioned so the front_cam (offset CAM_OFFSET, looking +X) sits ``cc`` m in world -X of the target
+    balloon -> the balloon is dead-centre and fills much of the frame. A small yaw/pitch jitter adds
+    variety while keeping it in view.
+    """
+    _, colour, bx, bz = layout[int(rng.integers(len(layout)))]
+    by = float(scn.BALLOON_SPECS[colour]["height"])
+    cc = float(rng.uniform(*CLOSEUP_DIST))
+    # camera world pose: at (bx-cc, by, bz) looking +X; base = camera - CAM_OFFSET (identity base).
+    data.qpos[0:3] = [bx - cc - CAM_OFFSET[0], by - CAM_OFFSET[1], bz - CAM_OFFSET[2]]
+    yaw = float(rng.uniform(-0.10, 0.10))    # +-6 deg heading; balloon stays near centre at this range
+    pitch = float(rng.uniform(-0.08, 0.08))
+    q = Rot.from_euler("yz", [yaw, pitch]).as_quat()  # about +Y then +Z; [x,y,z,w]
+    data.qpos[3:7] = [float(q[3]), float(q[0]), float(q[1]), float(q[2])]
+    return {"pitch_bucket": "level", "pitch_deg": round(float(np.degrees(pitch)), 1),
+            "roll_deg": 0.0, "closeup": True, "dist_bucket": "closeup"}
+
+
+def randomize_base_pose(data: mujoco.MjData, rng: np.random.Generator, camera: str, layout=None) -> dict:
     """Randomize the free base pose so the balloon field is seen from varied viewpoints.
 
     Frame: +Y up, forward = +X. ``front_cam`` looks +X (down the balloon run); ``down_cam`` is
     nadir. Randomizes position (x/z/height), yaw, plus PITCH (up/level/down bucket) and a little roll
-    so conditions span near/far and looking-up/level/down. Returns a condition dict for tagging.
+    so conditions span near/far and looking-up/level/down; ~30% of front_cam frames are extreme
+    close-ups (ram approach). Returns a condition dict for tagging.
     """
+    if camera == "front_cam" and layout and rng.random() < CLOSEUP_PROB:
+        return _closeup_pose(data, rng, layout)
     x = float(rng.uniform(-1.5, 3.0))              # along the (long) run, behind/among the near balloons
     z = float(rng.uniform(-3.0, 3.0))              # lateral, within the (wider) pool
     if camera == "down_cam":
@@ -230,7 +264,8 @@ def randomize_base_pose(data: mujoco.MjData, rng: np.random.Generator, camera: s
         pitch_bucket, pitch, roll = "down", -90.0, 0.0  # nadir camera is inherently looking down
         data.qpos[0:3] = [x, y, z]
         data.qpos[3:7] = [np.cos(yaw / 2), 0.0, np.sin(yaw / 2), 0.0]
-        return {"pitch_bucket": pitch_bucket, "pitch_deg": pitch, "roll_deg": roll}
+        return {"pitch_bucket": pitch_bucket, "pitch_deg": pitch, "roll_deg": roll,
+                "closeup": False, "dist_bucket": "field"}
 
     y = float(rng.uniform(0.6, 2.8))               # mid-water height
     yaw = float(rng.uniform(-0.6, 0.6))            # +/-34 deg heading; keep balloons in view
@@ -242,7 +277,8 @@ def randomize_base_pose(data: mujoco.MjData, rng: np.random.Generator, camera: s
     # lateral +Z, then roll about the new forward +X — natural "turn, tilt, roll" camera aiming.
     quat_xyzw = Rot.from_euler("yzx", [yaw, np.radians(pitch), np.radians(roll)]).as_quat()
     data.qpos[3:7] = [quat_xyzw[3], quat_xyzw[0], quat_xyzw[1], quat_xyzw[2]]  # -> [w, x, y, z]
-    return {"pitch_bucket": pitch_bucket, "pitch_deg": round(pitch, 1), "roll_deg": round(roll, 1)}
+    return {"pitch_bucket": pitch_bucket, "pitch_deg": round(pitch, 1), "roll_deg": round(roll, 1),
+            "closeup": False, "dist_bucket": "field"}
 
 
 def _geom_colour(model: mujoco.MjModel, gid: int) -> str | None:
@@ -296,10 +332,15 @@ def _boxes_from_seg(model, seg, depth, fpx, min_area_px):
         occ = 1.0 - n_vis / max(full_area, 1.0)
         # off-screen: the balloon touches a frame border AND most of it is missing
         touches_border = x0 == 0 or y0 == 0 or x1 == w - 1 or y1 == h - 1
+        # A big balloon clipped by the FRAME edge (a ram-approach close-up) must be KEPT: frame
+        # clipping inflates `occ` but is not real occlusion. Keep border boxes that cover a large
+        # area; still drop small border slivers (far, off-screen) and interior high-occ boxes
+        # (genuinely occluded by another balloon).
+        closeup_keep = touches_border and n_vis >= CLOSEUP_KEEP_FRAC * w * h
         if bw * bh < min_area_px:
             drops["size"] += 1
             continue
-        if occ > OCCLUSION_MAX:
+        if occ > OCCLUSION_MAX and not closeup_keep:
             drops["offscreen" if touches_border else "occluded"] += 1
             continue
         boxes.append({
@@ -438,13 +479,17 @@ def main() -> int:
 
     total_pitch = {"up": 0, "level": 0, "down": 0}
     total_refl_frames = 0
+    total_closeups = 0
     for i in range(args.n):
         layout = sample_big_layout(rng)
         spec = scn.build_spec(layout)
         prep_render_spec(spec, hide_tethers=args.hide_tethers)
         model = spec.compile()
+        # Small near-clip plane so extreme close-up balloons (~0.2 m) aren't clipped. The default
+        # near plane scales with the (now large) scene extent -> ~0.9 m, which would hide ram close-ups.
+        model.vis.map.znear = min(0.01, 0.02 / max(model.stat.extent, 1e-3))
         data = mujoco.MjData(model)
-        pose_cond = randomize_base_pose(data, rng, args.camera)
+        pose_cond = randomize_base_pose(data, rng, args.camera, layout)
         mujoco.mj_forward(model, data)
 
         renderer = mujoco.Renderer(model, height=args.height, width=args.width)
@@ -471,6 +516,7 @@ def main() -> int:
         for k in total_drops:
             total_drops[k] += drops[k]
         total_pitch[pose_cond["pitch_bucket"]] += 1
+        total_closeups += int(pose_cond.get("closeup", False))
 
         # water condition (sampled at a uniform 'murk' difficulty) + optional forced reflection
         params = us.random_params(water_rng)
@@ -503,6 +549,8 @@ def main() -> int:
             "pitch_bucket": pose_cond["pitch_bucket"],
             "pitch_deg": pose_cond["pitch_deg"],
             "roll_deg": pose_cond["roll_deg"],
+            "closeup": pose_cond.get("closeup", False),
+            "dist_bucket": pose_cond.get("dist_bucket", "field"),
             "n_balloons": len(boxes),
             "median_dist_m": round(float(np.median(dists)), 2) if dists else None,
             "murk": None if args.clean else round(params.murk, 3),
@@ -546,7 +594,7 @@ def main() -> int:
         print(f"depth buffer (scene, m): min={depth_lo:.3f} max={depth_hi:.3f}  "
               f"[far-plane background >50 m excluded]")
     print(f"pitch buckets: up={total_pitch['up']} level={total_pitch['level']} down={total_pitch['down']}"
-          f"   frames with surface reflection: {total_refl_frames}/{args.n}")
+          f"   close-ups: {total_closeups}/{args.n}   surface reflection: {total_refl_frames}/{args.n}")
     print(f"unique balloon seg geom ids seen: {sorted(seen_balloon_ids)}")
     print(f"wrote: {img_dir}/  {args.out/'annotations.json'}  previews: {prev_dir}/")
     return 0
