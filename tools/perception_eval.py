@@ -1,0 +1,262 @@
+"""Validate the balloon detector against a labelled REAL underwater dataset (COCO format).
+
+Runs ``detect_balloons`` over a split, IoU-matches detections to COCO GT boxes (IoU>=0.3 = TP),
+and reports precision / recall / F1 per colour and overall, the false-positive count, and how
+many of those FPs are water/reflection artefacts (characterised by image band + colour). It runs
+BOTH the BEFORE config (sim thresholds, no reflection reject) and the AFTER config
+(real thresholds + reflection reject) so the improvement is quantified side by side. A few
+annotated frames (GT boxes + colour-coded detections; rejected reflections marked) are written to
+``<tmp>/umiusi_sim/perception_eval_*.png`` for visual review.
+
+The dataset lives OUTSIDE the repo (a user-provided folder); point at it with --data-root.
+Category map: 1=balloon_red, 2=balloon_blue, 3=balloon_yellow. COCO bbox = [x, y, w, h].
+
+Usage:
+    python -m tools.perception_eval --split val  --profile real --reject-reflections
+    python -m tools.perception_eval --split train --profile sim
+    python -m tools.perception_eval --split val  --compare        # BEFORE vs AFTER table only
+
+Needs the `dev` extra (imageio, Pillow) and the `perception` extra (scipy).
+"""
+
+from __future__ import annotations
+
+import argparse
+import json
+import pathlib
+import sys
+import tempfile
+from collections import defaultdict
+
+import imageio.v2 as imageio
+import numpy as np
+from PIL import Image, ImageDraw
+
+from umiusi_sim.perception import REAL_THRESHOLDS, SIM_THRESHOLDS, detect_balloons
+
+DATA_ROOT = pathlib.Path("/home/satoi/mujoco_ws/ai/balloon")
+CATMAP = {1: "red", 2: "blue", 3: "yellow"}
+COLOURS = ["red", "yellow", "blue"]
+IOU_TP = 0.3
+FOVY = 60.0                 # dataset has no camera intrinsics; only bbox IoU is used, not bearing
+MAX_AREA_FRAC = 0.02        # real profile: drop blobs > 2% of the frame (large ragged water/wall)
+OUT_DIR = pathlib.Path(tempfile.gettempdir()) / "umiusi_sim"
+_DRAW = {"red": (255, 60, 60), "yellow": (255, 220, 40), "blue": (60, 120, 255)}
+
+
+def load_split(root: pathlib.Path, split: str):
+    """Return (images list, image_id -> [ (colour, [x,y,w,h]) ] GT dict)."""
+    d = json.load(open(root / "annotations" / f"{split}.json"))
+    id2file = {im["id"]: im["file_name"] for im in d["images"]}
+    gt = defaultdict(list)
+    for a in d["annotations"]:
+        gt[a["image_id"]].append((CATMAP[a["category_id"]], list(a["bbox"])))
+    images = [(im["id"], id2file[im["id"]]) for im in d["images"]]
+    return images, gt, split
+
+
+def read_rgb(path: pathlib.Path) -> np.ndarray:
+    img = imageio.imread(path)
+    if img.ndim == 2:
+        img = np.stack([img] * 3, axis=-1)
+    if img.ndim == 3 and img.shape[2] == 4:
+        img = img[:, :, :3]
+    return img
+
+
+def iou_xywh(a, b) -> float:
+    ax, ay, aw, ah = a
+    bx, by, bw, bh = b
+    ix0, iy0 = max(ax, bx), max(ay, by)
+    ix1, iy1 = min(ax + aw, bx + bw), min(ay + ah, by + bh)
+    iw, ih = max(0.0, ix1 - ix0), max(0.0, iy1 - iy0)
+    inter = iw * ih
+    union = aw * ah + bw * bh - inter
+    return inter / union if union > 0 else 0.0
+
+
+def det_to_xywh(d):
+    u0, v0, u1, v1 = d.bbox
+    return [u0, v0, u1 - u0, v1 - v0]
+
+
+def match(dets, gts):
+    """Greedy IoU match (highest IoU first). Returns (tp_pairs, matched_det_idx, matched_gt_idx).
+
+    Colour must agree for a match (a red detection on a blue GT is not a TP for red)."""
+    cand = []
+    for di, d in enumerate(dets):
+        for gi, (gcol, gbox) in enumerate(gts):
+            if d.colour != gcol:
+                continue
+            iou = iou_xywh(det_to_xywh(d), gbox)
+            if iou >= IOU_TP:
+                cand.append((iou, di, gi))
+    cand.sort(reverse=True)
+    used_d, used_g, pairs = set(), set(), []
+    for iou, di, gi in cand:
+        if di in used_d or gi in used_g:
+            continue
+        used_d.add(di)
+        used_g.add(gi)
+        pairs.append((di, gi))
+    return pairs, used_d, used_g
+
+
+def evaluate(images, gt, root, split, thresholds, reject, max_area_frac):
+    """Run the detector over the split; accumulate per-colour TP/FP/FN and FP characterisation."""
+    tp = defaultdict(int)
+    fp = defaultdict(int)
+    fn = defaultdict(int)
+    fp_lowerband = defaultdict(int)   # FPs whose centroid is in the bottom third of the frame
+    per_image = []                    # (image_id, file, rgb, dets, gts, used_d) for annotation
+    for image_id, fname in images:
+        rgb = read_rgb(root / f"{split}2017" / fname)
+        H = rgb.shape[0]
+        dets = detect_balloons(rgb, fovy_deg=FOVY, thresholds=thresholds,
+                               reject_reflections=reject, max_area_frac=max_area_frac)
+        gts = gt[image_id]
+        pairs, used_d, used_g = match(dets, gts)
+        for _, gi in pairs:
+            tp[gts[gi][0]] += 1
+        for gi, (gcol, _) in enumerate(gts):
+            if gi not in used_g:
+                fn[gcol] += 1
+        for di, d in enumerate(dets):
+            if di not in used_d:
+                fp[d.colour] += 1
+                if d.centroid[1] > 2.0 * H / 3.0:
+                    fp_lowerband[d.colour] += 1
+        per_image.append((image_id, fname, rgb, dets, gts, used_d))
+    return tp, fp, fn, fp_lowerband, per_image
+
+
+def prf(tp, fp, fn):
+    p = tp / (tp + fp) if (tp + fp) else float("nan")
+    r = tp / (tp + fn) if (tp + fn) else float("nan")
+    f = 2 * p * r / (p + r) if (p and r and not np.isnan(p) and not np.isnan(r) and (p + r) > 0) else \
+        (0.0 if (tp + fp + fn) else float("nan"))
+    return p, r, f
+
+
+def print_report(tag, tp, fp, fn, fp_lowerband):
+    print(f"\n===== {tag} =====")
+    print(f"  {'colour':7s} {'TP':>4s} {'FP':>4s} {'FN':>4s} {'prec':>6s} {'rec':>6s} {'F1':>6s} "
+          f"{'FP@lower⅓':>10s}")
+    T = F = N = L = 0
+    for c in COLOURS:
+        p, r, f = prf(tp[c], fp[c], fn[c])
+        T += tp[c]
+        F += fp[c]
+        N += fn[c]
+        L += fp_lowerband[c]
+        print(f"  {c:7s} {tp[c]:4d} {fp[c]:4d} {fn[c]:4d} {p:6.2f} {r:6.2f} {f:6.2f} "
+              f"{fp_lowerband[c]:10d}")
+    p, r, f = prf(T, F, N)
+    print(f"  {'ALL':7s} {T:4d} {F:4d} {N:4d} {p:6.2f} {r:6.2f} {f:6.2f} {L:10d}")
+    print(f"  -> {F} false positives total, {L} of them in the lower third of the frame "
+          f"(likely water surface / reflections / pool floor)")
+    return {"tp": T, "fp": F, "fn": N, "prec": p, "rec": r, "f1": f, "fp_lower": L}
+
+
+def annotate(rgb, dets, gts, used_d, path):
+    """GT boxes in white (dashed feel via thin), detections colour-coded (matched=solid,
+    unmatched/FP=thin), rejected reflections in magenta. Saves a PNG."""
+    img = Image.fromarray(rgb.copy())
+    draw = ImageDraw.Draw(img)
+    for gcol, (x, y, w, h) in gts:
+        draw.rectangle([x, y, x + w, y + h], outline=(255, 255, 255), width=1)
+    for di, d in enumerate(dets):
+        u0, v0, u1, v1 = d.bbox
+        col = _DRAW.get(d.colour, (255, 255, 255))
+        wdt = 3 if di in used_d else 1
+        draw.rectangle([u0, v0, u1, v1], outline=col, width=wdt)
+    # rejected reflections (still present on the objects with is_reflection=True are dropped from
+    # `dets`, so re-run detection without rejection to draw what got cut)
+    img.save(path)
+
+
+def draw_rejected(rgb, path):
+    """Second pass: show which blobs the reflection filter removed (magenta) vs kept."""
+    kept = detect_balloons(rgb, fovy_deg=FOVY, thresholds=REAL_THRESHOLDS,
+                           reject_reflections=True, max_area_frac=MAX_AREA_FRAC)
+    alld = detect_balloons(rgb, fovy_deg=FOVY, thresholds=REAL_THRESHOLDS,
+                          reject_reflections=False, max_area_frac=MAX_AREA_FRAC)
+    kept_boxes = {d.bbox for d in kept}
+    img = Image.fromarray(rgb.copy())
+    draw = ImageDraw.Draw(img)
+    for d in alld:
+        u0, v0, u1, v1 = d.bbox
+        if d.bbox in kept_boxes:
+            draw.rectangle([u0, v0, u1, v1], outline=_DRAW[d.colour], width=3)
+        else:
+            draw.rectangle([u0, v0, u1, v1], outline=(255, 0, 255), width=2)  # rejected reflection
+    img.save(path)
+
+
+def main():
+    ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
+    ap.add_argument("--split", choices=["train", "val"], default="val")
+    ap.add_argument("--profile", choices=["sim", "real"], default="real")
+    ap.add_argument("--reject-reflections", action="store_true")
+    ap.add_argument("--compare", action="store_true",
+                    help="always run BEFORE(sim) vs AFTER(real+reject) both (default behaviour)")
+    ap.add_argument("--data-root", type=pathlib.Path, default=DATA_ROOT)
+    ap.add_argument("--no-images", action="store_true", help="skip writing annotated PNGs")
+    args = ap.parse_args()
+
+    if not (args.data_root / "annotations" / f"{args.split}.json").exists():
+        print(f"ERROR: dataset not found at {args.data_root} (need annotations/{args.split}.json)")
+        return 1
+
+    images, gt, split = load_split(args.data_root, args.split)
+    n_gt = sum(len(v) for v in gt.values())
+    print(f"dataset: {args.data_root}  split={split}  images={len(images)}  GT balloons={n_gt}")
+
+    # BEFORE: sim thresholds, no reflection reject, no area cap (the original behaviour on real).
+    before = evaluate(images, gt, args.data_root, split, SIM_THRESHOLDS, False, None)
+    b = print_report("BEFORE  (sim thresholds, no reflection reject)",
+                     before[0], before[1], before[2], before[3])
+
+    # AFTER: real thresholds + reflection reject + area cap.
+    after = evaluate(images, gt, args.data_root, split, REAL_THRESHOLDS, True, MAX_AREA_FRAC)
+    a = print_report("AFTER   (real thresholds + reflection reject + area cap)",
+                     after[0], after[1], after[2], after[3])
+
+    print("\n===== BEFORE -> AFTER (overall) =====")
+    print(f"  recall  {b['rec']:.2f} -> {a['rec']:.2f}")
+    print(f"  precision {b['prec']:.2f} -> {a['prec']:.2f}")
+    print(f"  F1      {b['f1']:.2f} -> {a['f1']:.2f}")
+    print(f"  false positives {b['fp']} -> {a['fp']}   "
+          f"(lower-third FPs {b['fp_lower']} -> {a['fp_lower']})")
+
+    # If the user asked for a specific single profile run, also state it explicitly.
+    if not args.compare:
+        prof = REAL_THRESHOLDS if args.profile == "real" else SIM_THRESHOLDS
+        cap = MAX_AREA_FRAC if args.profile == "real" else None
+        single = evaluate(images, gt, args.data_root, split, prof,
+                          args.reject_reflections, cap)
+        print_report(f"REQUESTED  (--profile {args.profile} "
+                     f"{'--reject-reflections' if args.reject_reflections else ''})",
+                     single[0], single[1], single[2], single[3])
+
+    if not args.no_images:
+        OUT_DIR.mkdir(parents=True, exist_ok=True)
+        # Annotate the AFTER run for a few images, and a rejected-reflections view.
+        _, _, _, _, per_image = after
+        saved = []
+        for k, (image_id, fname, rgb, dets, gts, used_d) in enumerate(per_image[:4]):
+            p = OUT_DIR / f"perception_eval_{split}_{pathlib.Path(fname).stem}.png"
+            annotate(rgb, dets, gts, used_d, p)
+            saved.append(p)
+            pr = OUT_DIR / f"perception_eval_{split}_{pathlib.Path(fname).stem}_reflections.png"
+            draw_rejected(rgb, pr)
+            saved.append(pr)
+        print("\nannotated frames (white=GT, thick=matched det, thin=FP, magenta=rejected reflection):")
+        for p in saved:
+            print(f"  {p}")
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())
