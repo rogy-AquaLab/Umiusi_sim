@@ -285,6 +285,9 @@ def main() -> int:
     ap.add_argument("--min-area-px", type=int, default=64, help="drop boxes smaller than this (w*h)")
     ap.add_argument("--clean", action="store_true", help="skip degradation (reference render)")
     ap.add_argument("--hide-tethers", action="store_true", help="hide balloon tethers entirely")
+    ap.add_argument("--force-reflection", type=float, default=None, metavar="STRENGTH",
+                    help="force the water-surface reflection ON at this strength every frame "
+                         "(e.g. 0.75) — for the reflection demo")
     ap.add_argument("--preview-n", type=int, default=8, help="how many frames to also save as previews")
     args = ap.parse_args()
 
@@ -349,6 +352,8 @@ def main() -> int:
             out_rgb = rgb
         else:
             params = us.random_params(water_rng)
+            if args.force_reflection is not None:
+                params.reflection = args.force_reflection  # force the distractor ON for the demo
             out_rgb = us.degrade(rgb, depth, params, water_rng)
 
         fname = f"frame_{i:04d}.jpg"
