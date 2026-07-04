@@ -50,6 +50,8 @@ class WaterParams:
     reflection     : strength in [0,1] of the mirrored water-surface distractor (0 = off).
     exposure       : global multiplicative gain on the final image.
     wb_gain        : per-channel white-balance multiplier (camera colour cast).
+    murk           : the [0,1] difficulty level this condition was sampled at (0 = clear, 1 = murky);
+                     recorded for per-condition stratification/reporting.
     """
 
     beta: np.ndarray = field(default_factory=lambda: np.array([0.85, 0.40, 0.28]))
@@ -61,6 +63,7 @@ class WaterParams:
     reflection: float = 0.25
     exposure: float = 1.0
     wb_gain: np.ndarray = field(default_factory=lambda: np.array([1.0, 1.0, 1.0]))
+    murk: float = 0.5
 
     def __post_init__(self):
         self.beta = np.asarray(self.beta, dtype=np.float64).reshape(3)
@@ -68,60 +71,62 @@ class WaterParams:
         self.wb_gain = np.asarray(self.wb_gain, dtype=np.float64).reshape(3)
 
 
-# Domain-randomization ranges (documented; sampled uniformly unless noted). Chosen so the sampled
-# conditions span "clear-ish pool" -> "very murky", bracketing real competition-pool footage.
+# Water condition is sampled along a single UNIFORM "murk" axis (0 = clear, 1 = murky) so difficulty
+# spreads evenly easy->hard (NOT biased toward murky): beta/B/turbidity/noise interpolate between a
+# CLEAR and a MURKY endpoint. Other nuisances (caustics/exposure/white-balance/reflection) are drawn
+# independently. Endpoints bracket real competition-pool footage.
+CLEAR = {  # murk = 0
+    "beta": np.array([0.30, 0.10, 0.06]),
+    "B": np.array([0.06, 0.20, 0.26]),
+    "turbidity": 0.05,
+    "backscatter_noise": 2.0,
+}
+MURKY = {  # murk = 1
+    "beta": np.array([1.35, 0.60, 0.42]),
+    "B": np.array([0.15, 0.36, 0.42]),
+    "turbidity": 1.4,
+    "backscatter_noise": 12.0,
+}
 DR_RANGES = {
-    # attenuation [1/m], sampled per channel within these bands (order enforces red>green>blue)
-    "beta_red": (0.45, 1.40),
-    "beta_green": (0.18, 0.60),
-    "beta_blue": (0.10, 0.42),
-    # veiling colour: green + blue dominant, red faint (typical pool water)
-    "B_red": (0.02, 0.18),
-    "B_green": (0.18, 0.42),
-    "B_blue": (0.20, 0.48),
-    "turbidity": (0.0, 1.4),          # blur strength; 0 => sharp
-    "backscatter_noise": (2.0, 12.0),  # veiling shot-noise std (0..255)
     "caustics": (0.0, 0.18),          # ripple amplitude; 0 => off
     "caustics_freq": (2.5, 6.0),      # ripples across the frame
     "exposure": (0.75, 1.20),         # global gain
     "wb_jitter": 0.12,                 # +/- fraction per channel around 1.0
     # --- water-surface reflection distractor (the #1 false-detection source: mirrored balloons on
     # the underside of the surface). STRONG + almost always present so the detector learns them as
-    # HARD NEGATIVES. These reflections are UNLABELLED (no GT box) — only balloon_*_geom get boxes.
-    "reflection": (0.35, 0.80),        # strength (when present) — clearly visible, not a faint ghost
-    "reflection_prob": 0.90,           # present ~90% of frames (was 0.6)
-    # ripple/geometry are sampled per-call inside _add_surface_reflection (documented here):
-    "reflection_surface": (0.06, 0.20),  # water-surface line as a fraction of frame height (near top)
-    "reflection_band": (0.42, 0.62),     # how far below the surface the reflection extends (frac of H)
-    "reflection_ripple_px": (4.0, 14.0), # peak horizontal wave displacement [px] (vertical ~0.35x)
-    "reflection_waves": (2, 3),          # number of superposed sinusoidal wave components
-    "reflection_bluemix": (0.30, 0.55),  # how far the reflection is pulled toward the veil colour B
+    # HARD NEGATIVES. Reflections are geometric (a mirrored-camera render, see gen_sim_dataset) and
+    # UNLABELLED — only real balloon_*_geom get boxes. These params control the ripple/veil ON TOP.
+    "reflection": (0.35, 0.80),        # composite strength (when present) — clearly visible
+    "reflection_prob": 0.90,           # present ~90% of frames (also gated by seeing the surface)
+    "reflection_ripple_px": (4.0, 14.0),  # peak horizontal wave displacement [px] (vertical ~0.35x)
+    "reflection_waves": (2, 3),           # number of superposed sinusoidal wave components
+    "reflection_bluemix": (0.30, 0.55),   # how far the reflection is pulled toward the veil colour B
 }
 
 
-def random_params(rng: np.random.Generator) -> WaterParams:
-    """Sample a domain-randomization ``WaterParams`` from ``DR_RANGES`` (see that dict)."""
+def random_params(rng: np.random.Generator, murk: float | None = None) -> WaterParams:
+    """Sample a ``WaterParams`` at a UNIFORM difficulty ``murk`` in [0,1] (0=clear, 1=murky).
+
+    beta/B/turbidity/noise are linearly interpolated CLEAR<->MURKY by ``murk`` (default: uniform),
+    so the dataset/eval difficulty spans easy->hard evenly. caustics/exposure/white-balance/reflection
+    are drawn independently.
+    """
     def u(key):
         lo, hi = DR_RANGES[key]
         return float(rng.uniform(lo, hi))
 
-    beta = np.array([u("beta_red"), u("beta_green"), u("beta_blue")])
-    # keep the physical ordering red > green > blue even after independent sampling
-    beta = np.sort(beta)[::-1]
-    B = np.array([u("B_red"), u("B_green"), u("B_blue")])
+    m = float(rng.uniform(0.0, 1.0)) if murk is None else float(np.clip(murk, 0.0, 1.0))
+    beta = CLEAR["beta"] * (1 - m) + MURKY["beta"] * m   # already ordered red>green>blue at both ends
+    B = CLEAR["B"] * (1 - m) + MURKY["B"] * m
+    turbidity = CLEAR["turbidity"] * (1 - m) + MURKY["turbidity"] * m
+    noise = CLEAR["backscatter_noise"] * (1 - m) + MURKY["backscatter_noise"] * m
     j = DR_RANGES["wb_jitter"]
     wb = 1.0 + rng.uniform(-j, j, size=3)
     reflection = u("reflection") if rng.random() < DR_RANGES["reflection_prob"] else 0.0
     return WaterParams(
-        beta=beta,
-        B=B,
-        turbidity=u("turbidity"),
-        backscatter_noise=u("backscatter_noise"),
-        caustics=u("caustics"),
-        caustics_freq=u("caustics_freq"),
-        reflection=reflection,
-        exposure=u("exposure"),
-        wb_gain=wb,
+        beta=beta, B=B, turbidity=turbidity, backscatter_noise=noise,
+        caustics=u("caustics"), caustics_freq=u("caustics_freq"),
+        reflection=reflection, exposure=u("exposure"), wb_gain=wb, murk=m,
     )
 
 
@@ -221,15 +226,13 @@ def degrade(
     z_scale = max(z_scale, 1e-3)
     depth_norm = np.clip(z / z_scale, 0.0, 1.0)
 
+    # NB: the water-surface reflection is GEOMETRIC (a mirrored-camera render) and is composited
+    # into the CLEAN RGB by the generator BEFORE degrade() — see apply_surface_reflection. degrade()
+    # then veils it along with the rest of the scene ("veil on top of the correct reflection").
+
     # 3) turbidity blur (depth-scaled: farther => blurrier)
     if params.turbidity > 0:
         img = _depth_scaled_blur(img, depth_norm, params.turbidity)
-
-    # 2) water-surface reflection distractor. Added AFTER the depth blur (so the far-depth turbidity
-    # doesn't smear it away) and sourced from the CLEAN render J (vivid balloon colours, not the
-    # already-veiled scene), so distant balloons still cast recognizable mirrored distractors.
-    if params.reflection > 0:
-        img = _add_surface_reflection(img, J, params.B, params.reflection, rng)
 
     # 4) caustics — multiplicative light ripple, strongest on near/lit surfaces (weight by t).
     if params.caustics > 0:
@@ -261,67 +264,54 @@ def _remap(img: np.ndarray, map_x: np.ndarray, map_y: np.ndarray) -> np.ndarray:
     return img[yi, xi]
 
 
-def _add_surface_reflection(base: np.ndarray, source: np.ndarray, B: np.ndarray, strength: float,
-                            rng: np.random.Generator) -> np.ndarray:
-    """Overlay a STRONG, rippled, surface-anchored mirror of the scene — the water-surface reflection.
+def apply_surface_reflection(clean_rgb, reflection_rgb, reflect_mask, B, strength, rng):
+    """Composite a GEOMETRICALLY-CORRECT water-surface reflection onto the clean render.
 
-    Real underwater footage almost always shows the underside of the surface acting as a wavy mirror:
-    balloons below reflect into a band just under the surface, distorted by ripples. These mirrored
-    balloons are the #1 false-detection source, so we make them clearly visible (a HARD NEGATIVE the
-    detector must reject). They carry NO GT box — only real balloon geoms are labelled.
+    Unlike a naive image flip, ``reflection_rgb`` is a render of the scene with the balloons mirrored
+    across the true water-surface plane (y≈3.3 m), seen by the SAME camera — so it obeys perspective
+    and lands exactly where the surface projects. ``reflect_mask`` (bool HxW) is the intersection of
+    "the water surface is actually visible here" (primary segmentation) and "a mirrored balloon
+    projects here" (reflection segmentation) — so reflections are anchored to the surface line and are
+    ONLY the mirrored balloons, not the whole band. On TOP of that correct reflection we add the ripple
+    (a wavy displacement) and pull the colour toward the veil ``B`` (attenuate + blue-tint). Reflections
+    carry NO GT box — they are hard negatives.
 
-    ``base`` is the (already-degraded) image the reflection is composited onto; ``source`` is the
-    scene the mirror is sampled from (the CLEAN render, so balloon colours stay vivid). Steps: pick a
-    surface line near the top; mirror the below-surface scene up into a band anchored at the surface;
-    ripple it with a few sinusoidal waves (horizontal + slight vertical); pull the colour toward the
-    veil ``B`` (attenuate + blue-tint) so it sits in the water; softly fade out downward.
+    Returns uint8 HxWx3. If nothing reflects (empty mask / strength 0) the clean image is unchanged.
     """
-    h, w, _ = base.shape
-    surf = int(round(h * rng.uniform(*DR_RANGES["reflection_surface"])))  # water-surface row
-    band = int(round(h * rng.uniform(*DR_RANGES["reflection_band"])))     # reflection extent (down)
-    band = max(4, min(band, h - surf - 1))
-    if band < 4:
-        return base
+    base = np.asarray(clean_rgb, dtype=np.float64)[..., :3] / 255.0
+    if strength <= 0 or not np.any(reflect_mask):
+        return np.clip(base * 255.0, 0, 255).astype(np.uint8)
+    refl = np.asarray(reflection_rgb, dtype=np.float64)[..., :3] / 255.0
+    B = np.asarray(B, dtype=np.float64).reshape(1, 1, 3)
+    h, w = base.shape[:2]
+    alpha = reflect_mask.astype(np.float64)
 
-    # Source = the scene just below the surface (the real balloons), flipped vertically -> a mirror
-    # image. reflection row (surf+i) shows source row (surf + band-1 - i): deeper content near surface.
-    src = source[surf:surf + band].copy()
-    mirror = src[::-1]
-
-    # Ripple: superpose a few low-frequency waves. Horizontal displacement dominates (surface waves
-    # shear the reflection sideways); a smaller vertical component stretches/breaks it up.
-    yy, xx = np.mgrid[0:band, 0:w].astype(np.float64)
+    # Ripple: a wavy sinusoidal displacement applied to BOTH the reflection colour and its mask, so
+    # the mirrored balloons stretch/break up like a real rippled surface (on top of correct geometry).
+    yy, xx = np.mgrid[0:h, 0:w].astype(np.float64)
     amp = rng.uniform(*DR_RANGES["reflection_ripple_px"])
     n_waves = int(rng.integers(DR_RANGES["reflection_waves"][0], DR_RANGES["reflection_waves"][1] + 1))
-    disp_x = np.zeros((band, w))
-    disp_y = np.zeros((band, w))
+    disp_x = np.zeros((h, w))
+    disp_y = np.zeros((h, w))
     for _ in range(n_waves):
         a = amp * rng.uniform(0.4, 1.0) / max(n_waves, 1)
-        fr = rng.uniform(0.8, 2.6)   # cycles down the band
-        fc = rng.uniform(0.6, 2.4)   # cycles across the frame
+        fr = rng.uniform(0.8, 2.6)
+        fc = rng.uniform(0.6, 2.4)
         ph = rng.uniform(0, 2 * np.pi)
-        phase = 2 * np.pi * (fr * yy / band + fc * xx / w) + ph
+        phase = 2 * np.pi * (fr * yy / h + fc * xx / w) + ph
         disp_x += a * np.sin(phase)
         disp_y += 0.35 * a * np.cos(phase)
-    mirror = _remap(mirror, xx + disp_x, yy + disp_y)
+    refl = _remap(refl, xx + disp_x, yy + disp_y)
+    alpha = _remap(alpha, xx + disp_x, yy + disp_y)
 
-    # Attenuate + blue-tint: pull toward the veil colour B so the reflection sits in the water but the
-    # balloon COLOUR stays recognizable (that is exactly what the detector must learn to reject).
+    # Attenuate + blue-tint: pull the reflection toward the veil colour B (recognizable but watery).
     bluemix = float(rng.uniform(*DR_RANGES["reflection_bluemix"]))
-    mirror = mirror * (1.0 - bluemix) + B.reshape(1, 1, 3) * bluemix
+    refl = refl * (1.0 - bluemix) + B * bluemix
+    refl = _gaussian_blur(refl, 1.0)  # a touch soft, like a real reflection
 
-    # Soften slightly (a real surface reflection is a touch blurred) — a mild fixed blur, NOT the
-    # heavy depth blur that would smear it away.
-    mirror = _gaussian_blur(mirror, 1.0)
-
-    # Fade: strongest right under the surface, decaying downward (kept fairly gentle so mid-frame
-    # balloon reflections stay visible, not only a thin band at the very top).
-    fade = (np.linspace(1.0, 0.15, band) ** 1.2).reshape(band, 1, 1)
-    ghost = mirror * fade * strength
-
-    out = base.copy()
-    out[surf:surf + band] = np.clip(out[surf:surf + band] + ghost, 0.0, 1.0)  # additive -> clearly there
-    return out
+    alpha = alpha * strength
+    out = base * (1.0 - alpha[..., None]) + refl * alpha[..., None]
+    return np.clip(out * 255.0, 0, 255).astype(np.uint8)
 
 
 # Difficulty presets (handy for the eval set / quick dials) --------------------

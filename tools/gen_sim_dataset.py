@@ -27,6 +27,7 @@ from pathlib import Path
 
 import mujoco
 import numpy as np
+from scipy.spatial.transform import Rotation as Rot
 
 from umiusi_sim.description.scenarios import competition_balloon as scn
 from umiusi_sim.perception import underwater_sim as us
@@ -93,7 +94,10 @@ def sample_big_layout(rng: np.random.Generator):
     return layout
 
 
-def prep_render_spec(spec: mujoco.MjSpec, hide_tethers: bool = False) -> None:
+SURFACE_Y = scn.POOL_DEPTH  # water-surface plane height [m] (=3.3); reflections mirror across this
+
+
+def prep_render_spec(spec: mujoco.MjSpec, hide_tethers: bool = False, mirror: bool = False) -> None:
     """Mutate a composed MjSpec IN PLACE for the rendered dataset (competition_balloon.py stays
     untouched — these edits happen only here, between build_spec and compile):
 
@@ -101,7 +105,13 @@ def prep_render_spec(spec: mujoco.MjSpec, hide_tethers: bool = False) -> None:
       * hide the base_link pin (foreground needle, not in a real onboard view) via alpha=0 —
         the geom stays in the model so competition_run pop-detection is unaffected;
       * make tethers subtle (thin, low-contrast, low alpha) or hide them entirely.
+
+    ``mirror=True`` builds the REFLECTION model: every balloon body is reflected across the water
+    surface plane (y=SURFACE_Y) and the opaque surface-ceiling is omitted, so a render from the SAME
+    camera shows the geometrically-correct mirror image of the balloons (the reflection). Tethers are
+    hidden in the mirror model (their mirror is meaningless).
     """
+    hide_tethers = hide_tethers or mirror
     for g in spec.geoms:
         name = g.name or ""
         if name.startswith("balloon_") and name.endswith("_geom"):
@@ -124,7 +134,13 @@ def prep_render_spec(spec: mujoco.MjSpec, hide_tethers: bool = False) -> None:
             g.size[:] = [POOL_LEN_X / 2, scn.POOL_DEPTH / 2, POOL_LEN_Z / 2]
         elif name.startswith("pool_wall_"):
             _resize_wall(g, name)
-    _brighten_like_pool(spec)
+    if mirror:
+        # Reflect each balloon body across the surface plane: y -> 2*SURFACE_Y - y (lands above the
+        # surface, i.e. where its reflection appears when viewed from below).
+        for b in spec.bodies:
+            if (b.name or "").startswith("balloon_"):
+                b.pos[1] = 2 * SURFACE_Y - b.pos[1]
+    _brighten_like_pool(spec, add_surface=not mirror)
 
 
 def _resize_wall(g, name: str) -> None:
@@ -143,7 +159,7 @@ def _resize_wall(g, name: str) -> None:
     g.rgba[:] = WALL_RGBA
 
 
-def _brighten_like_pool(spec: mujoco.MjSpec) -> None:
+def _brighten_like_pool(spec: mujoco.MjSpec, add_surface: bool = True) -> None:
     """Light the scene like a real sunlit pool: bright + near-uniform, lit from ABOVE (not the
     dark, lit-from-below look of the raw scenario). Dataset-render only (this spec is compiled and
     thrown away per frame — the scenario's own lights / competition_run are untouched).
@@ -152,6 +168,8 @@ def _brighten_like_pool(spec: mujoco.MjSpec) -> None:
         the water-scattering look); diffuse raised for frontal modelling.
       * A broad DIRECTIONAL overhead light points straight down from above the surface (+Y up),
         standing in for sunlight through the surface; no shadow so it stays even.
+      * ``add_surface`` adds the opaque water-surface ceiling; omitted for the reflection model (so
+        the mirrored balloons above the surface are visible).
     """
     hl = spec.visual.headlight
     hl.ambient[:] = [0.55, 0.57, 0.60]   # was 0.10 — near-uniform bright fill
@@ -166,16 +184,18 @@ def _brighten_like_pool(spec: mujoco.MjSpec) -> None:
     sun.diffuse = [0.55, 0.55, 0.58]
     sun.specular = [0.0, 0.0, 0.0]
     sun.castshadow = False
-    # Water-surface "ceiling" at the top of the pool: caps the open top so a camera tilted/high
-    # up sees a bright surface (as underwater) instead of the black void above the walls.
-    surf = spec.worldbody.add_geom()
-    surf.name = "dataset_surface"
-    surf.type = mujoco.mjtGeom.mjGEOM_BOX
-    surf.pos = [POOL_CENTER_X, scn.POOL_DEPTH, 0.0]
-    surf.size = [POOL_LEN_X / 2, 0.02, POOL_LEN_Z / 2]
-    surf.rgba = [0.60, 0.72, 0.80, 1.0]  # bright surface seen from below
-    surf.contype = 0
-    surf.conaffinity = 0
+    if add_surface:
+        # Water-surface "ceiling" at the top of the pool: caps the open top so a camera tilted/high
+        # up sees a bright surface (as underwater) instead of the black void above the walls. Its
+        # visible pixels (via segmentation) also define WHERE the reflection is composited.
+        surf = spec.worldbody.add_geom()
+        surf.name = "dataset_surface"
+        surf.type = mujoco.mjtGeom.mjGEOM_BOX
+        surf.pos = [POOL_CENTER_X, scn.POOL_DEPTH, 0.0]
+        surf.size = [POOL_LEN_X / 2, 0.02, POOL_LEN_Z / 2]
+        surf.rgba = [0.60, 0.72, 0.80, 1.0]  # bright surface seen from below
+        surf.contype = 0
+        surf.conaffinity = 0
     # Underwater fog: fade the far BACKGROUND (the black region above/beyond the pool walls, where
     # there is no geometry) to a bright water colour so the frame reads as "in water" instead of a
     # dark room. Kept far (fogstart 6 m) so it barely touches balloons within ~5 m — the real murk
@@ -185,23 +205,44 @@ def _brighten_like_pool(spec: mujoco.MjSpec) -> None:
     spec.visual.map.fogend = 16.0
 
 
-def randomize_base_pose(data: mujoco.MjData, rng: np.random.Generator, camera: str) -> None:
+# Camera pitch is sampled across three buckets so conditions span looking UP (toward the surface —
+# sees reflections), LEVEL, and DOWN (toward the floor). Positive pitch (about lateral +Z) tips the
+# +X-looking front_cam UP toward the surface.
+PITCH_BUCKETS = {
+    "up": (12.0, 45.0),     # look toward the surface -> surface + reflections prominent
+    "level": (-8.0, 8.0),   # roughly horizontal
+    "down": (-45.0, -14.0),  # look toward the floor
+}
+
+
+def randomize_base_pose(data: mujoco.MjData, rng: np.random.Generator, camera: str) -> dict:
     """Randomize the free base pose so the balloon field is seen from varied viewpoints.
 
     Frame: +Y up, forward = +X. ``front_cam`` looks +X (down the balloon run); ``down_cam`` is
-    nadir. We keep the robot toward the -X / near end and yaw modestly so balloons stay framed.
+    nadir. Randomizes position (x/z/height), yaw, plus PITCH (up/level/down bucket) and a little roll
+    so conditions span near/far and looking-up/level/down. Returns a condition dict for tagging.
     """
     x = float(rng.uniform(-1.5, 3.0))              # along the (long) run, behind/among the near balloons
     z = float(rng.uniform(-3.0, 3.0))              # lateral, within the (wider) pool
     if camera == "down_cam":
-        y = float(rng.uniform(1.6, 3.0))           # high, looking down at the field
-        yaw = float(rng.uniform(-np.pi, np.pi))    # any heading for nadir
-    else:
-        y = float(rng.uniform(0.6, 2.4))           # mid-water height
-        yaw = float(rng.uniform(-0.6, 0.6))        # +/-34 deg heading; keep balloons in view
+        y = float(rng.uniform(1.6, 3.0))
+        yaw = float(rng.uniform(-np.pi, np.pi))
+        pitch_bucket, pitch, roll = "down", -90.0, 0.0  # nadir camera is inherently looking down
+        data.qpos[0:3] = [x, y, z]
+        data.qpos[3:7] = [np.cos(yaw / 2), 0.0, np.sin(yaw / 2), 0.0]
+        return {"pitch_bucket": pitch_bucket, "pitch_deg": pitch, "roll_deg": roll}
+
+    y = float(rng.uniform(0.6, 2.8))               # mid-water height
+    yaw = float(rng.uniform(-0.6, 0.6))            # +/-34 deg heading; keep balloons in view
+    pitch_bucket = rng.choice(list(PITCH_BUCKETS))  # up / level / down, equally likely
+    pitch = float(rng.uniform(*PITCH_BUCKETS[pitch_bucket]))
+    roll = float(rng.uniform(-8.0, 8.0))           # a little roll
     data.qpos[0:3] = [x, y, z]
-    # yaw about the +Y (up) axis
-    data.qpos[3:7] = [np.cos(yaw / 2), 0.0, np.sin(yaw / 2), 0.0]
+    # Compose base orientation (intrinsic, body frame): yaw about +Y (up), then pitch about the new
+    # lateral +Z, then roll about the new forward +X — natural "turn, tilt, roll" camera aiming.
+    quat_xyzw = Rot.from_euler("yzx", [yaw, np.radians(pitch), np.radians(roll)]).as_quat()
+    data.qpos[3:7] = [quat_xyzw[3], quat_xyzw[0], quat_xyzw[1], quat_xyzw[2]]  # -> [w, x, y, z]
+    return {"pitch_bucket": pitch_bucket, "pitch_deg": round(pitch, 1), "roll_deg": round(roll, 1)}
 
 
 def _geom_colour(model: mujoco.MjModel, gid: int) -> str | None:
@@ -311,6 +352,38 @@ def render_buffers(renderer, model, data, camera, opt):
     return rgb, depth, seg
 
 
+def render_reflection_mask(layout, base_qpos, camera, opt, width, height):
+    """Build + render the MIRRORED-balloon scene from the same camera pose; return (rgb, mask).
+
+    The scene is the same layout with every balloon reflected across the water surface (y=SURFACE_Y)
+    and no opaque ceiling — so this render, seen by the SAME camera, is the geometrically-correct
+    reflection of the balloons (correct perspective, anchored to the surface line). ``mask`` marks the
+    pixels covered by a (mirrored) balloon, from segmentation.
+    """
+    spec_ref = scn.build_spec(layout)
+    prep_render_spec(spec_ref, mirror=True)
+    model_ref = spec_ref.compile()
+    data_ref = mujoco.MjData(model_ref)
+    data_ref.qpos[0:7] = base_qpos[0:7]  # identical base/camera pose
+    mujoco.mj_forward(model_ref, data_ref)
+    r = mujoco.Renderer(model_ref, height=height, width=width)
+    try:
+        r.update_scene(data_ref, camera=camera, scene_option=opt)
+        r.scene.flags[mujoco.mjtRndFlag.mjRND_FOG] = 1
+        rgb = r.render().copy()
+        r.enable_segmentation_rendering()
+        r.update_scene(data_ref, camera=camera, scene_option=opt)
+        seg = r.render().copy()
+        r.disable_segmentation_rendering()
+    finally:
+        r.close()
+    mask = np.zeros(seg.shape[:2], dtype=bool)
+    for gid in np.unique(seg[..., 0]):
+        if gid >= 0 and _geom_colour(model_ref, gid):
+            mask |= seg[..., 0] == gid
+    return rgb, mask
+
+
 def draw_preview(rgb, boxes):
     """Draw GT boxes + colour labels onto a copy of the (degraded) RGB for eyeballing."""
     img = np.ascontiguousarray(rgb[..., ::-1])  # RGB -> BGR for cv2
@@ -363,13 +436,15 @@ def main() -> int:
     seen_balloon_ids = set()
     scene_opt = _geom_only_option()  # geoms-only (no sites/decorations) for every render pass
 
+    total_pitch = {"up": 0, "level": 0, "down": 0}
+    total_refl_frames = 0
     for i in range(args.n):
         layout = sample_big_layout(rng)
         spec = scn.build_spec(layout)
         prep_render_spec(spec, hide_tethers=args.hide_tethers)
         model = spec.compile()
         data = mujoco.MjData(model)
-        randomize_base_pose(data, rng, args.camera)
+        pose_cond = randomize_base_pose(data, rng, args.camera)
         mujoco.mj_forward(model, data)
 
         renderer = mujoco.Renderer(model, height=args.height, width=args.width)
@@ -395,21 +470,48 @@ def main() -> int:
         boxes, drops = _boxes_from_seg(model, seg, depth, fpx, args.min_area_px)
         for k in total_drops:
             total_drops[k] += drops[k]
+        total_pitch[pose_cond["pitch_bucket"]] += 1
 
-        # degrade (or keep clean)
-        if args.clean:
-            out_rgb = rgb
-        else:
-            params = us.random_params(water_rng)
-            if args.force_reflection is not None:
-                params.reflection = args.force_reflection  # force the distractor ON for the demo
-            out_rgb = us.degrade(rgb, depth, params, water_rng)
+        # water condition (sampled at a uniform 'murk' difficulty) + optional forced reflection
+        params = us.random_params(water_rng)
+        if args.force_reflection is not None:
+            params.reflection = args.force_reflection
+
+        # GEOMETRIC water-surface reflection: composite the mirrored-camera render onto the clean RGB,
+        # anchored to where the surface is actually visible (correct perspective + boundary). Only
+        # when the surface is in view (looking up/level) and reflection is on. Unlabelled (no boxes).
+        surf_id = model.geom("dataset_surface").id
+        surface_mask = seg[..., 0] == surf_id
+        reflected = False
+        if params.reflection > 0 and surface_mask.any():
+            refl_rgb, refl_balloon = render_reflection_mask(
+                layout, data.qpos, args.camera, scene_opt, args.width, args.height)
+            reflect_mask = surface_mask & refl_balloon
+            if reflect_mask.any():
+                rgb = us.apply_surface_reflection(
+                    rgb, refl_rgb, reflect_mask, params.B, params.reflection, water_rng)
+                reflected = True
+                total_refl_frames += 1
+
+        out_rgb = rgb if args.clean else us.degrade(rgb, depth, params, water_rng)
 
         fname = f"frame_{i:04d}.jpg"
         _imwrite(img_dir / fname, out_rgb)
 
+        dists = [b["distance_m"] for b in boxes]
+        condition = {
+            "pitch_bucket": pose_cond["pitch_bucket"],
+            "pitch_deg": pose_cond["pitch_deg"],
+            "roll_deg": pose_cond["roll_deg"],
+            "n_balloons": len(boxes),
+            "median_dist_m": round(float(np.median(dists)), 2) if dists else None,
+            "murk": None if args.clean else round(params.murk, 3),
+            "turbidity": None if args.clean else round(params.turbidity, 3),
+            "reflection": round(params.reflection, 3) if reflected else 0.0,
+        }
         coco["images"].append({
             "id": i + 1, "file_name": fname, "width": args.width, "height": args.height,
+            "condition": condition,
         })
         for b in boxes:
             total_boxes[b["colour"]] += 1
@@ -424,9 +526,10 @@ def main() -> int:
             prev = draw_preview(out_rgb, boxes)
             _imwrite(prev_dir / fname, prev)
 
-        print(f"frame {i:04d}: balloons_kept={len(boxes):2d} "
-              f"drops(size={drops['size']},occ={drops['occluded']},off={drops['offscreen']}) "
-              f"pose={np.round(data.qpos[0:3], 2)}")
+        print(f"frame {i:04d}: kept={len(boxes):2d} "
+              f"drops(sz={drops['size']},occ={drops['occluded']},off={drops['offscreen']}) "
+              f"look={pose_cond['pitch_bucket']:5s}({pose_cond['pitch_deg']:+.0f}deg) "
+              f"murk={condition['murk']} refl={reflected}")
 
     with open(args.out / "annotations.json", "w") as f:
         json.dump(coco, f, indent=1)
@@ -442,6 +545,8 @@ def main() -> int:
     if np.isfinite(depth_lo):
         print(f"depth buffer (scene, m): min={depth_lo:.3f} max={depth_hi:.3f}  "
               f"[far-plane background >50 m excluded]")
+    print(f"pitch buckets: up={total_pitch['up']} level={total_pitch['level']} down={total_pitch['down']}"
+          f"   frames with surface reflection: {total_refl_frames}/{args.n}")
     print(f"unique balloon seg geom ids seen: {sorted(seen_balloon_ids)}")
     print(f"wrote: {img_dir}/  {args.out/'annotations.json'}  previews: {prev_dir}/")
     return 0
