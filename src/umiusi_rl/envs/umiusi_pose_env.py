@@ -98,6 +98,7 @@ class UmiusiPoseEnv(gym.Env):
         self.vel_cmd_horizontal = bool(e.get("vel_cmd_horizontal", True))  # sample v_cmd in the x-z plane
         self.vel_cmd_cone_deg = float(e.get("vel_cmd_cone_deg", 180.0))  # v_cmd dir within +/- this of +X (curriculum)
         self.vel_tol = float(e.get("vel_tol", 0.10))         # velocity match tolerance [m/s]
+        self.vel_deadband = float(e.get("vel_deadband", 0.0))  # m/s: no sideways-drift penalty inside this
         self.pos_tol = float(e["pos_tol"])
         self.ori_tol = float(e["ori_tol"])
         self.depth_tol = float(e.get("depth_tol", 0.10))
@@ -318,11 +319,16 @@ class UmiusiPoseEnv(gym.Env):
         reward = -rw["w_effort"] * effort - rw["w_action_rate"] * action_rate
         reward -= rw.get("w_servo_rate", 0.0) * servo_rate      # penalize servo chatter (smooth steering)
         reward -= rw.get("w_thrust_rate", 0.0) * thrust_rate    # penalize thrust command changes
-        # Near the target orientation, press hard to stop moving (kills limit cycles). NOT for the
-        # velocity task, where the vehicle must keep modulating thrust to cruise.
-        if ori_err < self.near_goal_ori and not self.track_velocity:
-            reward -= rw.get("w_settle_servo", 0.0) * servo_rate
-            reward -= rw.get("w_settle_thrust", 0.0) * thrust_rate
+        # Near the target attitude, damp actuation. HOLD task: press both servo AND thrust to a stop
+        # (kills limit cycles). CRUISE task: once the drift is small too (steadily on-course), damp the
+        # SERVO (steering) chatter — but NOT the thrust, which may still modulate to hold speed. This is
+        # the steady-cruise servo-settle that cuts the residual servo vibration.
+        if ori_err < self.near_goal_ori:
+            if not self.track_velocity:
+                reward -= rw.get("w_settle_servo", 0.0) * servo_rate
+                reward -= rw.get("w_settle_thrust", 0.0) * thrust_rate
+            elif v_perp < self.vel_tol:
+                reward -= rw.get("w_settle_servo_cruise", 0.0) * servo_rate
         # Deadband: no orientation reward gradient once inside ori_deadband, so the policy has no
         # incentive to chatter for sub-deadband precision — it can settle and hold still.
         ori_eff = max(0.0, ori_err - self.ori_deadband)
@@ -340,7 +346,9 @@ class UmiusiPoseEnv(gym.Env):
             reward += rw.get("w_depth_bonus", 0.0) * prox(abs(depth_err), rw.get("depth_scale", 0.25))
         if self.track_velocity:  # aim propulsion in the commanded DIRECTION (speed is not observable)
             reward += rw.get("w_vel_dir", 8.0) * min(max(v_along, 0.0), vcn)  # move toward goal, cap at desired
-            reward -= rw.get("w_vel_perp", 4.0) * v_perp                       # no sideways drift
+            # Deadband: no drift penalty below vel_deadband, so the policy has no incentive to chatter the
+            # servos chasing sub-deadband drift precision (a root cause of the steady-state servo vibration).
+            reward -= rw.get("w_vel_perp", 4.0) * max(0.0, v_perp - self.vel_deadband)  # no sideways drift
 
         success = ori_err < self.ori_tol
         if self.track_position:
