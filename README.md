@@ -235,7 +235,8 @@ absolute position). `imu`/`imu_depth` therefore cannot hold horizontal position.
 tasks with trained attitude-hold and attitude+direction-cruise policies (incl. disturbance + light
 sim2real domain randomization), onboard cameras, the competition balloon-popping scenario running
 end-to-end with the analytical feed-forward driver + scoring, a unified live viewer with a legible
-default world, and an interactive drive tool (steer a trained policy from the keyboard).
+default world, an interactive drive tool (steer a trained policy from the keyboard), and a classical-CV
+balloon detector (colour + bearing + range from the onboard camera).
 
 **Not supported yet:**
 - **ROS 2 integration.** The sim is standalone Python — there is no ROS bridge yet (ROS 2 isn't even
@@ -248,9 +249,11 @@ default world, and an interactive drive tool (steer a trained policy from the ke
   only. The final drivetrain wants orientation + depth-hold + horizontal cruise, but the depth-sensor
   choice isn't fixed yet, so that training is on hold. (The env already supports a 3-D velocity command
   via `vel_cmd_horizontal: false`.)
-- **Perception + autonomy.** Camera-based balloon detection/localization and a behavior FSM (search →
-  approach → ram → reacquire) to replace `competition_run`'s ground-truth greedy driver are still in
-  design. The feed-forward frame mapping (`Vx→−X` etc., see `control.py`) also needs reconciling.
+- **Autonomy (behavior FSM).** Camera-based balloon **detection is done** — `tools.perception_demo`
+  (`umiusi_sim.perception`, `uv sync --extra perception`): colour + bearing + range, ~100% on the sim
+  scene. The remaining piece is a behavior FSM (search → approach → ram → reacquire) that consumes those
+  detections to replace `competition_run`'s ground-truth driver, plus multi-frame tracking. The
+  feed-forward frame mapping (`Vx→−X` etc., see `control.py`) still needs reconciling for real control.
 - **Decoupled viewer.** `tools.drive` (and `--render`) each launch their own in-process viewer. An
   rviz-style standalone viewer that attaches to a *separately-running* sim would need an IPC layer
   (e.g. shared-memory `MjData`) since the sim isn't ROS-based (no tf/topics) — a possible future addition.
