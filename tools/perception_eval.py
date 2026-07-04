@@ -33,6 +33,7 @@ import numpy as np
 from PIL import Image, ImageDraw
 
 from umiusi_sim.perception import REAL_THRESHOLDS, SIM_THRESHOLDS, detect_balloons
+from umiusi_sim.perception.hough_detector import detect_combined, detect_hough
 
 DATA_ROOT = pathlib.Path("/home/satoi/mujoco_ws/ai/balloon")
 CATMAP = {1: "red", 2: "blue", 3: "yellow"}
@@ -103,8 +104,34 @@ def match(dets, gts):
     return pairs, used_d, used_g
 
 
-def evaluate(images, gt, root, split, thresholds, reject, max_area_frac):
-    """Run the detector over the split; accumulate per-colour TP/FP/FN and FP characterisation."""
+def make_detfn(method, thresholds, reject, max_area_frac):
+    """Return a ``rgb -> [Detection]`` callable for the chosen METHOD (color/hough/combined).
+
+    * ``color``    — the HSV colour detector (``detect_balloons``); the existing baseline.
+    * ``hough``    — the shape-based Hough-circle detector (``detect_hough``); colour assigned by
+                     inner-disc HSV vote so its Detections are directly comparable.
+    * ``combined`` — colour detections, plus round-and-coloured circles the colour path missed
+                     (``detect_combined`` mode="recover").
+    """
+    if method == "color":
+        return lambda rgb: detect_balloons(rgb, fovy_deg=FOVY, thresholds=thresholds,
+                                           reject_reflections=reject, max_area_frac=max_area_frac)
+    if method == "hough":
+        return lambda rgb: detect_hough(rgb, fovy_deg=FOVY, thresholds=thresholds)
+    if method == "combined":
+        return lambda rgb: detect_combined(rgb, fovy_deg=FOVY, thresholds=thresholds,
+                                           reject_reflections=reject, max_area_frac=max_area_frac,
+                                           mode="recover")
+    raise ValueError(f"unknown method {method!r}")
+
+
+def evaluate(images, gt, root, split, thresholds, reject, max_area_frac, detfn=None):
+    """Run the detector over the split; accumulate per-colour TP/FP/FN and FP characterisation.
+
+    ``detfn`` optionally overrides how detections are produced (see ``make_detfn``); by default the
+    colour detector is used with the given thresholds/reject/area cap."""
+    if detfn is None:
+        detfn = make_detfn("color", thresholds, reject, max_area_frac)
     tp = defaultdict(int)
     fp = defaultdict(int)
     fn = defaultdict(int)
@@ -113,8 +140,7 @@ def evaluate(images, gt, root, split, thresholds, reject, max_area_frac):
     for image_id, fname in images:
         rgb = read_rgb(root / f"{split}2017" / fname)
         H = rgb.shape[0]
-        dets = detect_balloons(rgb, fovy_deg=FOVY, thresholds=thresholds,
-                               reject_reflections=reject, max_area_frac=max_area_frac)
+        dets = detfn(rgb)
         gts = gt[image_id]
         pairs, used_d, used_g = match(dets, gts)
         for _, gi in pairs:
@@ -194,6 +220,52 @@ def draw_rejected(rgb, path):
     img.save(path)
 
 
+def run_methods(args):
+    """Compare detection METHODS (color / hough / combined) on the same split, real profile.
+
+    Reports per-colour precision/recall/F1 + FP for each method so shape vs colour vs their
+    combination are directly comparable, and (unless --no-images) saves annotated frames
+    (GT=white, detections colour-coded) to <tmp>/umiusi_sim/hough_<method>_<split>_<stem>.png."""
+    if not (args.data_root / "annotations" / f"{args.split}.json").exists():
+        print(f"ERROR: dataset not found at {args.data_root} (need annotations/{args.split}.json)")
+        return 1
+    images, gt, split = load_split(args.data_root, args.split)
+    n_gt = sum(len(v) for v in gt.values())
+    print(f"dataset: {args.data_root}  split={split}  images={len(images)}  GT balloons={n_gt}")
+    print("profile=real (thresholds + reflection reject + area cap); Hough=gray+CLAHE, "
+          "GRADIENT_ALT param2=0.4, radii 10-100px")
+
+    methods = [args.method] if args.method else ["color", "hough", "combined"]
+    summary = {}
+    per_image_by_method = {}
+    for m in methods:
+        detfn = make_detfn(m, REAL_THRESHOLDS, True, MAX_AREA_FRAC)
+        res = evaluate(images, gt, args.data_root, split, REAL_THRESHOLDS, True, MAX_AREA_FRAC, detfn)
+        summary[m] = print_report(f"METHOD = {m}", res[0], res[1], res[2], res[3])
+        per_image_by_method[m] = res[4]
+
+    if len(methods) > 1:
+        print("\n===== method comparison (overall) =====")
+        print(f"  {'method':10s} {'prec':>6s} {'rec':>6s} {'F1':>6s} {'FP':>5s}")
+        for m in methods:
+            s = summary[m]
+            print(f"  {m:10s} {s['prec']:6.2f} {s['rec']:6.2f} {s['f1']:6.2f} {s['fp']:5d}")
+
+    if not args.no_images:
+        OUT_DIR.mkdir(parents=True, exist_ok=True)
+        saved = []
+        for m in methods:
+            for image_id, fname, rgb, dets, gts, used_d in per_image_by_method[m][:4]:
+                p = OUT_DIR / f"hough_{m}_{split}_{pathlib.Path(fname).stem}.png"
+                annotate(rgb, dets, gts, used_d, p)
+                saved.append(p)
+        print("\nannotated frames (white=GT, thick=matched det, thin=FP; boxes are the circle's "
+              "square for hough/combined):")
+        for p in saved:
+            print(f"  {p}")
+    return 0
+
+
 def main():
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     ap.add_argument("--split", choices=["train", "val"], default="val")
@@ -203,7 +275,14 @@ def main():
                     help="always run BEFORE(sim) vs AFTER(real+reject) both (default behaviour)")
     ap.add_argument("--data-root", type=pathlib.Path, default=DATA_ROOT)
     ap.add_argument("--no-images", action="store_true", help="skip writing annotated PNGs")
+    ap.add_argument("--methods", action="store_true",
+                    help="compare color vs hough vs combined (real profile) side by side and exit")
+    ap.add_argument("--method", choices=["color", "hough", "combined"], default=None,
+                    help="evaluate a single detection method (real profile) and exit")
     args = ap.parse_args()
+
+    if args.methods or args.method:
+        return run_methods(args)
 
     if not (args.data_root / "annotations" / f"{args.split}.json").exists():
         print(f"ERROR: dataset not found at {args.data_root} (need annotations/{args.split}.json)")
