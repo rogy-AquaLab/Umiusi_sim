@@ -48,7 +48,7 @@ mujoco_ws/                # workspace container (NOT version-controlled)
         envs/umiusi_pose_env.py #   UmiusiPoseEnv: attitude / depth / pose / attitude_velocity
         train.py  eval.py   #   PPO default (--algo sac/td3); models/ is gitignored
     configs/                # umiusi.yaml (physics) + train_ppo.yaml (env/reward/algo)
-    tools/                  # validate_sim, view, drive, snapshot, camera_demo, scenario_demo, competition_run, analyze_steady
+    tools/                  # validate_sim, drive, snapshot, camera_demo, scenario_demo, competition_run, analyze_steady
     examples/               # pretrained example policies (cruise_policy/) so eval/drive run out of the box
     media/                  # rendered placement screenshots
     pyproject.toml  uv.lock # uv-managed deps (CPU torch pinned); reproducible via `uv sync`
@@ -101,7 +101,7 @@ MuJoCo renders one of two ways; choose per command:
 
 | Mode | Use it for | How | Applies to |
 | --- | --- | --- | --- |
-| **Interactive GUI** (live window) | watching it move | needs a display (WSLg on Win 11); **do NOT set `MUJOCO_GL`** | `tools.view`, any `--render` |
+| **Interactive GUI** (live window) | watching it move | needs a display (WSLg on Win 11); **do NOT set `MUJOCO_GL`** | `tools.drive`, any `--render` |
 | **Headless / offscreen** (save PNG/MP4, or no display) | saving images/video, headless boxes | prefix the command with **`MUJOCO_GL=egl`** | `tools.snapshot`, `camera_demo`, `scenario_demo`, any `--record` |
 
 That's it: `MUJOCO_GL=egl` is **only** for offscreen capture — setting it breaks the live viewer, and
@@ -124,30 +124,23 @@ python -m tools.validate_sim -v     # + per-thruster detail and calibration numb
 Covers buoyancy float/sink, self-leveling, drag, per-thruster thrust direction, servo tracking + tilt,
 feed-forward allocation (heave/surge decoupling), and open-loop stability. Headless.
 
-Two **separate** GUI tools with distinct jobs — `view` just shows the sim, `drive` is the controller.
-Both share one module (`umiusi_sim.viewer`), so the camera + controls are identical: default fixed
-**track** camera that follows the vehicle; `[` / `]` cycle cameras; the free camera is mouse-controllable
-but looks tilted (the model is +Y-up — the fixed cameras are correct). GUI needs a display, no `MUJOCO_GL`.
+The interactive GUI is **`tools.drive`** — load a trained policy and steer it from the keyboard (like a
+vehicle) in the legible default world (checker floor grid + axis triad). It and the `--render` flags all
+share one viewer module (`umiusi_sim.viewer`): default fixed **track** camera that follows the vehicle;
+`[` / `]` cycle cameras; the free camera is mouse-controllable but looks tilted (the model is +Y-up — the
+fixed cameras are correct). GUI needs a display, no `MUJOCO_GL`.
 
-**`tools.view` — passive viewer** (just launch and watch; no control input):
-```bash
-python -m tools.view                                  # robot in the default world (grid floor + axis triad)
-python -m tools.view --demo                           # scripted servo/thrust motion
-python -m tools.view --bare                           # plain robot, no world
-python -m tools.view --scenario competition_balloon   # view inside the competition pool
-```
-
-**`tools.drive` — controller** (load a trained policy and steer it from the keyboard, like a vehicle):
 ```bash
 python -m tools.drive --model examples/cruise_policy/final.zip           # W/S fwd/back, A/D strafe, Q/E turn, R/F tilt, Space stop
 python -m tools.drive --model examples/cruise_policy/final.zip --headless 150   # headless self-test (forward → cosine ~1)
 ```
 A pretrained cruise policy ships in [`examples/`](examples/) so `drive` / `eval` work right after cloning
-(no training needed).
+(no training needed). Press **Space** to stop the cruise command and just watch it hold in place.
 
-Both are **standalone** (a fresh sim, not attached to a running process). To watch a *specific* run live
-instead, pass `--render` to that command (`eval --render`, `competition_run --render`); training is
-headless (watch curves in tensorboard, then `eval --render`).
+To watch a *specific* automated run live instead, pass `--render` to it (`eval --render`,
+`competition_run --render`); training is headless (watch curves in tensorboard, then `eval --render`).
+A standalone rviz-style viewer that attaches to a separately-running sim is a possible future addition
+(it would need an IPC layer since the sim isn't ROS-based) — see the Roadmap.
 
 **Onboard cameras** — two fixed cameras move with the vehicle: `front_cam` (+X, forward) and `down_cam`
 (nadir, −Y). `UmiusiSimulator.render_camera(camera, w, h)` returns an `(H, W, 3)` uint8 RGB frame:
@@ -258,6 +251,9 @@ default world, and an interactive drive tool (steer a trained policy from the ke
 - **Perception + autonomy.** Camera-based balloon detection/localization and a behavior FSM (search →
   approach → ram → reacquire) to replace `competition_run`'s ground-truth greedy driver are still in
   design. The feed-forward frame mapping (`Vx→−X` etc., see `control.py`) also needs reconciling.
+- **Decoupled viewer.** `tools.drive` (and `--render`) each launch their own in-process viewer. An
+  rviz-style standalone viewer that attaches to a *separately-running* sim would need an IPC layer
+  (e.g. shared-memory `MjData`) since the sim isn't ROS-based (no tf/topics) — a possible future addition.
 - **Sim-to-real + Pi 4 deploy.** Domain-randomization hooks exist; on-hardware tuning is future.
 
 **Planned order:** perception + behavior FSM (phase 5b) → ROS 2 hardware-plugin bridge (phase 4) →

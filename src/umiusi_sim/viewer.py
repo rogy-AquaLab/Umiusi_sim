@@ -1,9 +1,8 @@
 """Shared live-viewing module — one consistent MuJoCo GUI experience everywhere.
 
-Every interactive/passive viewer in the project (``tools/view.py``, ``tools/drive.py``,
-``UmiusiPoseEnv.render()``, ``tools/competition_run.py --render``) goes through this module,
-so the camera behaviour, the +Y-up handling and the on-screen controls are identical no
-matter which tool you launch.
+Every live viewer in the project (``tools/drive.py``, ``UmiusiPoseEnv.render()`` for
+``eval --render``, ``tools/competition_run.py --render``) goes through this module, so the camera
+behaviour, the +Y-up handling and the on-screen controls are identical no matter which tool you launch.
 
 Why a shared module: this model is +Y-up (CAD frame), but MuJoCo's FREE camera assumes
 +Z-up, so the free camera looks tilted and is easy to get lost in. The fixed MJCF cameras
