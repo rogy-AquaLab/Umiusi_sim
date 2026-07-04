@@ -11,6 +11,7 @@ Usage:
 
 import pathlib
 import sys
+import tempfile
 
 import imageio
 import numpy as np
@@ -18,10 +19,8 @@ import numpy as np
 from umiusi_sim.description.scenarios import competition_balloon as scn
 from umiusi_sim.simulator import UmiusiSimulator
 
-_SCRATCH = pathlib.Path(
-    "/tmp/claude-1000/-home-satoi-mujoco-ws/0cf18c2f-3f06-4906-a070-c3f6db043305/scratchpad"
-)
-OUT_DIR = pathlib.Path(sys.argv[1]) if len(sys.argv) > 1 else _SCRATCH
+_TMP = pathlib.Path(tempfile.gettempdir()) / "umiusi_sim"  # portable default output dir
+OUT_DIR = pathlib.Path(sys.argv[1]) if len(sys.argv) > 1 else _TMP
 START = (0.0, 1.0, 0.0)  # ~1 m off the pool floor, on the +X approach axis
 
 

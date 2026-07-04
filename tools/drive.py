@@ -11,11 +11,10 @@ shows the commanded orientation.
 Everything routes through the shared viewer (``umiusi_sim.viewer``): fixed ``track`` camera, +Y-up
 handled, ``[`` / ``]`` cycle cameras.
 
-Keyboard (the GUI window):
-    A / D  or  Left / Right : steer cruise DIRECTION (body-frame azimuth) left / right
-    W / S  or  Up   / Down  : cruise elevation up / down   (only if the policy is 3-D, i.e.
-                              vel_cmd_horizontal=false; ignored for horizontal-only policies)
-    Q / E                   : target YAW  (turn the held heading left / right)
+Keyboard (the GUI window) — WASD drives like a vehicle, relative to the held heading:
+    W / S  or  Up   / Down  : cruise FORWARD / BACK
+    A / D  or  Left / Right : strafe LEFT / RIGHT
+    Q / E                   : turn the held heading (target YAW) left / right
     R / F                   : target TILT (nose up / down)
     Space                   : STOP (zero the cruise command; keep holding orientation)
     [  /  ]                 : cycle cameras (handled by the viewer)
@@ -28,6 +27,7 @@ Usage:
 from __future__ import annotations
 
 import argparse
+import tempfile
 from pathlib import Path
 
 import mujoco
@@ -41,17 +41,17 @@ from umiusi_sim.simulator import UmiusiSimulator
 
 ALGOS = {"ppo": PPO, "sac": SAC, "td3": TD3}
 _ROOT = Path(__file__).resolve().parents[1]
-_SCRATCH = Path(
-    "/tmp/claude-1000/-home-satoi-mujoco-ws/0cf18c2f-3f06-4906-a070-c3f6db043305/scratchpad"
-)
+_TMP = Path(tempfile.gettempdir()) / "umiusi_sim"  # portable temp dir for the composed world MJCF
 _Y = np.array([0.0, 1.0, 0.0])
 _Z = np.array([0.0, 0.0, 1.0])
 
-# keyboard step sizes
-_D_AZ = np.radians(15.0)
-_D_EL = np.radians(10.0)
+# keyboard step sizes (orientation nudges; translation is set directly by WASD)
 _D_YAW = np.radians(15.0)
 _D_TILT = np.radians(10.0)
+
+# Cardinal body-frame cruise directions (heading-relative): +X forward, +Z left (right-handed,
+# +X fwd / +Y up). Pressing a key sets the direction, so the vehicle just goes that way.
+_DIR = {"W": (1.0, 0.0, 0.0), "S": (-1.0, 0.0, 0.0), "A": (0.0, 0.0, 1.0), "D": (0.0, 0.0, -1.0)}
 
 # GLFW key codes (mujoco.viewer passes raw GLFW codes to key_callback).
 _K_SPACE = 32
@@ -64,9 +64,8 @@ class Command:
     def __init__(self, speed, horizontal):
         self.speed = float(speed)          # cruise speed magnitude [m/s]
         self.cruise = float(speed)         # remembered speed to resume after a Stop
-        self.horizontal = bool(horizontal)  # policy only controls horizontal cruise direction
-        self.az = 0.0                      # body-frame cruise azimuth [rad] (0 = body +X)
-        self.el = 0.0                      # body-frame cruise elevation [rad] (3-D policies only)
+        self.horizontal = bool(horizontal)  # kept for reference; WASD is body-frame either way
+        self.dir_body = np.zeros(3)        # UNIT body-frame cruise direction (zero = stopped)
         self.yaw = 0.0                     # target yaw about +Y [rad]
         self.tilt = 0.0                    # target tilt (nose up/down about +Z) [rad]
 
@@ -79,19 +78,19 @@ class Command:
         return q
 
     def v_cmd_body(self):
-        """Commanded velocity in the TARGET-BODY frame (what the env's obs carries)."""
-        if self.horizontal:
-            dhat = np.array([np.cos(self.az), 0.0, np.sin(self.az)])
-        else:
-            dhat = np.array([np.cos(self.el) * np.cos(self.az),
-                             np.sin(self.el),
-                             np.cos(self.el) * np.sin(self.az)])
-        return dhat * self.speed
+        """Commanded velocity in the TARGET-BODY frame (what the env's obs carries).
+
+        dir_body is a cardinal direction set by WASD relative to the vehicle heading
+        (+X forward, -X back, +Z left, -Z right), so pressing a key sends it that way.
+        """
+        return self.dir_body * self.speed
 
     def describe(self):
-        return (f"cmd: dir az={np.degrees(self.az):+5.0f}deg el={np.degrees(self.el):+4.0f}deg "
-                f"speed={self.speed:.2f} m/s | target yaw={np.degrees(self.yaw):+5.0f}deg "
-                f"tilt={np.degrees(self.tilt):+4.0f}deg")
+        labels = {(1, 0, 0): "FORWARD", (-1, 0, 0): "BACK",
+                  (0, 0, 1): "LEFT", (0, 0, -1): "RIGHT", (0, 0, 0): "STOP"}
+        move = labels.get(tuple(int(round(x)) for x in self.dir_body), str(np.round(self.dir_body, 2)))
+        return (f"cmd: move={move:<7s} speed={self.speed:.2f} m/s | "
+                f"target yaw={np.degrees(self.yaw):+5.0f}deg tilt={np.degrees(self.tilt):+4.0f}deg")
 
 
 def _make_key_callback(cmd, track_velocity):
@@ -101,19 +100,12 @@ def _make_key_callback(cmd, track_velocity):
         k = keycode
         ch = chr(k).upper() if 0 <= k < 0x110000 else ""
         changed = True
+        wasd = {_K_UP: "W", _K_DOWN: "S", _K_LEFT: "A", _K_RIGHT: "D"}.get(k, ch)
         if k == _K_SPACE:
+            cmd.dir_body = np.zeros(3)
             cmd.speed = 0.0
-        elif ch == "A" or k == _K_LEFT:
-            cmd.az -= _D_AZ
-            cmd.speed = cmd.cruise
-        elif ch == "D" or k == _K_RIGHT:
-            cmd.az += _D_AZ
-            cmd.speed = cmd.cruise
-        elif ch == "W" or k == _K_UP:
-            cmd.el += _D_EL
-            cmd.speed = cmd.cruise
-        elif ch == "S" or k == _K_DOWN:
-            cmd.el -= _D_EL
+        elif wasd in _DIR:  # W/S/A/D (or arrows) -> forward/back/left/right, heading-relative
+            cmd.dir_body = np.array(_DIR[wasd])
             cmd.speed = cmd.cruise
         elif ch == "Q":
             cmd.yaw += _D_YAW
@@ -127,6 +119,7 @@ def _make_key_callback(cmd, track_velocity):
             changed = False
         if changed:
             if not track_velocity:  # attitude-only policy: no cruise command
+                cmd.dir_body = np.zeros(3)
                 cmd.speed = 0.0
             print(cmd.describe(), flush=True)
 
@@ -194,8 +187,8 @@ def _swap_in_world(env, cfg):
     """
     from umiusi_sim.description.scenarios import default_world as scn
 
-    _SCRATCH.mkdir(parents=True, exist_ok=True)
-    world_xml = scn.write_xml(_SCRATCH / "drive_world.xml")
+    _TMP.mkdir(parents=True, exist_ok=True)
+    world_xml = scn.write_xml(_TMP / "drive_world.xml")
     sim_config = cfg.get("sim_config", "configs/umiusi.yaml")
     sim_config = sim_config if Path(sim_config).is_absolute() else _ROOT / sim_config
     env.sim = UmiusiSimulator(model_path=world_xml, config_path=sim_config)
@@ -208,7 +201,7 @@ def _swap_in_world(env, cfg):
 def run_headless(env, policy, norm_obs, n_steps, meta):
     """Self-test WITHOUT a display: fixed body +X command; report measured vs commanded direction."""
     cmd = Command(speed=env.vel_cmd_max, horizontal=env.vel_cmd_horizontal)
-    cmd.az = cmd.el = cmd.yaw = cmd.tilt = 0.0  # command straight ahead (body +X), upright target
+    cmd.dir_body = np.array([1.0, 0.0, 0.0])  # command straight ahead (body +X), upright target
     env.reset(seed=0)
     _apply_command(env, cmd)
     cmd_world = env.v_cmd_world.copy()
@@ -250,9 +243,9 @@ def run_interactive(env, policy, norm_obs, cfg):
     print(cmd.describe(), flush=True)
 
     extra_keys = {
-        "A/D or Left/Right": "steer cruise azimuth",
-        "W/S or Up/Down": "cruise elevation (3-D policies only)",
-        "Q/E": "target yaw", "R/F": "target tilt", "space": "STOP (zero cruise)",
+        "W/S or Up/Down": "cruise forward / back",
+        "A/D or Left/Right": "strafe left / right",
+        "Q/E": "turn heading (yaw)", "R/F": "target tilt", "space": "STOP",
     }
     key_cb = _make_key_callback(cmd, env.track_velocity)
 

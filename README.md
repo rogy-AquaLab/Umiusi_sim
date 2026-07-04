@@ -49,6 +49,7 @@ mujoco_ws/                # workspace container (NOT version-controlled)
         train.py  eval.py   #   PPO default (--algo sac/td3); models/ is gitignored
     configs/                # umiusi.yaml (physics) + train_ppo.yaml (env/reward/algo)
     tools/                  # validate_sim, view, drive, snapshot, camera_demo, scenario_demo, competition_run, analyze_steady
+    examples/               # pretrained example policies (cruise_policy/) so eval/drive run out of the box
     media/                  # rendered placement screenshots
     pyproject.toml  uv.lock # uv-managed deps (CPU torch pinned); reproducible via `uv sync`
     # local-only (gitignored / outside the repo): models/ (trained policies), umiusi_model/ (CAD provenance),
@@ -123,26 +124,30 @@ python -m tools.validate_sim -v     # + per-thruster detail and calibration numb
 Covers buoyancy float/sink, self-leveling, drag, per-thruster thrust direction, servo tracking + tilt,
 feed-forward allocation (heave/surge decoupling), and open-loop stability. Headless.
 
-**Watch it live** (GUI — needs a display, no `MUJOCO_GL`). All viewers share one module
-(`umiusi_sim.viewer`), so the camera + controls are identical everywhere: the default is the fixed
-**track** camera (upright for +Y-up, follows the vehicle); press `[` / `]` to cycle cameras; the free
-camera is mouse-controllable but looks tilted (the model is +Y-up — the fixed cameras are correct).
+Two **separate** GUI tools with distinct jobs — `view` just shows the sim, `drive` is the controller.
+Both share one module (`umiusi_sim.viewer`), so the camera + controls are identical: default fixed
+**track** camera that follows the vehicle; `[` / `]` cycle cameras; the free camera is mouse-controllable
+but looks tilted (the model is +Y-up — the fixed cameras are correct). GUI needs a display, no `MUJOCO_GL`.
+
+**`tools.view` — passive viewer** (just launch and watch; no control input):
 ```bash
 python -m tools.view                                  # robot in the default world (grid floor + axis triad)
-python -m tools.view --demo                           # sweep the servos and pulse the thrusters
+python -m tools.view --demo                           # scripted servo/thrust motion
 python -m tools.view --bare                           # plain robot, no world
 python -m tools.view --scenario competition_balloon   # view inside the competition pool
 ```
 
-**Drive a trained policy** — command a target orientation/direction and watch it respond:
+**`tools.drive` — controller** (load a trained policy and steer it from the keyboard, like a vehicle):
 ```bash
-python -m tools.drive --model models/cruise/final.zip            # keys: A/D or ←/→ steer, Q/E yaw, R/F tilt, Space stop
-python -m tools.drive --model models/cruise/final.zip --headless 150   # headless self-test (command +X → cosine ~1)
+python -m tools.drive --model examples/cruise_policy/final.zip           # W/S fwd/back, A/D strafe, Q/E turn, R/F tilt, Space stop
+python -m tools.drive --model examples/cruise_policy/final.zip --headless 150   # headless self-test (forward → cosine ~1)
 ```
+A pretrained cruise policy ships in [`examples/`](examples/) so `drive` / `eval` work right after cloning
+(no training needed).
 
-`tools.view`/`tools.drive` are **standalone** (a fresh sim, not attached to a running process). To watch a
-*specific* run live instead, pass `--render` to that command (`eval --render`, `competition_run --render`);
-training is headless (watch curves in tensorboard, then `eval --render`).
+Both are **standalone** (a fresh sim, not attached to a running process). To watch a *specific* run live
+instead, pass `--render` to that command (`eval --render`, `competition_run --render`); training is
+headless (watch curves in tensorboard, then `eval --render`).
 
 **Onboard cameras** — two fixed cameras move with the vehicle: `front_cam` (+X, forward) and `down_cam`
 (nadir, −Y). `UmiusiSimulator.render_camera(camera, w, h)` returns an `(H, W, 3)` uint8 RGB frame:

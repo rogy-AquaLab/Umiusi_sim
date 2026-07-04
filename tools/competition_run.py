@@ -16,6 +16,7 @@ Usage (headless render needs an offscreen GL backend, e.g. EGL):
 
 import argparse
 import math
+import tempfile
 from pathlib import Path
 
 import mujoco
@@ -25,9 +26,7 @@ from umiusi_sim.control import feedforward_allocation
 from umiusi_sim.description.scenarios import competition_balloon as scn
 from umiusi_sim.simulator import UmiusiSimulator
 
-_SCRATCH = Path(
-    "/tmp/claude-1000/-home-satoi-mujoco-ws/0cf18c2f-3f06-4906-a070-c3f6db043305/scratchpad"
-)
+_TMP = Path(tempfile.gettempdir()) / "umiusi_sim"  # portable temp dir for the composed MJCF + default mp4
 START = (0.0, 1.0, 0.0)  # ~1 m off the pool floor, on the +X approach axis (scenario assumption)
 
 # --- driver gains (feed-forward command convention; see umiusi_sim/control.py docstring) ------
@@ -104,7 +103,7 @@ def _driver_action(state, pin_tip, target):
 def main():
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     ap.add_argument("--seconds", type=float, default=60.0, help="episode horizon (demo default 60 s)")
-    ap.add_argument("--record", default=str(_SCRATCH / "competition_run.mp4"),
+    ap.add_argument("--record", default=str(_TMP / "competition_run.mp4"),
                     help="mp4 output path (headless; run with MUJOCO_GL=egl). '' disables.")
     ap.add_argument("--render", action="store_true", help="watch in the MuJoCo passive viewer (needs a display)")
     ap.add_argument("--seed", type=int, default=0, help="layout seed; <0 uses the fixed placeholder layout")
@@ -115,8 +114,8 @@ def main():
         layout = scn.sample_layout(np.random.default_rng(args.seed))
     else:
         layout = scn.BALLOON_LAYOUT
-    _SCRATCH.mkdir(parents=True, exist_ok=True)
-    xml_path = scn.write_xml(_SCRATCH / "competition_run.xml", layout=layout)
+    _TMP.mkdir(parents=True, exist_ok=True)
+    xml_path = scn.write_xml(_TMP / "competition_run.xml", layout=layout)
     sim = UmiusiSimulator(model_path=xml_path)
     sim.reset(pos=START)
     balloons = scn.balloon_table(layout=layout)

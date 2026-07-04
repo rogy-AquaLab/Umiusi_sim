@@ -1,0 +1,9 @@
+algo: ppo
+config: configs/train_ppo.yaml
+obs_mode: imu
+seed: 0
+task: attitude_velocity
+total_timesteps: 2500000
+vecnormalize: true
+vel_cmd_cone_deg: 180.0
+yaw_target_deg: 180.0
