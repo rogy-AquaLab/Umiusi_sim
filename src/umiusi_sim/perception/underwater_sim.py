@@ -92,7 +92,7 @@ DR_RANGES = {
     "reflection_prob": 0.90,           # present ~90% of frames (was 0.6)
     # ripple/geometry are sampled per-call inside _add_surface_reflection (documented here):
     "reflection_surface": (0.06, 0.20),  # water-surface line as a fraction of frame height (near top)
-    "reflection_band": (0.32, 0.52),     # how far below the surface the reflection extends (frac of H)
+    "reflection_band": (0.42, 0.62),     # how far below the surface the reflection extends (frac of H)
     "reflection_ripple_px": (4.0, 14.0), # peak horizontal wave displacement [px] (vertical ~0.35x)
     "reflection_waves": (2, 3),          # number of superposed sinusoidal wave components
     "reflection_bluemix": (0.30, 0.55),  # how far the reflection is pulled toward the veil colour B
@@ -221,13 +221,15 @@ def degrade(
     z_scale = max(z_scale, 1e-3)
     depth_norm = np.clip(z / z_scale, 0.0, 1.0)
 
-    # 2) water-surface reflection distractor (add BEFORE blur/noise so it also gets veiled/blurred).
-    if params.reflection > 0:
-        img = _add_surface_reflection(img, params.B, params.reflection, rng)
-
     # 3) turbidity blur (depth-scaled: farther => blurrier)
     if params.turbidity > 0:
         img = _depth_scaled_blur(img, depth_norm, params.turbidity)
+
+    # 2) water-surface reflection distractor. Added AFTER the depth blur (so the far-depth turbidity
+    # doesn't smear it away) and sourced from the CLEAN render J (vivid balloon colours, not the
+    # already-veiled scene), so distant balloons still cast recognizable mirrored distractors.
+    if params.reflection > 0:
+        img = _add_surface_reflection(img, J, params.B, params.reflection, rng)
 
     # 4) caustics — multiplicative light ripple, strongest on near/lit surfaces (weight by t).
     if params.caustics > 0:
@@ -259,7 +261,7 @@ def _remap(img: np.ndarray, map_x: np.ndarray, map_y: np.ndarray) -> np.ndarray:
     return img[yi, xi]
 
 
-def _add_surface_reflection(img: np.ndarray, B: np.ndarray, strength: float,
+def _add_surface_reflection(base: np.ndarray, source: np.ndarray, B: np.ndarray, strength: float,
                             rng: np.random.Generator) -> np.ndarray:
     """Overlay a STRONG, rippled, surface-anchored mirror of the scene — the water-surface reflection.
 
@@ -268,20 +270,22 @@ def _add_surface_reflection(img: np.ndarray, B: np.ndarray, strength: float,
     balloons are the #1 false-detection source, so we make them clearly visible (a HARD NEGATIVE the
     detector must reject). They carry NO GT box — only real balloon geoms are labelled.
 
-    Steps: pick a surface line near the top; mirror the below-surface scene up into a band anchored at
-    the surface; ripple that band with a few sinusoidal waves (horizontal + slight vertical); pull the
-    colour toward the veil ``B`` (attenuate + blue-tint) so it sits in the water; fade out downward.
+    ``base`` is the (already-degraded) image the reflection is composited onto; ``source`` is the
+    scene the mirror is sampled from (the CLEAN render, so balloon colours stay vivid). Steps: pick a
+    surface line near the top; mirror the below-surface scene up into a band anchored at the surface;
+    ripple it with a few sinusoidal waves (horizontal + slight vertical); pull the colour toward the
+    veil ``B`` (attenuate + blue-tint) so it sits in the water; softly fade out downward.
     """
-    h, w, _ = img.shape
+    h, w, _ = base.shape
     surf = int(round(h * rng.uniform(*DR_RANGES["reflection_surface"])))  # water-surface row
     band = int(round(h * rng.uniform(*DR_RANGES["reflection_band"])))     # reflection extent (down)
     band = max(4, min(band, h - surf - 1))
     if band < 4:
-        return img
+        return base
 
     # Source = the scene just below the surface (the real balloons), flipped vertically -> a mirror
     # image. reflection row (surf+i) shows source row (surf + band-1 - i): deeper content near surface.
-    src = img[surf:surf + band].copy()
+    src = source[surf:surf + band].copy()
     mirror = src[::-1]
 
     # Ripple: superpose a few low-frequency waves. Horizontal displacement dominates (surface waves
@@ -306,12 +310,16 @@ def _add_surface_reflection(img: np.ndarray, B: np.ndarray, strength: float,
     bluemix = float(rng.uniform(*DR_RANGES["reflection_bluemix"]))
     mirror = mirror * (1.0 - bluemix) + B.reshape(1, 1, 3) * bluemix
 
+    # Soften slightly (a real surface reflection is a touch blurred) — a mild fixed blur, NOT the
+    # heavy depth blur that would smear it away.
+    mirror = _gaussian_blur(mirror, 1.0)
+
     # Fade: strongest right under the surface, decaying downward (kept fairly gentle so mid-frame
     # balloon reflections stay visible, not only a thin band at the very top).
     fade = (np.linspace(1.0, 0.15, band) ** 1.2).reshape(band, 1, 1)
     ghost = mirror * fade * strength
 
-    out = img.copy()
+    out = base.copy()
     out[surf:surf + band] = np.clip(out[surf:surf + band] + ghost, 0.0, 1.0)  # additive -> clearly there
     return out
 

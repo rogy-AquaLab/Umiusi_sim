@@ -60,6 +60,38 @@ TETHER_RADIUS = 0.0015  # was 0.003 in the scenario
 # leaving a black void above them; a real pool is an enclosed bright box.
 WALL_RGBA = (0.50, 0.60, 0.66, 1.0)
 
+# --- bigger, real-pool-scale GENERATED world (dataset-only; competition_run keeps its own layout) ---
+# The scenario's default box is tight (8 x 5 m). For synthetic data we enlarge it a lot so the
+# balloon field spreads over a real-pool-scale area -> more distance range -> distant balloons +
+# a surface full of their reflections. Walls/floor/ceiling are moved out to CONTAIN the whole field
+# (no balloon outside the walls). Water depth is kept ~3.3 m (scn.POOL_DEPTH).
+POOL_CENTER_X = 7.0     # was 2.0
+POOL_LEN_X = 18.0       # forward extent (+X), was 8.0
+POOL_LEN_Z = 12.0       # lateral extent (±Z), was 5.0
+FIELD_X = (0.8, 14.0)   # balloon x-range (inside the walls, ahead of the start pose)
+FIELD_Z = (-5.0, 5.0)   # balloon z-range (inside the ±6 m walls)
+BALLOON_COUNT = (12, 30)                       # randomized number of balloons per frame
+COLOUR_WEIGHTS = {"red": 0.4, "blue": 0.3, "yellow": 0.3}  # realistic competition mix
+
+
+def sample_big_layout(rng: np.random.Generator):
+    """Randomized real-pool-scale layout: 12-30 balloons at varied x/z across the enlarged field,
+    with a realistic red/blue/yellow mix. Returns a BALLOON_LAYOUT-shaped list of (name, colour, x, z)
+    with UNIQUE names (index-suffixed) so seg->box auto-labelling stays 1:1. Heights come from
+    BALLOON_SPECS per colour (via build_spec). competition_run's own sample_layout is untouched.
+    """
+    n = int(rng.integers(BALLOON_COUNT[0], BALLOON_COUNT[1] + 1))
+    colours = list(COLOUR_WEIGHTS)
+    probs = np.array([COLOUR_WEIGHTS[c] for c in colours], dtype=float)
+    probs /= probs.sum()
+    layout = []
+    for i in range(n):
+        c = colours[int(rng.choice(len(colours), p=probs))]
+        x = float(rng.uniform(*FIELD_X))
+        z = float(rng.uniform(*FIELD_Z))
+        layout.append((f"balloon_{c}_{i}", c, x, z))
+    return layout
+
 
 def prep_render_spec(spec: mujoco.MjSpec, hide_tethers: bool = False) -> None:
     """Mutate a composed MjSpec IN PLACE for the rendered dataset (competition_balloon.py stays
@@ -84,14 +116,31 @@ def prep_render_spec(spec: mujoco.MjSpec, hide_tethers: bool = False) -> None:
             else:
                 g.rgba[:] = TETHER_RGBA
                 g.size[0] = TETHER_RADIUS
+        elif name == "pool_floor":
+            g.pos[:] = [POOL_CENTER_X, scn.FLOOR_Y - 0.02, 0.0]
+            g.size[:] = [POOL_LEN_X / 2, 0.02, POOL_LEN_Z / 2]
+        elif name == "pool_water":
+            g.pos[:] = [POOL_CENTER_X, scn.FLOOR_Y + scn.POOL_DEPTH / 2, 0.0]
+            g.size[:] = [POOL_LEN_X / 2, scn.POOL_DEPTH / 2, POOL_LEN_Z / 2]
         elif name.startswith("pool_wall_"):
-            # Raise the low (1.2 m) scenery walls to the full water depth and make them bright +
-            # opaque, so the frame is FILLED with pool (no black "over-the-wall" void) — a bright,
-            # enclosed pool look. Height is size[1]/pos[1]; the other dims are left untouched.
-            g.pos[1] = scn.POOL_DEPTH / 2
-            g.size[1] = scn.POOL_DEPTH / 2
-            g.rgba[:] = WALL_RGBA
+            _resize_wall(g, name)
     _brighten_like_pool(spec)
+
+
+def _resize_wall(g, name: str) -> None:
+    """Move + resize a scenery wall to the enlarged pool extent, full water depth, bright + opaque,
+    so the whole (bigger) balloon field is contained and the frame is filled with pool."""
+    hy = scn.POOL_DEPTH                       # full-height walls
+    y = scn.FLOOR_Y + hy / 2
+    if name.endswith(("xpos", "xneg")):       # walls spanning ±Z at the ends of +X
+        sign = 1.0 if name.endswith("xpos") else -1.0
+        g.pos[:] = [POOL_CENTER_X + sign * POOL_LEN_X / 2, y, 0.0]
+        g.size[:] = [0.02, hy / 2, POOL_LEN_Z / 2]
+    else:                                     # walls spanning ±X at the ends of Z
+        sign = 1.0 if name.endswith("zpos") else -1.0
+        g.pos[:] = [POOL_CENTER_X, y, sign * POOL_LEN_Z / 2]
+        g.size[:] = [POOL_LEN_X / 2, hy / 2, 0.02]
+    g.rgba[:] = WALL_RGBA
 
 
 def _brighten_like_pool(spec: mujoco.MjSpec) -> None:
@@ -112,8 +161,8 @@ def _brighten_like_pool(spec: mujoco.MjSpec) -> None:
     sun = spec.worldbody.add_light()
     sun.name = "dataset_sun"
     sun.type = mujoco.mjtLightType.mjLIGHT_DIRECTIONAL
-    sun.pos = [scn.POOL_CENTER_X, scn.POOL_DEPTH + 2.0, 0.0]  # above the water surface
-    sun.dir = [0.0, -1.0, 0.0]                                # straight down
+    sun.pos = [POOL_CENTER_X, scn.POOL_DEPTH + 2.0, 0.0]  # above the water surface
+    sun.dir = [0.0, -1.0, 0.0]                             # straight down
     sun.diffuse = [0.55, 0.55, 0.58]
     sun.specular = [0.0, 0.0, 0.0]
     sun.castshadow = False
@@ -122,8 +171,8 @@ def _brighten_like_pool(spec: mujoco.MjSpec) -> None:
     surf = spec.worldbody.add_geom()
     surf.name = "dataset_surface"
     surf.type = mujoco.mjtGeom.mjGEOM_BOX
-    surf.pos = [scn.POOL_CENTER_X, scn.POOL_DEPTH, 0.0]
-    surf.size = [scn.POOL_LEN_X / 2, 0.02, scn.POOL_LEN_Z / 2]
+    surf.pos = [POOL_CENTER_X, scn.POOL_DEPTH, 0.0]
+    surf.size = [POOL_LEN_X / 2, 0.02, POOL_LEN_Z / 2]
     surf.rgba = [0.60, 0.72, 0.80, 1.0]  # bright surface seen from below
     surf.contype = 0
     surf.conaffinity = 0
@@ -142,8 +191,8 @@ def randomize_base_pose(data: mujoco.MjData, rng: np.random.Generator, camera: s
     Frame: +Y up, forward = +X. ``front_cam`` looks +X (down the balloon run); ``down_cam`` is
     nadir. We keep the robot toward the -X / near end and yaw modestly so balloons stay framed.
     """
-    x = float(rng.uniform(-1.2, 1.8))              # along the run, behind/among the near balloons
-    z = float(rng.uniform(-1.6, 1.6))              # lateral, within the pool
+    x = float(rng.uniform(-1.5, 3.0))              # along the (long) run, behind/among the near balloons
+    z = float(rng.uniform(-3.0, 3.0))              # lateral, within the (wider) pool
     if camera == "down_cam":
         y = float(rng.uniform(1.6, 3.0))           # high, looking down at the field
         yaw = float(rng.uniform(-np.pi, np.pi))    # any heading for nadir
@@ -315,7 +364,7 @@ def main() -> int:
     scene_opt = _geom_only_option()  # geoms-only (no sites/decorations) for every render pass
 
     for i in range(args.n):
-        layout = scn.sample_layout(rng, n_random=int(rng.integers(3, 6)))
+        layout = sample_big_layout(rng)
         spec = scn.build_spec(layout)
         prep_render_spec(spec, hide_tethers=args.hide_tethers)
         model = spec.compile()
