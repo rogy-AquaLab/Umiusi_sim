@@ -259,7 +259,11 @@ balloon detector (colour + bearing + range from the onboard camera).
   0.00→0.82, blue→0.63 — and is **Pi-4-safe** (int8 ONNX, ~12–30 fps @320px projected). An
   **underwater colour-restoration** preprocess (`perception.underwater`, `tools.underwater_correct`:
   red-channel compensation + white balance + CLAHE) recovers red-vs-blue — the hardest real-world
-  ambiguity, since deep red attenuates to look blue — for both labelling and detector input. Next: more
+  ambiguity, since deep red attenuates to look blue — for both labelling and detector input. Synthetic
+  data: `tools.gen_sim_dataset` renders the balloon scene, applies a physically-based underwater
+  degradation (`perception.underwater_sim`: depth-based colour attenuation + backscatter haze +
+  turbidity + surface reflection, domain-randomised), and auto-labels balloons from the segmentation
+  buffer — free perfectly-labelled data to pretrain on + a hard, difficulty-dialable eval set. Next: more
   labelled frames, then the final int8 export + a real Pi 4 benchmark.
 - **Autonomy (behavior FSM).** The remaining piece is a behavior FSM (search → approach → ram →
   reacquire) consuming detections to replace `competition_run`'s ground-truth driver, plus multi-frame

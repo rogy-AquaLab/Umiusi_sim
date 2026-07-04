@@ -1,0 +1,289 @@
+"""Generate a labelled SYNTHETIC underwater balloon dataset (free COCO-labelled training data).
+
+Pipeline, per frame:
+  1. Randomize the world: ``sample_layout()`` scatters balloons + we randomize the robot base
+     pose (x/z in the pool, height, yaw) so balloons appear at varied distances/angles/counts.
+  2. Render three co-registered buffers from one camera: RGB, metric DEPTH, and SEGMENTATION
+     (per-geom ids). (MuJoCo Renderer: enable_depth_rendering / enable_segmentation_rendering.)
+  3. Degrade the clean RGB with the physically-based underwater model (``underwater_sim``) using
+     the depth buffer — unless ``--clean`` (reference render, no degradation).
+  4. Extract GROUND-TRUTH boxes from the segmentation: each balloon sphere geom -> pixel mask ->
+     bbox; drop by size / occlusion / off-screen (see ``_boxes_from_seg``). Pixels never move, so
+     the boxes are exact on the degraded image too.
+
+Output: ``<out>/images/frame_XXXX.jpg`` (degraded RGB) + ``<out>/annotations.json`` (COCO, with
+the same 3 categories as the real ai/balloon set: balloon_red=1, balloon_blue=2, balloon_yellow=3)
++ ``<out>/preview/frame_XXXX.jpg`` (first few frames, GT boxes drawn) for a human eyeball check.
+
+Usage (headless):
+    MUJOCO_GL=egl uv run --extra perception python -m tools.gen_sim_dataset \
+        --n 12 --out /tmp/umiusi_sim/simds --seed 0
+"""
+from __future__ import annotations
+
+import argparse
+import json
+from pathlib import Path
+
+import mujoco
+import numpy as np
+
+from umiusi_sim.description.scenarios import competition_balloon as scn
+from umiusi_sim.perception import underwater_sim as us
+
+try:
+    import cv2
+except Exception:  # pragma: no cover
+    cv2 = None
+
+# colour -> COCO category id / name (matches ai/balloon: red=1, blue=2, yellow=3)
+CATEGORIES = [
+    {"id": 1, "name": "balloon_red", "supercategory": "balloon"},
+    {"id": 2, "name": "balloon_blue", "supercategory": "balloon"},
+    {"id": 3, "name": "balloon_yellow", "supercategory": "balloon"},
+]
+COLOUR_TO_CAT = {"red": 1, "blue": 2, "yellow": 3}
+# BGR draw colours for preview boxes (cv2 draws in BGR)
+DRAW_BGR = {"red": (40, 40, 220), "blue": (220, 120, 40), "yellow": (40, 210, 230)}
+
+OCCLUSION_MAX = 0.80  # drop a box if >80% of its expected projected area is missing (occluded/clipped)
+
+
+def randomize_base_pose(data: mujoco.MjData, rng: np.random.Generator, camera: str) -> None:
+    """Randomize the free base pose so the balloon field is seen from varied viewpoints.
+
+    Frame: +Y up, forward = +X. ``front_cam`` looks +X (down the balloon run); ``down_cam`` is
+    nadir. We keep the robot toward the -X / near end and yaw modestly so balloons stay framed.
+    """
+    x = float(rng.uniform(-1.2, 1.8))              # along the run, behind/among the near balloons
+    z = float(rng.uniform(-1.6, 1.6))              # lateral, within the pool
+    if camera == "down_cam":
+        y = float(rng.uniform(1.6, 3.0))           # high, looking down at the field
+        yaw = float(rng.uniform(-np.pi, np.pi))    # any heading for nadir
+    else:
+        y = float(rng.uniform(0.6, 2.4))           # mid-water height
+        yaw = float(rng.uniform(-0.6, 0.6))        # +/-34 deg heading; keep balloons in view
+    data.qpos[0:3] = [x, y, z]
+    # yaw about the +Y (up) axis
+    data.qpos[3:7] = [np.cos(yaw / 2), 0.0, np.sin(yaw / 2), 0.0]
+
+
+def _geom_colour(model: mujoco.MjModel, gid: int) -> str | None:
+    """Return the balloon colour for a segmentation geom id, or None if it's not a balloon sphere."""
+    name = mujoco.mj_id2name(model, mujoco.mjtObj.mjOBJ_GEOM, int(gid))
+    if not name or not name.endswith("_geom") or not name.startswith("balloon_"):
+        return None
+    # name like 'balloon_red_1_geom' / 'balloon_yellow_start_geom' -> colour is the 2nd token
+    colour = name.split("_")[1]
+    return colour if colour in COLOUR_TO_CAT else None
+
+
+def _boxes_from_seg(model, seg, depth, fpx, min_area_px):
+    """Extract GT balloon boxes from the segmentation buffer.
+
+    For each balloon sphere geom present:
+      * mask = pixels whose seg objid == geom id (already the VISIBLE mask — occluders overwrite it)
+      * bbox = [x, y, w, h] from the mask extent, clipped to the frame
+      * expected full projected area from the sphere: pi * (fpx * R / d)^2, d = median mask depth
+      * occlusion/clip fraction = 1 - visible_px / full_area
+    Drop rules -> a box is kept only if: colour is a balloon, visible bbox area >= min_area_px,
+    and occlusion fraction <= OCCLUSION_MAX (this also catches boxes mostly off-screen, since a
+    clipped balloon has visible_px << full_area).
+
+    Returns (boxes, drops) where boxes = list of dicts and drops = counts by reason.
+    """
+    h, w = seg.shape[:2]
+    objid = seg[..., 0]
+    boxes = []
+    drops = {"size": 0, "occluded": 0, "offscreen": 0}
+    for gid in np.unique(objid):
+        if gid < 0:
+            continue
+        colour = _geom_colour(model, gid)
+        if colour is None:
+            continue
+        mask = objid == gid
+        n_vis = int(mask.sum())
+        if n_vis == 0:
+            continue
+        ys, xs = np.where(mask)
+        x0, x1 = int(xs.min()), int(xs.max())
+        y0, y1 = int(ys.min()), int(ys.max())
+        bw, bh = (x1 - x0 + 1), (y1 - y0 + 1)
+        # expected full projected area of the sphere at its distance (occlusion/clip test)
+        d = float(np.median(depth[mask]))
+        r_px = fpx * scn.BALLOON_RADIUS / max(d, 1e-3)
+        full_area = np.pi * r_px * r_px
+        occ = 1.0 - n_vis / max(full_area, 1.0)
+        # off-screen: the balloon touches a frame border AND most of it is missing
+        touches_border = x0 == 0 or y0 == 0 or x1 == w - 1 or y1 == h - 1
+        if bw * bh < min_area_px:
+            drops["size"] += 1
+            continue
+        if occ > OCCLUSION_MAX:
+            drops["offscreen" if touches_border else "occluded"] += 1
+            continue
+        boxes.append({
+            "colour": colour,
+            "category_id": COLOUR_TO_CAT[colour],
+            "bbox": [x0, y0, bw, bh],
+            "area": n_vis,          # visible pixel (segmentation) area
+            "occlusion": round(occ, 3),
+            "distance_m": round(d, 3),
+        })
+    return boxes, drops
+
+
+def render_buffers(renderer, model, data, camera):
+    """Render RGB, metric depth, and per-geom segmentation from one camera (shared scene)."""
+    renderer.update_scene(data, camera=camera)
+    rgb = renderer.render().copy()
+    renderer.enable_depth_rendering()
+    renderer.update_scene(data, camera=camera)
+    depth = renderer.render().copy()
+    renderer.disable_depth_rendering()
+    renderer.enable_segmentation_rendering()
+    renderer.update_scene(data, camera=camera)
+    seg = renderer.render().copy()
+    renderer.disable_segmentation_rendering()
+    return rgb, depth, seg
+
+
+def draw_preview(rgb, boxes):
+    """Draw GT boxes + colour labels onto a copy of the (degraded) RGB for eyeballing."""
+    img = np.ascontiguousarray(rgb[..., ::-1])  # RGB -> BGR for cv2
+    for b in boxes:
+        x, y, bw, bh = b["bbox"]
+        c = DRAW_BGR[b["colour"]]
+        cv2.rectangle(img, (x, y), (x + bw, y + bh), c, 2)
+        label = f"{b['colour']} {b['distance_m']:.1f}m"
+        cv2.putText(img, label, (x, max(12, y - 4)), cv2.FONT_HERSHEY_SIMPLEX, 0.4, c, 1, cv2.LINE_AA)
+    return img[..., ::-1]  # back to RGB
+
+
+def main() -> int:
+    ap = argparse.ArgumentParser(description=__doc__)
+    ap.add_argument("--n", type=int, default=12, help="number of frames")
+    ap.add_argument("--out", type=Path, required=True, help="output dataset dir")
+    ap.add_argument("--camera", default="front_cam", choices=["front_cam", "down_cam"])
+    ap.add_argument("--width", type=int, default=640)
+    ap.add_argument("--height", type=int, default=480)
+    ap.add_argument("--seed", type=int, default=0)
+    ap.add_argument("--min-area-px", type=int, default=64, help="drop boxes smaller than this (w*h)")
+    ap.add_argument("--clean", action="store_true", help="skip degradation (reference render)")
+    ap.add_argument("--preview-n", type=int, default=8, help="how many frames to also save as previews")
+    args = ap.parse_args()
+
+    if cv2 is None:
+        print("WARNING: cv2 not available; previews will be skipped (install the 'perception' extra).")
+
+    # Two independent streams so scene geometry is reproducible regardless of degradation: the
+    # scene stream drives layout+pose (=> --clean and degraded produce IDENTICAL scenes/boxes),
+    # the water stream drives the degradation params/noise only.
+    ss = np.random.SeedSequence(args.seed)
+    scene_rng = np.random.default_rng(ss.spawn(1)[0])
+    water_rng = np.random.default_rng(ss.spawn(1)[0])
+    rng = scene_rng
+    img_dir = args.out / "images"
+    prev_dir = args.out / "preview"
+    img_dir.mkdir(parents=True, exist_ok=True)
+    prev_dir.mkdir(parents=True, exist_ok=True)
+
+    coco = {"images": [], "annotations": [], "categories": CATEGORIES}
+    ann_id = 1
+    total_boxes = {"red": 0, "blue": 0, "yellow": 0}
+    total_drops = {"size": 0, "occluded": 0, "offscreen": 0}
+    depth_lo, depth_hi = np.inf, -np.inf
+    seen_balloon_ids = set()
+
+    for i in range(args.n):
+        layout = scn.sample_layout(rng, n_random=int(rng.integers(3, 6)))
+        model = scn.build_model(layout)
+        data = mujoco.MjData(model)
+        randomize_base_pose(data, rng, args.camera)
+        mujoco.mj_forward(model, data)
+
+        renderer = mujoco.Renderer(model, height=args.height, width=args.width)
+        try:
+            rgb, depth, seg = render_buffers(renderer, model, data, args.camera)
+        finally:
+            renderer.close()
+
+        # focal length in pixels from the vertical FOV (for the occlusion/projection test)
+        cam_id = model.camera(args.camera).id
+        fovy = np.radians(model.cam_fovy[cam_id])
+        fpx = (args.height / 2.0) / np.tan(fovy / 2.0)
+
+        # depth stats over the finite scene (background far-plane excluded)
+        finite = depth[depth < 50.0]
+        if finite.size:
+            depth_lo = min(depth_lo, float(finite.min()))
+            depth_hi = max(depth_hi, float(finite.max()))
+        for gid in np.unique(seg[..., 0]):
+            if gid >= 0 and _geom_colour(model, gid):
+                seen_balloon_ids.add(int(gid))
+
+        boxes, drops = _boxes_from_seg(model, seg, depth, fpx, args.min_area_px)
+        for k in total_drops:
+            total_drops[k] += drops[k]
+
+        # degrade (or keep clean)
+        if args.clean:
+            out_rgb = rgb
+        else:
+            params = us.random_params(water_rng)
+            out_rgb = us.degrade(rgb, depth, params, water_rng)
+
+        fname = f"frame_{i:04d}.jpg"
+        _imwrite(img_dir / fname, out_rgb)
+
+        coco["images"].append({
+            "id": i + 1, "file_name": fname, "width": args.width, "height": args.height,
+        })
+        for b in boxes:
+            total_boxes[b["colour"]] += 1
+            coco["annotations"].append({
+                "id": ann_id, "image_id": i + 1, "category_id": b["category_id"],
+                "bbox": [float(v) for v in b["bbox"]], "area": float(b["area"]),
+                "iscrowd": 0, "occlusion": b["occlusion"], "distance_m": b["distance_m"],
+            })
+            ann_id += 1
+
+        if cv2 is not None and i < args.preview_n:
+            prev = draw_preview(out_rgb, boxes)
+            _imwrite(prev_dir / fname, prev)
+
+        print(f"frame {i:04d}: balloons_kept={len(boxes):2d} "
+              f"drops(size={drops['size']},occ={drops['occluded']},off={drops['offscreen']}) "
+              f"pose={np.round(data.qpos[0:3], 2)}")
+
+    with open(args.out / "annotations.json", "w") as f:
+        json.dump(coco, f, indent=1)
+
+    print("\n=== dataset summary ===")
+    print(f"frames: {args.n}  camera: {args.camera}  {args.width}x{args.height}  "
+          f"mode: {'CLEAN' if args.clean else 'DEGRADED'}")
+    print(f"boxes by colour: red={total_boxes['red']} blue={total_boxes['blue']} "
+          f"yellow={total_boxes['yellow']}  total={sum(total_boxes.values())}")
+    print(f"boxes DROPPED: size(<{args.min_area_px}px)={total_drops['size']} "
+          f"occluded={total_drops['occluded']} offscreen={total_drops['offscreen']}  "
+          f"total={sum(total_drops.values())}")
+    if np.isfinite(depth_lo):
+        print(f"depth buffer (scene, m): min={depth_lo:.3f} max={depth_hi:.3f}  "
+              f"[far-plane background >50 m excluded]")
+    print(f"unique balloon seg geom ids seen: {sorted(seen_balloon_ids)}")
+    print(f"wrote: {img_dir}/  {args.out/'annotations.json'}  previews: {prev_dir}/")
+    return 0
+
+
+def _imwrite(path: Path, rgb: np.ndarray) -> None:
+    """Write an (H,W,3) uint8 RGB array as JPEG (cv2 if present, else imageio)."""
+    if cv2 is not None:
+        cv2.imwrite(str(path), rgb[..., ::-1])  # RGB -> BGR
+    else:  # pragma: no cover
+        import imageio
+        imageio.imwrite(path, rgb)
+
+
+if __name__ == "__main__":
+    raise SystemExit(main())
