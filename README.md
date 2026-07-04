@@ -28,7 +28,7 @@ repository; this README plus code comments are the in-repo reference.
 | 3 | `umiusi_rl/` — Gymnasium env + PPO training + eval | ✅ done — attitude hold + direction cruise + disturbance/sim2real robustness |
 | 5a | Competition sim: balloon world + cameras + analytical FF driver, runnable & scoring (no RL) | ✅ done |
 | 5b | Perception (camera → balloon detect) + behavior FSM (autonomy), Pi 4 deploy | 🟡 next |
-| 4 | `ros2_ws/` — ROS 2 bridge: a custom MuJoCo `ros2_control` hardware plugin (integration phase) | ⬜ planned |
+| 4 | `ros2_ws/` — ROS 2 bridge: custom MuJoCo `ros2_control` hardware plugin; the real controllers + an RL policy drive the sim | ✅ done (in the sibling `ros2_ws/`) |
 
 ---
 
@@ -239,12 +239,13 @@ default world, an interactive drive tool (steer a trained policy from the keyboa
 balloon detector (colour + bearing + range from the onboard camera).
 
 **Not supported yet:**
-- **ROS 2 integration.** The sim is standalone Python — there is no ROS bridge yet (ROS 2 isn't even
-  installed here). Driving the sim from the real `sinsei_umiusi_control` controllers is planned as a
-  custom MuJoCo `ros2_control` hardware plugin (mirroring the CAN plugin; `hardware:={can|mock|mujoco}`),
-  so the same controllers/launch run in sim and on the robot. The community `mujoco_ros2_control` was
-  evaluated and ruled out (it exposes only joint/sensor interfaces, not our ESC/servo GPIO + site-force
-  actuation + analytical hydrodynamics).
+- **ROS 2 integration — done** (in the sibling `ros2_ws/`, not this repo). A custom MuJoCo
+  `ros2_control` hardware plugin (`umiusi_sim_bridge`) runs the analytical hydro at 100 Hz, so the REAL
+  `sinsei_umiusi_control` controllers drive the sim unchanged (swap the plugin for CAN to deploy). A
+  trained RL policy can also drive it as the low-level controller over the thruster direct-override
+  path (`tools/ros_policy.py`), and `tools/ros_view.py` renders it live (both over rosbridge). The
+  community `mujoco_ros2_control` was ruled out (joint/sensor interfaces only, not our ESC/servo GPIO
+  + site-force actuation + analytical hydro). Remaining: aarch64 MuJoCo for the Pi; FF-frame sign reconcile.
 - **3-D depth-holding locomotion.** The trained low-level cruise is orientation + *horizontal* direction
   only. The final drivetrain wants orientation + depth-hold + horizontal cruise, but the depth-sensor
   choice isn't fixed yet, so that training is on hold. (The env already supports a 3-D velocity command
@@ -260,8 +261,9 @@ balloon detector (colour + bearing + range from the onboard camera).
   and `tools/ros_view.py` (`uv sync --extra viz`) renders it over **rosbridge** via `roslibpy` (no rclpy).
 - **Sim-to-real + Pi 4 deploy.** Domain-randomization hooks exist; on-hardware tuning is future.
 
-**Planned order:** perception + behavior FSM (phase 5b) → ROS 2 hardware-plugin bridge (phase 4) →
-depth-sensor decision + 3-D depth-hold locomotion → sim-to-real / Pi 4 (phase 6). See the Status table above.
+**Planned order:** perception + behavior FSM (phase 5b; a learned detector for the real-image recall wall) →
+depth-sensor decision + 3-D depth-hold locomotion → sim-to-real / Pi 4 deploy (aarch64 MuJoCo). ROS 2 bridge
+(phase 4) is done. See the Status table above.
 
 ---
 
