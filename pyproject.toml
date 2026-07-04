@@ -25,6 +25,9 @@ dependencies = [
 [project.optional-dependencies]
 # Tooling for videos/snapshots (imageio), training curves (tensorboard), mesh decimation, lint.
 dev = ["imageio[ffmpeg]>=2.31", "tensorboard>=2.15", "fast-simplification", "ruff>=0.5"]
+# Perception (phase 5b): classical-CV balloon detector. scipy.ndimage.label gives lightweight
+# connected-component labelling (preferred over pulling in opencv); RGB->HSV is done in numpy.
+perception = ["scipy>=1.10"]
 
 [build-system]
 requires = ["setuptools>=61"]
