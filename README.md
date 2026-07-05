@@ -10,6 +10,8 @@ attitude + direction cruise, and — toward the target competition — hosts a *
 end-to-end (drive the world, pop balloons, score) with onboard cameras — either with a ground-truth
 analytical feed-forward driver, or fully perception-driven (a learned onboard detector feeding a
 rule-based behaviour FSM).
+The sim ⇄ real runtime split (single Python physics source, ROS relays to it, perception+navigator
+reused on the robot) is in [`docs/architecture.md`](docs/architecture.md).
 
 - **Training** depends only on Python (MuJoCo + Gymnasium + Stable-Baselines3 + PyTorch) — **no ROS 2 required**.
 - A **ROS 2 bridge** (under `ros2_ws/`, **done**) lets the real `sinsei_umiusi_control` controllers — or a
