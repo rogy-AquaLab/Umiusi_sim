@@ -151,10 +151,11 @@ def main():
         sim.step(_driver_action(state, pin_tip, target))
 
         pin_tip = sim.data.site_xpos[pin_sid]
+        pin_axis = sim.data.xmat[sim.base_id].reshape(3, 3) @ np.array([1.0, 0.0, 0.0])  # +X forward
         for b in balloons:
             if b["name"] in popped_set:
                 continue
-            if scn.popped(pin_tip, b["pos"]):
+            if scn.popped(pin_tip, b["pos"], pin_axis):
                 popped_set.add(b["name"])
                 score += b["points"]
                 t = step * control_dt

@@ -25,6 +25,7 @@ scenery and "popping" is detected geometrically (pin-tip vs. balloon-centre dist
 
 from __future__ import annotations
 
+import math
 from pathlib import Path
 
 import mujoco
@@ -74,8 +75,12 @@ PIN_TIP = (0.40, 0.10, 0.0)
 PIN_RADIUS = 0.006
 PIN_MASS = 0.02
 
-# Pop detection: a balloon is "popped" when the pin tip comes within this of its centre.
+# Pop detection: a balloon is "popped" when the pin tip comes within this of its centre AND the
+# hit is near-FRONTAL. Real balloons only pop to a straight jab of the needle, not a glancing/
+# sideways brush, so ``popped`` additionally requires the pin axis (robot +X forward) to point at
+# the balloon within POP_ANGLE_TOL_DEG. This makes the RAM actually aim straight at the target.
 POP_MARGIN = 0.03  # m; effective radius = BALLOON_RADIUS + POP_MARGIN
+POP_ANGLE_TOL_DEG = 25.0  # max angle between the pin axis and the pin-tip->balloon direction
 
 
 def _add_geom(body, **kw):
@@ -192,11 +197,40 @@ def balloon_table(layout=BALLOON_LAYOUT):
     return table
 
 
-def popped(pin_tip_world, balloon_pos, margin=POP_MARGIN):
-    """True if the pin tip is within (radius + margin) of a balloon centre (geometric pop)."""
-    return float(np.linalg.norm(np.asarray(pin_tip_world) - np.asarray(balloon_pos))) < (
-        BALLOON_RADIUS + margin
-    )
+def popped(pin_tip_world, balloon_pos, pin_axis=None, margin=POP_MARGIN,
+           angle_tol_deg=POP_ANGLE_TOL_DEG):
+    """True if the pin pops the balloon: the tip is within (radius + margin) of the centre AND,
+    when a ``pin_axis`` (robot +X forward, world frame) is given, the hit is near-FRONTAL — the pin
+    axis points at the balloon within ``angle_tol_deg`` of the pin-tip->centre direction.
+
+    ``pin_axis=None`` keeps the legacy proximity-only test (any caller that does not model aiming).
+    Both ``tools/competition_run`` and ``tools/autonomy_run`` pass the axis, so a glancing/sideways
+    contact no longer scores — the vehicle must approach the balloon head-on.
+    """
+    delta = np.asarray(balloon_pos, dtype=float) - np.asarray(pin_tip_world, dtype=float)
+    dist = float(np.linalg.norm(delta))
+    if dist >= BALLOON_RADIUS + margin:
+        return False
+    if pin_axis is None:
+        return True
+    a = np.asarray(pin_axis, dtype=float)
+    na = float(np.linalg.norm(a))
+    if na < 1e-9 or dist < 1e-6:  # degenerate axis or tip essentially at the centre -> count it
+        return True
+    cos_ang = float(np.dot(a / na, delta / dist))
+    return cos_ang >= math.cos(math.radians(angle_tol_deg))
+
+
+def hide_balloon(model, name):
+    """Make a popped balloon visually VANISH: set its geom alpha to 0 on the COMPILED ``model``.
+
+    Only the render changes — the geom stays in the model and collisions were already off
+    (``contype = conaffinity = 0``), so physics, ``scn.popped`` scoring and every other balloon are
+    unaffected. Used by ``tools/autonomy_run`` so that when a balloon pops it disappears from the
+    onboard camera (deflated), letting the vision FSM confirm the pop from the camera alone.
+    """
+    gid = model.geom(f"{name}_geom").id
+    model.geom_rgba[gid, 3] = 0.0
 
 
 def sample_layout(rng, n_random=4):
