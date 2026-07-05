@@ -141,6 +141,7 @@ def main():
                               control_rate_hz=sim.cfg["sim"]["control_rate_hz"]).launch()
 
     popped_set, score, timeline = set(), 0, []
+    prev_pin = None  # last step's pin-tip world pos, for finite-difference pin-tip velocity
     for step in range(n_steps):
         state = sim.get_state()
         pin_tip = sim.data.site_xpos[pin_sid].copy()
@@ -152,10 +153,13 @@ def main():
 
         pin_tip = sim.data.site_xpos[pin_sid]
         pin_axis = sim.data.xmat[sim.base_id].reshape(3, 3) @ np.array([1.0, 0.0, 0.0])  # +X forward
+        # pin-tip velocity by finite difference across the step (drive-through closing speed gate)
+        pin_vel = (pin_tip - prev_pin) / control_dt if prev_pin is not None else np.zeros(3)
+        prev_pin = pin_tip.copy()
         for b in balloons:
             if b["name"] in popped_set:
                 continue
-            if scn.popped(pin_tip, b["pos"], pin_axis):
+            if scn.popped(pin_tip, b["pos"], pin_axis, pin_vel):
                 popped_set.add(b["name"])
                 score += b["points"]
                 t = step * control_dt

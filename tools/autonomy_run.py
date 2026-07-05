@@ -221,6 +221,7 @@ def main():
     step_ctr = [0]          # mutable step counter (shared by the loop and the viewer step_fn)
     last_state = [None]     # for printing FSM state transitions in the live viewer
     held = {"rgb": None, "dets": []}  # last onboard frame + detections (held between perception ticks)
+    prev_pin = {"xyz": None}  # last step's pin-tip world pos, for finite-difference pin-tip velocity
 
     def autonomy_step():
         """ONE control step: (every perc_stride) render degraded onboard cam -> detect; (every step)
@@ -259,10 +260,17 @@ def main():
         # the camera alone (it never reads popped_set / scn.popped to decide what to do next).
         pin_tip = sim.data.site_xpos[pin_sid]
         pin_axis = sim.data.xmat[sim.base_id].reshape(3, 3) @ np.array([1.0, 0.0, 0.0])
+        # Pin-tip world velocity by finite difference across this control step (captures the full
+        # motion — hull surge + yaw/roll lever arm) so the speed gate sees the true drive-through
+        # closing rate. First step (no previous position) -> zero velocity (never at a balloon yet).
+        pin_vel = (pin_tip - prev_pin["xyz"]) / control_dt if prev_pin["xyz"] is not None \
+            else np.zeros(3)
+        prev_pin["xyz"] = pin_tip.copy()
         for b in balloons:
             if b["name"] in popped_set:
                 continue
-            if scn.popped(pin_tip, b["pos"], pin_axis):  # near-frontal pop (shared head-on model)
+            # near-frontal + driving-in pop (shared head-on + speed model)
+            if scn.popped(pin_tip, b["pos"], pin_axis, pin_vel):
                 popped_set.add(b["name"])
                 score += b["points"]
                 scn.hide_balloon(sim.model, b["name"])  # deflate: vanish from the onboard camera

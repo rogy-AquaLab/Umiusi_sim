@@ -76,11 +76,28 @@ PIN_RADIUS = 0.006
 PIN_MASS = 0.02
 
 # Pop detection: a balloon is "popped" when the pin tip comes within this of its centre AND the
-# hit is near-FRONTAL. Real balloons only pop to a straight jab of the needle, not a glancing/
-# sideways brush, so ``popped`` additionally requires the pin axis (robot +X forward) to point at
-# the balloon within POP_ANGLE_TOL_DEG. This makes the RAM actually aim straight at the target.
+# hit is near-FRONTAL AND the tip is actually driving INTO the balloon fast enough. Real balloons
+# only pop to a straight, committed jab of the needle — not a glancing/sideways brush, and not a
+# slow drift-by that merely nudges the skin. So ``popped`` requires three things together:
+#   1. proximity: tip within (BALLOON_RADIUS + POP_MARGIN) of the centre;
+#   2. head-on:   the pin axis (robot +X forward) points at the balloon within POP_ANGLE_TOL_DEG of
+#                 the pin-tip->centre direction (rejects glancing contacts, forces a straight aim);
+#   3. speed:     the pin-tip's closing speed toward the balloon (velocity projected onto the
+#                 pin-tip->centre direction) is at least MIN_POP_SPEED (the needle must be moving
+#                 into the skin, not resting against / drifting past it).
+# POP_ANGLE_TOL_DEG was tightened 25 -> 20 deg. 20 deg is the calibrated sweet spot: measuring the
+# pin-tip vs. balloon geometry during real drive-through lunges, a well-aimed head-on ram enters the
+# pop sphere (dist ~0.10-0.12 m) at an axis error of ~19-24 deg — NOT ~0 deg — because the pin sits
+# forward AND laterally offset from the camera/COM, so the +X axis is a few deg off the tip->centre
+# line even on a dead-centred camera approach. 15 deg rejected those good rams (they only re-qualified
+# on a later, messier pass, or not at all -> reds stopped popping and the run degenerated); 25 deg was
+# the old value that also let wide glancing brushes score. 20 deg keeps the clean fast ram while
+# still rejecting the 20-25 deg "somewhat off" band and all the >30 deg sideways brushes. MIN_POP_SPEED
+# = 0.18 m/s sits well below the drive-through lunge closing speed (measured ~0.5 m/s at contact) but
+# above the slow drift a mis-timed pass produces, so the lunge clears the gate and a drift-by does not.
 POP_MARGIN = 0.03  # m; effective radius = BALLOON_RADIUS + POP_MARGIN
-POP_ANGLE_TOL_DEG = 25.0  # max angle between the pin axis and the pin-tip->balloon direction
+POP_ANGLE_TOL_DEG = 20.0  # max angle between the pin axis and the pin-tip->balloon direction
+MIN_POP_SPEED = 0.18      # m/s; min pin-tip closing speed toward the balloon for a pop to register
 
 
 def _add_geom(body, **kw):
@@ -197,20 +214,33 @@ def balloon_table(layout=BALLOON_LAYOUT):
     return table
 
 
-def popped(pin_tip_world, balloon_pos, pin_axis=None, margin=POP_MARGIN,
-           angle_tol_deg=POP_ANGLE_TOL_DEG):
+def popped(pin_tip_world, balloon_pos, pin_axis=None, pin_vel=None, margin=POP_MARGIN,
+           angle_tol_deg=POP_ANGLE_TOL_DEG, min_speed=MIN_POP_SPEED):
     """True if the pin pops the balloon: the tip is within (radius + margin) of the centre AND,
     when a ``pin_axis`` (robot +X forward, world frame) is given, the hit is near-FRONTAL — the pin
-    axis points at the balloon within ``angle_tol_deg`` of the pin-tip->centre direction.
+    axis points at the balloon within ``angle_tol_deg`` of the pin-tip->centre direction — AND, when
+    a ``pin_vel`` (pin-tip world linear velocity [m/s]) is given, the tip is actually driving INTO
+    the balloon: its closing speed (velocity projected onto the pin-tip->centre direction) is at
+    least ``min_speed``.
 
-    ``pin_axis=None`` keeps the legacy proximity-only test (any caller that does not model aiming).
-    Both ``tools/competition_run`` and ``tools/autonomy_run`` pass the axis, so a glancing/sideways
-    contact no longer scores — the vehicle must approach the balloon head-on.
+    ``pin_axis=None`` / ``pin_vel=None`` each independently drop the corresponding gate, so the
+    legacy proximity-only call (e.g. ``tools/scenario_demo``) still works. Both
+    ``tools/competition_run`` and ``tools/autonomy_run`` pass the axis AND the velocity, so a
+    glancing/sideways contact or a slow drift-by no longer scores — the vehicle must approach the
+    balloon head-on and be driving into it.
     """
     delta = np.asarray(balloon_pos, dtype=float) - np.asarray(pin_tip_world, dtype=float)
     dist = float(np.linalg.norm(delta))
     if dist >= BALLOON_RADIUS + margin:
         return False
+    # Speed gate: require a minimum closing speed toward the balloon centre (the needle must be
+    # jabbing INTO the skin, not resting against it or drifting past). When the tip is essentially
+    # AT the centre the direction is ill-defined -> fall back to the raw speed magnitude.
+    if pin_vel is not None:
+        v = np.asarray(pin_vel, dtype=float)
+        closing = float(np.dot(v, delta / dist)) if dist > 1e-6 else float(np.linalg.norm(v))
+        if closing < min_speed:
+            return False
     if pin_axis is None:
         return True
     a = np.asarray(pin_axis, dtype=float)

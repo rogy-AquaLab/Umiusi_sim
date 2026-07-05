@@ -106,6 +106,24 @@ RAM_SURGE = 0.26          # committed-approach surge: LESS than SPEED_CAP so hea
 #                           el->0 (get the pin to the balloon's HEIGHT) BEFORE the pin reaches the
 #                           balloon plane — a full-surge lunge overshoots in x and the pin passes
 #                           UNDER a tall balloon (a vertical/glancing miss, not a head-on pop).
+# --- aim slightly from ABOVE (the tall-1.5 m-yellow fix) --------------------------------------
+# Bias the aim a touch ABOVE the balloon centre so the vehicle sits slightly high and DESCENDS onto
+# the front/upper face — the pin then meets a TALL (1.5 m) yellow instead of passing under it (the
+# pin sits at hull mid-height y~0.1 m; a level approach to a 1.5 m balloon tends to arrive low as
+# depth still settles). The heave loop targets el = -AIM_EL_BIAS (balloon a hair below the optic axis
+# at contact => pin above centre), and the centred/commit elevation tests use the SAME biased error
+# so the FSM commits when it is centred on the AIM point, not the raw centre.
+#
+# The bias is applied ONLY to yellows (``_aim_bias``): they are the tall balloons that need to be met
+# from above. The reds sit low (0.5 m) and are already approached from the start height coming DOWN,
+# so a level, dead-centre aim keeps the pin-axis error small at contact — adding an above-bias there
+# would only shift the tip a couple cm high at close range, which the near-frontal cone reads as extra
+# angle and can push a good ram past POP_ANGLE_TOL_DEG. So: yellows get the above-bias, reds/others
+# aim at the centre. 4 deg is small (~2 cm vertical at the ~0.3 m contact range — well inside the
+# 0.13 m pop sphere), enough to catch the upper face of a tall yellow.
+RAM_AIM_ABOVE_DEG = 4.0
+AIM_EL_BIAS = math.radians(RAM_AIM_ABOVE_DEG)
+AIM_ABOVE_COLOURS = ("yellow",)  # colours the above-bias applies to (the tall balloons)
 # --- recover / confirm / give-up --------------------------------------------------------------
 RECOVER_SURGE = 0.28      # reverse speed while backing off a missed ram
 RECOVER_STEPS = 30        # steps (~0.6 s) to back off before re-aligning
@@ -410,7 +428,7 @@ class BalloonBehavior:
                 if self.state == "RAM" and self._ram_steps < LUNGE_STEPS:
                     self._ram_steps += 1  # DRIVE THROUGH the sight-loss to make physical contact
                     yaw = _clip(KP_YAW * self.trk.az + KD_YAW * yaw_rate, -1, 1)
-                    heave = _clip(KP_HEAVE * self.trk.el, -SPEED_CAP, SPEED_CAP)
+                    heave = _heave_cmd(self.trk.el, self.trk.colour)
                     return {"surge": RAM_SURGE, "heave": heave, "yaw": yaw}, self._info(blue)
                 self._enter_confirm()
                 return self._confirm(yaw_rate, avoid_yaw, blue)
@@ -424,8 +442,11 @@ class BalloonBehavior:
             return self._search(yaw_rate, dt, avoid_yaw, blue)
 
         az, el, bbox = self.trk.az, self.trk.el, self.trk.bbox_frac
-        centred = abs(az) < CENTRE_AZ and abs(el) < CENTRE_EL     # head-on enough for a clean pop
-        commit_ok = abs(az) < CENTRE_AZ and abs(el) < COMMIT_EL   # good enough to commit the ram
+        # Elevation is measured against the AIM point (biased AIM_EL_BIAS above centre), so the FSM
+        # commits/centres when pointed at the aim, not the raw centre — descend onto the upper face.
+        el_err = el + _aim_bias(self.trk.colour)
+        centred = abs(az) < CENTRE_AZ and abs(el_err) < CENTRE_EL   # head-on enough for a clean pop
+        commit_ok = abs(az) < CENTRE_AZ and abs(el_err) < COMMIT_EL  # good enough to commit the ram
 
         # RAM in progress: drive straight in. A real pop makes the balloon vanish -> the track is
         # lost -> handled above as CONFIRM. Here we only catch the case where it stayed visible:
@@ -444,7 +465,7 @@ class BalloonBehavior:
             # Tight tracking through the ram (full gains) so it stays head-on to contact; surge is
             # eased off if depth drifts (el grows) so the pin stays level to the balloon's front face.
             yaw = _clip(KP_YAW * az + KD_YAW * yaw_rate, -1, 1)
-            heave = _clip(KP_HEAVE * el, -SPEED_CAP, SPEED_CAP)
+            heave = _heave_cmd(el, self.trk.colour)
             return {"surge": RAM_SURGE * _el_surge_scale(el), "heave": heave, "yaw": yaw}, self._info(blue)
 
         # Close enough (bbox) AND pointed head-on: SETTLE briefly (near-stationary, drive az/el to
@@ -456,14 +477,14 @@ class BalloonBehavior:
             if self._settle_steps < SETTLE_STEPS:
                 self.state = "ALIGN"
                 yaw = _clip(KP_YAW * az + KD_YAW * yaw_rate, -1, 1)
-                heave = _clip(KP_HEAVE * el, -SPEED_CAP, SPEED_CAP)
+                heave = _heave_cmd(el, self.trk.colour)
                 return {"surge": 0.5 * ALIGN_CREEP, "heave": heave, "yaw": yaw}, self._info(blue)
             self.state = "RAM"
             self._align_steps = 0
             self._ram_steps = 0
             self.n_ram += 1
             yaw = _clip(KP_YAW * az + KD_YAW * yaw_rate, -1, 1)
-            heave = _clip(KP_HEAVE * el, -SPEED_CAP, SPEED_CAP)
+            heave = _heave_cmd(el, self.trk.colour)
             return {"surge": RAM_SURGE, "heave": heave, "yaw": yaw}, self._info(blue)
         self._settle_steps = 0  # lost closeness/centring -> restart the settle next time
 
@@ -483,7 +504,7 @@ class BalloonBehavior:
                 self._enter_recover()
                 return self._recover(yaw_rate, avoid_yaw, blue)
             yaw = _clip(KP_YAW * az + KD_YAW * yaw_rate + avoid_yaw, -1, 1)
-            heave = _clip(KP_HEAVE * el, -SPEED_CAP, SPEED_CAP)
+            heave = _heave_cmd(el, self.trk.colour)
             # Creep in, but scaled down by depth error — level onto the balloon's height first, then
             # close. Hold entirely if badly off-bearing (turn first) or avoiding a blue.
             surge = 0.0 if (abs(az) > FACE_TOL or blue is not None) else ALIGN_CREEP * _el_surge_scale(el)
@@ -496,7 +517,7 @@ class BalloonBehavior:
         self.state = "APPROACH"
         self._align_steps = 0
         yaw = _clip(KP_YAW * az + KD_YAW * yaw_rate + avoid_yaw, -1, 1)
-        heave = _clip(KP_HEAVE * el, -SPEED_CAP, SPEED_CAP)
+        heave = _heave_cmd(el, self.trk.colour)
         surge = SPEED_CAP * max(0.0, math.cos(az)) * _el_surge_scale(el)
         if abs(az) > FACE_TOL:
             surge *= 0.3
@@ -537,7 +558,7 @@ class BalloonBehavior:
         # Firmly reverse (holding the last bearing + elevation) so a merely-passed balloon that left
         # the frame comes back into view (-> re-associates -> MISS).
         yaw = _clip(0.6 * KP_YAW * self.trk.az + KD_YAW * yaw_rate, -1, 1)
-        heave = _clip(KP_HEAVE * self.trk.el, -SPEED_CAP, SPEED_CAP)
+        heave = _heave_cmd(self.trk.el, self.trk.colour)
         return {"surge": -CONFIRM_SURGE, "heave": heave, "yaw": yaw}, self._info(blue)
 
     # -- recover (back off + re-align, or search if the target is gone) ------------------------
@@ -545,7 +566,7 @@ class BalloonBehavior:
         self._recover_steps -= 1
         if self.trk.alive():
             yaw = _clip(0.8 * KP_YAW * self.trk.az + KD_YAW * yaw_rate + avoid_yaw, -1, 1)
-            heave = _clip(KP_HEAVE * self.trk.el, -SPEED_CAP, SPEED_CAP)
+            heave = _heave_cmd(self.trk.el, self.trk.colour)
         else:
             yaw, heave = self._sweep_dir * SEARCH_YAW, 0.0
         if self._recover_steps <= 0:
@@ -578,6 +599,19 @@ class BalloonBehavior:
 
 def _clip(x, lo, hi):
     return lo if x < lo else hi if x > hi else x
+
+
+def _aim_bias(colour):
+    """Elevation aim bias for the target colour: AIM_EL_BIAS above centre for the tall balloons
+    (yellows), 0 for the low reds/others (aim dead centre — keeps the pin-axis error small)."""
+    return AIM_EL_BIAS if colour in AIM_ABOVE_COLOURS else 0.0
+
+
+def _heave_cmd(el, colour):
+    """Heave command driving the target toward the AIM point — biased ``_aim_bias(colour)`` ABOVE the
+    balloon centre. Equilibrium at el = -bias: for a tall yellow the vehicle holds a touch high and
+    descends onto its upper face (the tall-yellow fix); for a low red it aims level on the centre."""
+    return _clip(KP_HEAVE * (el + _aim_bias(colour)), -SPEED_CAP, SPEED_CAP)
 
 
 def _el_surge_scale(el):
