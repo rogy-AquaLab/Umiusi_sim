@@ -3,10 +3,13 @@
 MuJoCo simulation + reinforcement learning for the **UMIUSI** azimuth-thruster underwater robot.
 
 It simulates each thruster's **servo drive** (azimuth angle) and **thruster output** (ESC command → thrust) with an
-explicit **analytical hydrodynamic model** (buoyancy, drag, added mass; see [`docs/physics.md`](docs/physics.md)).
+explicit **analytical hydrodynamic model** (buoyancy, drag, lift, added mass, and a CoP-offset
+translation moment; see [`docs/physics.md`](docs/physics.md)).
 It trains policies for attitude hold and
 attitude + direction cruise, and — toward the target competition — hosts a **balloon-popping scenario** that runs
-end-to-end (drive the world, pop balloons, score) with onboard cameras and an analytical feed-forward controller.
+end-to-end (drive the world, pop balloons, score) with onboard cameras — either with a ground-truth
+analytical feed-forward driver, or fully perception-driven (a learned onboard detector feeding a
+rule-based behaviour FSM).
 
 - **Training** depends only on Python (MuJoCo + Gymnasium + Stable-Baselines3 + PyTorch) — **no ROS 2 required**.
 - A **ROS 2 bridge** (under `ros2_ws/`, **done**) lets the real `sinsei_umiusi_control` controllers — or a
@@ -29,7 +32,7 @@ repository; this README plus code comments are the in-repo reference.
 | 2 | `tools/validate_sim.py` — simulator validation (gate before RL) | ✅ done (10/10) |
 | 3 | `umiusi_rl/` — Gymnasium env + PPO training + eval | ✅ done — attitude hold + direction cruise + disturbance/sim2real robustness |
 | 5a | Competition sim: balloon world + cameras + analytical FF driver, runnable & scoring (no RL) | ✅ done |
-| 5b | Perception (camera → balloon detect) + behavior FSM (autonomy), Pi 4 deploy | 🟡 next |
+| 5b | Perception (learned detector + underwater synth-data pipeline + eval) + behavior FSM (perception-in-loop autonomy) | ✅ done (runnable end-to-end); 🟡 sim-to-real tuning + Pi 4 deploy pending |
 | 4 | `ros2_ws/` — ROS 2 bridge: custom MuJoCo `ros2_control` hardware plugin; the real controllers + an RL policy drive the sim | ✅ done (in the sibling `ros2_ws/`) |
 
 ---
@@ -52,6 +55,7 @@ mujoco_ws/                # workspace container (NOT version-controlled)
     configs/                # umiusi.yaml (physics) + train_ppo.yaml (env/reward/algo)
     tools/                  # sim: validate_sim, drive, snapshot, camera_demo, scenario_demo, competition_run, analyze_steady
                             #   perception: perception_demo/train/eval/eval_learned/bench/pseudolabel, underwater_correct, gen_sim_dataset
+                            #   autonomy: behavior (perception FSM), autonomy_run (perception-in-loop balloon-pop, no RL)
                             #   ROS (rosbridge): ros_view (viewer), ros_policy (RL -> cmd/direct)
     examples/               # pretrained example policies (cruise_policy/) so eval/drive run out of the box
     media/                  # rendered placement screenshots
@@ -147,7 +151,8 @@ A standalone rviz-style viewer that attaches to a separately-running sim is a po
 (it would need an IPC layer since the sim isn't ROS-based) — see the Roadmap.
 
 **Onboard cameras** — two fixed cameras move with the vehicle: `front_cam` (+X, forward) and `down_cam`
-(nadir, −Y). `UmiusiSimulator.render_camera(camera, w, h)` returns an `(H, W, 3)` uint8 RGB frame:
+(nadir, −Y). `UmiusiSimulator.render_camera(camera, w, h, degrade=True)` returns an `(H, W, 3)` uint8
+RGB frame (`degrade=True` applies the underwater degradation the balloon detector was trained on):
 ```bash
 MUJOCO_GL=egl python -m tools.snapshot          # media/umiusi_{iso,top,front,corner}.png
 MUJOCO_GL=egl python -m tools.camera_demo [out] # capture a front_cam frame (default ./front_cam.png)
@@ -168,6 +173,19 @@ vs balloon), and prints a pop timeline + final score (typically 80). The world i
 behavior FSM replace the ground-truth driver in the next phase.
 > The feed-forward allocation's axes don't line up 1:1 with the sim (empirically `Vx→−X`, `Vz→+Y`,
 > `Vy→yaw couple`) — documented in `control.py`; reconcile before driving the sim from real `ros2_control`.
+
+**Perception-in-the-loop autonomy** (vision replaces the ground-truth driver, still no RL) — the robot
+detects balloons from its OWN underwater-degraded `front_cam` with the learned detector, and a
+**rule-based behaviour FSM** (`tools/behavior.py`: search → approach → align → ram → camera-confirm,
+with multi-frame track voting) drives it through the same feed-forward allocation. A ~4.5 m detection
+range gate + a two-band target rule (near ≤2.5 m: nearest positive incl. yellow; mid 2.5–4.5 m: red
+only; never blue) pick the target, and pops are confirmed from the camera alone (balloons vanish when
+popped):
+```bash
+MUJOCO_GL=egl uv run --extra perception python -m tools.autonomy_run --headless --seed 1  # short self-test (mp4)
+MUJOCO_GL=egl uv run --extra perception python -m tools.autonomy_run --full-run           # record the FULL competition to mp4
+DISPLAY=:0    uv run --extra perception python -m tools.autonomy_run --render              # watch live (passive viewer)
+```
 
 **From Python:**
 ```python
@@ -239,8 +257,10 @@ absolute position). `imu`/`imu_depth` therefore cannot hold horizontal position.
 tasks with trained attitude-hold and attitude+direction-cruise policies (incl. disturbance + light
 sim2real domain randomization), onboard cameras, the competition balloon-popping scenario running
 end-to-end with the analytical feed-forward driver + scoring, a unified live viewer with a legible
-default world, an interactive drive tool (steer a trained policy from the keyboard), and a classical-CV
-balloon detector (colour + bearing + range from the onboard camera).
+default world, an interactive drive tool (steer a trained policy from the keyboard), and — for the
+balloon competition — a learned onboard balloon detector (backed by an underwater sim2real
+synthetic-data pipeline) feeding a rule-based behaviour FSM that pops balloons perception-in-the-loop
+end-to-end (`tools/autonomy_run`, no RL).
 
 **Not supported yet:**
 - **ROS 2 integration — done** (in the sibling `ros2_ws/`, not this repo). A custom MuJoCo
@@ -277,25 +297,31 @@ balloon detector (colour + bearing + range from the onboard camera).
   stress-eval set, and closing the sim↔real **colour-cast gap** (domain-randomised water colour + a
   strong colour/resolution training aug) is the lever for making synthetic data help. Next: more
   labelled real frames, then the final int8 export + a real Pi 4 benchmark.
-- **Autonomy (behavior FSM).** The remaining piece is a behavior FSM (search → approach → ram →
-  reacquire) consuming detections to replace `competition_run`'s ground-truth driver, plus multi-frame
-  tracking. The feed-forward frame mapping (`Vx→−X` etc., see `control.py`) still needs reconciling.
+- **Autonomy (behavior FSM) — done.** A rule-based behaviour FSM (`tools/behavior.py`: search →
+  approach → align → ram → camera-confirm, with multi-frame track voting, a ~4.5 m detection range gate,
+  a two-band near/mid target rule, and blue avoidance) consumes the learned detector's output to replace
+  `competition_run`'s ground-truth driver, driving perception-in-the-loop via the analytical feed-forward
+  allocation (`tools/autonomy_run.py`; `--full-run` records the whole competition, `--render` watches
+  live). Remaining: sim-to-real detector quality + the feed-forward frame-sign reconcile (`Vx→−X` etc.,
+  see `control.py`).
 - **Decoupled viewer — done (ROS path).** For the standalone Python sim, `tools.drive` / `--render`
   each launch their own in-process viewer. An rviz-style viewer that attaches to a *separately-running*
   sim now exists once the ROS bridge is up: the C++ `MujocoSystem` plugin publishes the MuJoCo `qpos`,
   and `tools/ros_view.py` (`uv sync --extra viz`) renders it over **rosbridge** via `roslibpy` (no rclpy).
 - **Sim-to-real + Pi 4 deploy.** Domain-randomization hooks exist; on-hardware tuning is future.
 
-**Planned order:** perception + behavior FSM (phase 5b; a learned detector for the real-image recall wall) →
-depth-sensor decision + 3-D depth-hold locomotion → sim-to-real / Pi 4 deploy (aarch64 MuJoCo). ROS 2 bridge
-(phase 4) is done. See the Status table above.
+**Planned order:** perception + behavior FSM (phase 5b) is runnable end-to-end; next is sim-to-real
+detector tuning + the final int8 export / Pi 4 benchmark → depth-sensor decision + 3-D depth-hold
+locomotion → on-hardware sim-to-real (aarch64 MuJoCo). ROS 2 bridge (phase 4) is done. See the Status
+table above.
 
 ---
 
 ## Configuration
 
 All physical parameters live in [`configs/umiusi.yaml`](configs/umiusi.yaml): water density / displaced volume /
-buoyancy offset, diagonal linear+quadratic drag, added mass (off by default), thrust map, servo range/slew, and the
+buoyancy offset, diagonal linear+quadratic drag, lift + a CoP-offset translation moment (both on by default;
+optional off-diagonal damping off), added mass (off by default), thrust map, servo range/slew, and the
 measured hull mass/CoM/inertia. The drag coefficients are still `PLACEHOLDER`; `displaced_volume` and the thrust map
 are first estimates pending hardware confirmation. `validate_sim -v` prints calibration numbers for these.
 
