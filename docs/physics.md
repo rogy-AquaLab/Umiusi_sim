@@ -86,6 +86,40 @@ disturbance in RL). The wrench is applied at the **system CoM** via `mj_applyFT`
 `added_mass.diag` defaults to **0 (OFF)** — explicit-integrator added mass needs numerical care; enable
 only after drag/buoyancy are validated.
 
+### 2b. Higher-fidelity hydro: lift, translation-induced moment, cross-coupling
+Three config-gated terms extend the diagonal drag beyond "force opposes velocity on each axis". Their
+coefficients are **PLACEHOLDERs** (physically-plausible, to be calibrated against tow/PMM tests); each
+has a default that recovers the old model, and **lift + the CoP offset are ENABLED by default** (modest).
+
+**Lift** — `physics/hydrodynamics.py::lift_force_body`, applied as a pure force at the CoM. A force
+*perpendicular* to the body-frame translational velocity, growing with the **angle of attack** `α`
+between the flow and the longitudinal reference axis (`lift.ref_axis = +X`, the streamlined/elongated
+axis), magnitude `∝ |v|²`:
+
+```
+F_lift = coef · |v|² · sin(α)·cos(α) · n̂        (body)   coef = ½ρ·Cl·A  (lumped)
+       = coef · |v|² · (v̂·ê_ref) · (ê_ref − (v̂·ê_ref) v̂)
+```
+
+`n̂` is the unit vector ⟂ to `v` in the (`v`, `ê_ref`) plane, toward `ê_ref`. The `sin·cos` (= ½ sin 2α)
+shape makes lift **vanish for flow ALONG the ref axis (α=0) AND perpendicular to it (α=90°)** — so pure
+surge / pure heave / pure sway give **zero lift**, and only genuinely **oblique** flow lifts. That is
+why the axis-aligned `validate_sim` invariants (surge stays horizontal, heave rises without spinning)
+still hold. `lift.coef = 12.0` N/(m/s)² → ~1 N max at the 0.4 m/s cruise (modest); `coef = 0` = OFF.
+
+**Translation-induced moment via a center-of-pressure (CoP) offset** — the (linear+quadratic)
+translational drag force is applied at `CoP = system CoM + R·cop_offset` (body frame) instead of exactly
+at the CoM, so a **broadside translation induces a turning/righting moment** (Munk-like): the moment arm
+`(CoP−CoM) × F_drag` becomes a couple. `cop_offset = [0.03, 0, 0]` m (a few cm forward); `[0,0,0]`
+recovers the old model (drag through the CoM, zero translation moment). The angular-damping moment stays
+a location-free free vector, so only the *translational* drag gains the arm.
+
+**Off-diagonal (cross-axis) damping** — `physics/hydrodynamics.py::coupling_moment_body`, optional and
+**default OFF**. Adds a body moment coupled to translational velocity, `M += −(c_lin·v + c_quad·|v|·v)`:
+`coupling.sway_yaw` (body-Z sway → yaw about +Y, weathercocking) and `coupling.heave_pitch` (body-Y
+heave → pitch about +Z). Left at 0 by default since the CoP offset already supplies a translation→moment
+coupling; available if a specific cross term needs tuning.
+
 ---
 
 ## 3. Thruster propulsion (スラスタ推進力)
@@ -130,24 +164,26 @@ mj_applyFT(F_thr_k, point = site_xpos[t k _thrust], body = thruster_k)
   **vertical** component (→ heave / roll / pitch), `φ = atan(f_vertical / f_horizontal)` — matching the
   real `sinsei_umiusi_control` FeedForward allocation.
 
-### Modeling scope & limitations (what the drag model does *not* capture)
-The drag is a **diagonal, decoupled quadratic-damping** model (standard Fossen/Morison first order):
-- **No lift.** Only a force *opposing* motion along each body axis; there is no component
-  *perpendicular* to the velocity (no angle-of-attack lift).
-- **No translation-induced moments / cross-coupling.** The damping matrix is diagonal, so a translation
-  produces only a force on that axis, never a moment; and the drag force is applied at the **system CoM**
-  (zero moment arm). Real effects — a **center of pressure offset from the CoM**, the **Munk moment**,
-  angle-of-attack pitch/yaw moments, and off-diagonal (e.g. sway→yaw) damping — are **not** modeled. The
-  only drag moment is the **direct rotational damping** of roll/pitch/yaw velocity.
-- **Direction dependence = constant per-axis coefficients.** The different effective `Cd·A` per direction
-  is baked into the differing `D_lin`/`D_quad` per body axis (e.g. streamlined +X is lower than
-  broadside +Y); the `|v|·v` term is the form/pressure drag `∝ ½ρ Cd A v²`. It does **not** dynamically
-  compute the projected area at an arbitrary flow angle beyond this body-axis decomposition.
-- **No added-mass coupling by default** (`added_mass.diag = 0`).
+### Modeling scope & remaining limitations
+The core damping is a **diagonal quadratic-damping** model (Fossen/Morison first order), now extended by
+the §2b terms (lift, CoP-offset translation moment, optional cross-coupling). Since §2b:
+- **Lift IS modeled** (angle-of-attack force ⟂ to the flow; §2b) — modest, ENABLED, placeholder `Cl·A`.
+- **Translation-induced moments ARE modeled** via the CoP offset (§2b) — a broadside translation now
+  induces a Munk-like turning/righting moment; ENABLED with a small (3 cm) placeholder offset.
+- **Off-diagonal damping** (sway→yaw, heave→pitch) is available but **default OFF** (`coupling.* = 0`).
 
-This is adequate for a slow, box-ish ROV doing station-keeping + low-speed cruise; it loses accuracy in
-fast / streamlined / high-angle-of-attack manoeuvres. Higher fidelity would need a full 6×6 damping
-matrix (off-diagonal terms), a center-of-pressure offset (translation→moment), and/or a lift model.
+Remaining simplifications:
+- **Direction dependence = constant per-axis coefficients** for the *drag* magnitude. The different
+  effective `Cd·A` per direction is baked into the differing `D_lin`/`D_quad` per body axis (streamlined
+  +X < broadside +Y); it does not dynamically recompute the projected area at an arbitrary flow angle.
+- **Lift shape is a simple ½sin 2α** (no explicit stall/`Cl(α)` curve); the CoP offset is a **fixed**
+  point (not velocity- or angle-dependent).
+- **No added-mass coupling by default** (`added_mass.diag = 0`).
+- All §2b coefficients are **PLACEHOLDERs** pending calibration (tow/PMM tests).
+
+This is adequate for a slow, box-ish ROV doing station-keeping + low-speed cruise, and the §2b terms add
+first-order lift/translation-moment fidelity for angled / broadside manoeuvres. A further step up would
+be a full 6×6 damping matrix and an angle-resolved `Cl(α)` / moving CoP.
 
 ---
 
@@ -165,11 +201,14 @@ spinning; pure surge stays horizontal). The FF-frame sign reconcile is a tracked
 ## Summary of the per-step force pipeline (`_apply_external_forces`)
 1. clear `qfrc_applied`;
 2. **buoyancy** `−ρV g` at the CoB (above CoM → righting moment);
-3. **drag** `−(D_lin v + D_quad |v| v)` using CoM velocity relative to the current, at the system CoM;
-4. optional **added mass** (off by default) + external **impulse** disturbances at the CoM;
-5. **thrust** `mag · R·axis` at each thruster tip site;
-6. MuJoCo integrates (gravity via body mass) at 500 Hz.
+3. **drag** `−(D_lin v + D_quad |v| v)` (+ optional cross-coupling moment) using CoM velocity relative to
+   the current, with the translational force applied at the **CoP** (`CoM + R·cop_offset` → translation
+   moment) and the angular damping as a pure moment;
+4. **lift** `coef·|v|²·½sin 2α · n̂` ⟂ to the flow, at the CoM (zero at axis-aligned flow);
+5. optional **added mass** (off by default) + external **impulse** disturbances at the CoM;
+6. **thrust** `mag · R·axis` at each thruster tip site;
+7. MuJoCo integrates (gravity via body mass) at 500 Hz.
 
-Parameters marked PLACEHOLDER (drag coeffs, displaced volume, buoyancy offset) are first estimates to be
-calibrated in validation; `tools/validate_sim.py` guards the qualitative invariants (floats/levels,
-heave/surge decoupling, no NaN).
+Parameters marked PLACEHOLDER (drag coeffs, lift `coef`, `cop_offset`, coupling, displaced volume,
+buoyancy offset) are first estimates to be calibrated in validation; `tools/validate_sim.py` guards the
+qualitative invariants (floats/levels, heave/surge decoupling, no NaN).

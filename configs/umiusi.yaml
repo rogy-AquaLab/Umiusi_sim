@@ -37,6 +37,31 @@ added_mass:
   # needs numerical care); kept configurable to satisfy the analytical model spec.
   diag: [0.0, 0.0, 0.0, 0.0, 0.0, 0.0]
 
+# --- LIFT: force perpendicular to the body-frame flow, growing with angle of attack -----------
+# force = coef * |v|^2 * sin(a)cos(a) perpendicular to v, where a = angle of attack (flow vs the
+# longitudinal ref_axis). VANISHES for flow along the ref axis (surge) AND perpendicular to it
+# (pure heave/sway) -> only OBLIQUE flow lifts; keeps the axis-aligned validate invariants intact.
+# coef = 1/2*rho*Cl*A [N/(m/s)^2] (lumped). PLACEHOLDER (modest, ENABLED) — calibrate vs tow tests.
+# coef: 0.0 recovers the old no-lift model.
+lift:
+  coef: 12.0                    # ~1.5 N max lift at the 0.4 m/s cruise speed (modest)
+  ref_axis: [1.0, 0.0, 0.0]     # longitudinal (streamlined/elongated) body axis = +X (forward)
+
+# --- Center-of-pressure OFFSET (translation-induced / Munk-like moment) -----------------------
+# The translational drag force is applied at CoM + this offset (body frame [x, y, z], meters), so a
+# broadside translation induces a turning/righting moment. Small (a few cm). PLACEHOLDER (ENABLED).
+# [0.0, 0.0, 0.0] recovers the old model (drag through the CoM, zero translation moment).
+cop_offset: [0.03, 0.0, 0.0]
+
+# --- Optional off-diagonal (cross-axis) damping moments ---------------------------------------
+# Extra body moment coupled to translational velocity: M += -(lin*v + quad*|v|*v). Default 0 = OFF.
+#   sway_yaw    body-Z (sway)  velocity -> yaw moment about +Y (weathercocking)
+#   heave_pitch body-Y (heave) velocity -> pitch moment about +Z
+# Kept OFF by default (the CoP offset above already supplies a translation->moment coupling).
+coupling:
+  sway_yaw:    [0.0, 0.0]       # [linear N*m/(m/s), quadratic N*m/(m/s)^2]
+  heave_pitch: [0.0, 0.0]
+
 # --- thrusters (azimuth: servo angle + ESC thrust), measured pivots -------------
 thrusters:
   mass: 0.629177               # kg per thruster (629.177 g)

@@ -51,6 +51,19 @@ class UmiusiSimulator:
         self.drag_quad = np.array(cfg["drag"]["quadratic"], dtype=float)
         self.added_mass_diag = np.array(cfg["added_mass"]["diag"], dtype=float)
 
+        # Higher-fidelity hydro (all config-gated; absent key -> OFF = the old diagonal-drag model):
+        #   lift        : force perpendicular to the body-frame flow, grows with angle of attack (~|v|^2)
+        #   cop_offset  : apply the translational drag force at a center-of-pressure OFFSET from the CoM,
+        #                 so a broadside translation induces a turning/righting (Munk-like) moment
+        #   coupling    : optional off-diagonal (sway->yaw, heave->pitch) damping moments
+        lift_cfg = cfg.get("lift", {})
+        self.lift_coef = float(lift_cfg.get("coef", 0.0))                      # 0.5*rho*Cl*A [N/(m/s)^2]
+        self.lift_ref_axis = np.array(lift_cfg.get("ref_axis", [1.0, 0.0, 0.0]), dtype=float)
+        self.cop_offset = np.array(cfg.get("cop_offset", [0.0, 0.0, 0.0]), dtype=float)  # body frame [m]
+        coup = cfg.get("coupling", {})
+        self.coupling_sway_yaw = np.array(coup.get("sway_yaw", [0.0, 0.0]), dtype=float)
+        self.coupling_heave_pitch = np.array(coup.get("heave_pitch", [0.0, 0.0]), dtype=float)
+
         # Thrusters
         t = cfg["thrusters"]
         self.servo_range_rad = np.radians(max(abs(v) for v in t["servo_range_deg"]))
@@ -148,12 +161,26 @@ class UmiusiSimulator:
         ang_body = R.T @ vel6[:3]
         vel_body = np.concatenate([lin_body, ang_body])
         w = hydro.drag_wrench_body(vel_body, self.drag_lin, self.drag_quad)
+        # Optional off-diagonal (cross-axis) damping moments (default 0 -> no change).
+        if self.coupling_sway_yaw.any() or self.coupling_heave_pitch.any():
+            w[3:] = w[3:] + hydro.coupling_moment_body(lin_body, self.coupling_sway_yaw,
+                                                       self.coupling_heave_pitch)
         if np.any(self.added_mass_diag):  # optional; off by default (needs numerical care)
             acc_body = (vel_body - self.prev_vel_body) / self.dt
             w = w + hydro.added_mass_wrench_body(acc_body, self.added_mass_diag)
         self.prev_vel_body = vel_body
         sys_com = d.subtree_com[base].copy()
-        mujoco.mj_applyFT(m, d, R @ w[:3], R @ w[3:], sys_com, base, d.qfrc_applied)
+        # Apply the translational drag FORCE at the center of pressure (CoM + cop_offset): the moment
+        # arm turns a broadside translation into a righting/turning moment (Munk-like). The angular
+        # damping + coupling moment (w[3:]) is a free vector, applied here as a pure moment. With
+        # cop_offset = 0 this is identical to applying everything at the CoM (the old model).
+        cop_world = sys_com + R @ self.cop_offset
+        mujoco.mj_applyFT(m, d, R @ w[:3], R @ w[3:], cop_world, base, d.qfrc_applied)
+
+        # Lift: force perpendicular to the body-frame flow (angle-of-attack dependent), at the CoM.
+        f_lift_body = hydro.lift_force_body(lin_body, self.lift_coef, self.lift_ref_axis)
+        if f_lift_body.any():
+            mujoco.mj_applyFT(m, d, R @ f_lift_body, zero3, sys_com, base, d.qfrc_applied)
 
         # External impulse disturbance (waves/bumps), a world-frame force at the CoM.
         if self.ext_force_world.any():

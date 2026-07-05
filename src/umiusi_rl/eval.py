@@ -34,6 +34,9 @@ def main():
                     help="evaluate under domain randomization too (default: nominal model, disturbance from meta)")
     ap.add_argument("--no-disturb", action="store_true",
                     help="force disturbances OFF at eval (isolate the policy's own steadiness/wobble)")
+    ap.add_argument("--legacy-hydro", action="store_true",
+                    help="disable the higher-fidelity hydro (lift + CoP offset + coupling) so the sim uses "
+                         "the old diagonal-drag model — for A/B testing a policy against the new physics")
     ap.add_argument("--render", action="store_true", help="watch in the MuJoCo GUI viewer")
     ap.add_argument("--record", default=None,
                     help="write an mp4 of the rollout (headless; run with MUJOCO_GL=egl)")
@@ -59,6 +62,14 @@ def main():
     # robustness to model mismatch (randomized buoyancy/thrust/drag + obs noise + action latency).
     cfg.setdefault("domain_rand", {})["enabled"] = bool(args.domain_rand)
     env = UmiusiPoseEnv(cfg, render_mode="human" if args.render else None)
+    if args.legacy_hydro:  # revert to the old diagonal-drag model (no lift / CoP moment / coupling)
+        env.sim.lift_coef = 0.0
+        env.sim.cop_offset[:] = 0.0
+        env.sim.coupling_sway_yaw[:] = 0.0
+        env.sim.coupling_heave_pitch[:] = 0.0
+        print("[eval] legacy hydro: lift + CoP offset + coupling DISABLED (old diagonal-drag model)")
+    else:
+        print(f"[eval] new hydro: lift coef={env.sim.lift_coef}, cop_offset={list(env.sim.cop_offset)}")
     control_dt = 1.0 / env.sim.cfg["sim"]["control_rate_hz"]
 
     recorder, frames = None, []
