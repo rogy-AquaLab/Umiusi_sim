@@ -41,6 +41,8 @@ from __future__ import annotations
 import math
 from dataclasses import dataclass, field
 
+from umiusi_sim.perception.tracker import ASSOC_BEARING, Tracker, plausible_detections
+
 POSITIVE_COLOURS = ("red", "yellow")
 
 # --- detection range gate + target-selection bands (rule-based, NOT a reward) ------------------
@@ -156,33 +158,19 @@ SUPPRESS_STEPS = 350      # ~7 s to prefer other colours after giving up on one
 AVOID_AZ = math.radians(28.0)   # a blue within this bearing of dead-ahead is "in the way"
 AVOID_RANGE = 1.6         # ...and closer than this -> steer around it
 AVOID_YAW = 0.5           # avoidance yaw magnitude added away from the blue
-# --- temporal track ---------------------------------------------------------------------------
-LOCK_HOLD_STEPS = 12      # bridge detector dropouts: a track is "alive" until this many misses (the
-#                           learned detector flickers badly on a LARGE, close balloon -> hold longer
-#                           so we can commit + lunge through the dropout instead of aborting)
-ASSOC_BEARING = math.radians(14.0)  # associate a detection to the track if within this bearing
-# --- multi-frame voting for ACQUISITION (kill flickery false positives, esp. yellow) ----------
-# A positive detection must be VOTED IN over several perception frames before the FSM will lock
-# onto it. Flickery one-frame FPs never accumulate enough votes, so they can't steer selection;
-# this also stabilises which balloon we commit to. Votes advance only on FRESH perception frames
-# (``step(..., fresh=True)``) — not on the held frames between detector ticks.
-ACQUIRE_VOTES = 3         # a candidate must be seen in this many recent perception frames to lock on
-VOTE_MAX = 6              # cap so a long-lived candidate re-acquires fast but can still decay away
-
-
-@dataclass
-class _Cand:
-    """A voting candidate positive balloon (a would-be target, before it earns a lock)."""
-    colour: str
-    az: float
-    el: float
-    det: object                     # latest Detection associated to this candidate
-    votes: int = 1
+# --- temporal track (the ONE mechanism: see umiusi_sim.perception.tracker) ---------------------
+# Multi-frame association, acquisition-vote FP rejection AND lock-hold persistence now all live in
+# ``perception.tracker.Tracker`` (ROS/sim-free, reused by the robot nodes). The FSM consumes CONFIRMED
+# tracks from it. The tuned thresholds live there: association gate (ASSOC_BEARING/ASSOC_RANGE_FRAC),
+# confirmation (CONFIRM_VOTES / VOTE_MAX — folds in the old acquisition vote) and persistence
+# (PERSIST_FRAMES — folds in the old LOCK_HOLD_STEPS). ``_Track`` below is now just the FSM's pursuit
+# SNAPSHOT of the locked track (updated from the tracker each step, retained through a drop so the
+# post-ram CONFIRM can keep watching), NOT a second tracker.
 
 
 @dataclass
 class _Track:
-    """Temporal track of the locked target (associated across frames by colour + bearing)."""
+    """Pursuit snapshot of the locked target (synced from the tracker; see the note above)."""
     colour: str = ""
     az: float = 0.0
     el: float = 0.0
@@ -191,19 +179,20 @@ class _Track:
     peak_bbox: float = 0.0          # max bbox_frac seen this pursuit (for the miss test)
     misses: int = 999               # consecutive frames with no associated detection
 
-    def alive(self):
-        return bool(self.colour) and self.misses <= LOCK_HOLD_STEPS
-
 
 @dataclass
 class BalloonBehavior:
     """Stateful perception FSM. Call ``step(detections, yaw_rate, heading, dt)`` per control step."""
 
     frame_h: int = 240
+    frame_w: int = 320
+    fovy_deg: float = 60.0
     dt: float = 0.02
     state: str = "SEARCH"
     trk: _Track = field(default_factory=_Track)
-    cands: list = field(default_factory=list)   # voting candidates (acquisition FP rejection)
+    tracker: Tracker = field(default_factory=Tracker)  # the ONE multi-frame tracker
+    _target_id: object = None                   # tracker id of the locked target (None = unlocked)
+    _alive: bool = False                        # is the locked target currently tracked/persisting?
     fails: dict = field(default_factory=dict)   # per-colour persistent miss count (give-up memory)
     # search / sweep
     _swept: float = 0.0
@@ -229,98 +218,89 @@ class BalloonBehavior:
     n_confirmed_pop: int = 0        # camera-confirmed pops (FSM's own belief; NOT the GT score)
     n_miss: int = 0
 
-    # -- detection selection / association -----------------------------------------------------
-    def _vote(self, dets):
-        """Advance the acquisition vote map on a FRESH perception frame (``dets`` already range-gated).
-
-        Each positive detection reinforces (or spawns) a candidate matched by colour + bearing;
-        candidates not seen this frame decay. Only candidates with >= ACQUIRE_VOTES are eligible to
-        become a target, so a flickery one-frame false positive can never steer selection."""
-        seen = []
-        for d in dets:
-            if d.colour not in POSITIVE_COLOURS:
-                continue
-            c = self._match_cand(d)
-            if c is None:
-                c = _Cand(d.colour, d.bearing[0], d.bearing[1], d, 0)
-                self.cands.append(c)
-            c.colour, c.az, c.el, c.det = d.colour, d.bearing[0], d.bearing[1], d
-            c.votes = min(VOTE_MAX, c.votes + 1)
-            seen.append(id(c))
-        for c in self.cands:
-            if id(c) not in seen:
-                c.votes -= 1
-        self.cands = [c for c in self.cands if c.votes > 0]
-
-    def _match_cand(self, d):
-        """The existing candidate matching detection ``d`` (same colour, closest bearing in gate)."""
-        best, best_d = None, ASSOC_BEARING
-        for c in self.cands:
-            if c.colour != d.colour:
-                continue
-            dd = math.hypot(d.bearing[0] - c.az, d.bearing[1] - c.el)
-            if dd < best_d:
-                best, best_d = c, dd
-        return best
-
+    # -- target selection / locked-track sync (over the tracker's CONFIRMED tracks) -------------
     def _pick_target(self):
-        """Rule-based selection over VOTED candidates (two clear range bands; no learning/reward):
+        """Rule-based selection over the tracker's CONFIRMED tracks (two range bands; no reward):
           NEAR (range <= NEAR_RANGE): the NEAREST positive of ANY colour — a near yellow is easy,
               guaranteed points, a bird in the hand.
           MID  (NEAR_RANGE .. MAX_TARGET_RANGE): the nearest RED only — the +30 justifies a harder
               far approach; a far yellow (+10) is NOT worth the long, low-success run, so skip it.
-          Blue is never a candidate (only POSITIVE_COLOURS are voted). Returns a Detection or None."""
-        eligible = [c for c in self.cands if c.votes >= ACQUIRE_VOTES]
+          Only POSITIVE_COLOURS are selectable (blue is tracked only for avoidance). Returns a Track
+          or None. Consuming CONFIRMED tracks (not raw detections) is what keeps a flickery one-frame
+          false positive from ever steering selection."""
+        eligible = [t for t in self.tracker.confirmed() if t.colour in POSITIVE_COLOURS]
         if not eligible:
             return None
         if self._suppress_steps > 0 and self._suppress_colour:  # give-up memory: try other colours
-            eligible = [c for c in eligible if c.colour != self._suppress_colour]
+            eligible = [t for t in eligible if t.colour != self._suppress_colour]
             if not eligible:
                 return None     # only the given-up colour is in view -> SEARCH (turn) for the rest
-        near = [c for c in eligible if c.det.range_m <= NEAR_RANGE]
+        near = [t for t in eligible if t.range_m <= NEAR_RANGE]
         if near:
-            return min(near, key=lambda c: c.det.range_m).det   # bird in the hand: nearest positive
-        reds = [c for c in eligible if c.colour == "red"]       # mid-range: only red is worth it
+            return min(near, key=lambda t: t.range_m)           # bird in the hand: nearest positive
+        reds = [t for t in eligible if t.colour == "red"]       # mid-range: only red is worth it
         if reds:
-            return min(reds, key=lambda c: c.det.range_m).det
+            return min(reds, key=lambda t: t.range_m)
         return None                                             # only far yellows left -> keep looking
 
-    def _associate(self, dets):
-        """The detection matching the current track (same colour, closest bearing within gate)."""
+    def _lock(self, track):
+        """Lock the FSM onto a tracker track: seed the pursuit snapshot and start the approach."""
+        self._target_id = track.id
+        f = self._bbox_frac(track.bbox)
+        self.trk = _Track(colour=track.colour, az=track.az, el=track.el, range_m=track.range_m,
+                          bbox_frac=f, peak_bbox=f, misses=track.misses)
+        self._alive = True
+        self._reset_pursuit()
+        self.state = "APPROACH"
+
+    def _sync_track(self):
+        """Refresh the pursuit snapshot from the tracker's locked track. If the tracker has DROPPED
+        the id, re-adopt any current track matching the snapshot (same colour, nearest bearing in the
+        gate) — this bridges a >persist dropout so the post-ram CONFIRM stays honest. If nothing
+        matches, keep the frozen snapshot and count the miss (so CONFIRM's long watch can complete)."""
         if not self.trk.colour:
-            return None
+            self._alive = False
+            return
+        t = self.tracker.get(self._target_id)
+        if t is None:
+            t = self._match_locked()
+        if t is not None:
+            self._target_id = t.id
+            self.trk.colour = t.colour
+            self.trk.az, self.trk.el, self.trk.range_m = t.az, t.el, t.range_m
+            self.trk.bbox_frac = self._bbox_frac(t.bbox)
+            self.trk.peak_bbox = max(self.trk.peak_bbox, self.trk.bbox_frac)
+            self.trk.misses = t.misses
+            self._alive = True
+        else:
+            self.trk.misses += 1
+            self._alive = False
+
+    def _match_locked(self):
+        """A current tracker track matching the locked snapshot (same colour, closest bearing in gate)."""
         best, best_d = None, ASSOC_BEARING
-        for d in dets:
-            if d.colour != self.trk.colour:
+        for t in self.tracker.tracks:
+            if t.colour != self.trk.colour:
                 continue
-            dd = math.hypot(d.bearing[0] - self.trk.az, d.bearing[1] - self.trk.el)
+            dd = math.hypot(t.az - self.trk.az, t.el - self.trk.el)
             if dd < best_d:
-                best, best_d = d, dd
+                best, best_d = t, dd
         return best
 
-    def _set_track(self, d):
-        f = self._bbox_frac(d)
-        self.trk = _Track(colour=d.colour, az=d.bearing[0], el=d.bearing[1], range_m=d.range_m,
-                          bbox_frac=f, peak_bbox=f, misses=0)
-
-    def _update_track(self, d):
-        self.trk.az, self.trk.el, self.trk.range_m = d.bearing[0], d.bearing[1], d.range_m
-        self.trk.bbox_frac = self._bbox_frac(d)
-        self.trk.peak_bbox = max(self.trk.peak_bbox, self.trk.bbox_frac)
-        self.trk.misses = 0
-
-    def _bbox_frac(self, d):
-        u0, v0, u1, v1 = d.bbox
+    def _bbox_frac(self, bbox):
+        u0, v0, u1, v1 = bbox
         return (v1 - v0) / max(1, self.frame_h)
 
-    def _blue_avoidance(self, dets):
-        """Yaw bias to steer around a blue that is roughly dead-ahead and close. 0 if clear."""
-        threats = [d for d in dets
-                   if d.colour == "blue" and abs(d.bearing[0]) < AVOID_AZ and d.range_m < AVOID_RANGE]
+    def _blue_avoidance(self):
+        """Yaw bias to steer around a CONFIRMED blue that is roughly dead-ahead and close. 0 if clear.
+        Uses confirmed blue tracks (not raw detections) so a one-frame blue FP can't jerk the heading,
+        while a real blue decoy — seen over many frames as we near it — is reliably avoided."""
+        threats = [t for t in self.tracker.confirmed()
+                   if t.colour == "blue" and abs(t.az) < AVOID_AZ and t.range_m < AVOID_RANGE]
         if not threats:
             return 0.0, None
-        b = min(threats, key=lambda d: d.range_m)
-        side = -1.0 if b.bearing[0] >= 0 else 1.0  # turn away; dead-centre -> deterministic left
+        b = min(threats, key=lambda t: t.range_m)
+        side = -1.0 if b.az >= 0 else 1.0  # turn away; dead-centre -> deterministic left
         gain = AVOID_YAW * (1.0 - min(1.0, b.range_m / AVOID_RANGE) * 0.5)
         return side * gain, b
 
@@ -358,6 +338,8 @@ class BalloonBehavior:
 
     def _clear_track(self):
         self.trk = _Track()
+        self._target_id = None
+        self._alive = False
 
     def _enter_recover(self):
         self.state = "RECOVER"
@@ -385,24 +367,22 @@ class BalloonBehavior:
         """Return (command, info). command = {surge, heave, yaw}. Camera-only decisions.
 
         ``fresh`` is True on a fresh perception frame and False when the caller is re-driving on the
-        HELD detections between detector ticks — acquisition votes advance only on fresh frames."""
+        HELD detections between detector ticks — confirmation votes advance only on fresh frames."""
         dt = self.dt if dt is None else dt
-        # RANGE GATE: drop far detections (mostly false positives + unreachable) up front so every
-        # downstream decision (voting, track association, blue avoidance) only sees reachable balloons.
-        detections = [d for d in detections if d.range_m <= MAX_TARGET_RANGE]
-        avoid_yaw, blue = self._blue_avoidance(detections)
+        # RANGE GATE + SIZE-CONSISTENCY FILTER: drop far detections (mostly false positives +
+        # unreachable) AND boxes whose shape/size is implausible for a balloon at their range, up
+        # front, so the tracker (and every downstream decision) only sees reachable, plausible boxes.
+        detections = plausible_detections(detections, frame_h=self.frame_h, frame_w=self.frame_w,
+                                          fovy_deg=self.fovy_deg, max_range_m=MAX_TARGET_RANGE)
+        # ONE multi-frame mechanism: associate -> confirm -> persist. Votes advance only on fresh
+        # frames; the persistence miss-counter ages every control step (held frames included).
+        self.tracker.update(detections, fresh=fresh)
+        avoid_yaw, blue = self._blue_avoidance()
         if self._suppress_steps > 0:
             self._suppress_steps -= 1       # give-up memory decays -> the colour becomes eligible again
-        if fresh:
-            self._vote(detections)
 
-        # Temporal track update: associate a detection to the current track (or count a miss).
-        if self.trk.colour:
-            m = self._associate(detections)
-            if m is not None:
-                self._update_track(m)
-            else:
-                self.trk.misses += 1
+        # Refresh the locked-target snapshot from the tracker (holds identity through dropouts).
+        self._sync_track()
 
         # Post-ram camera confirmation (pop vs miss) — pure camera, no ground truth.
         if self.state == "CONFIRM":
@@ -410,20 +390,18 @@ class BalloonBehavior:
         if self.state == "RECOVER":
             return self._recover(yaw_rate, avoid_yaw, blue)
 
-        # Acquire a target when searching (rule-based, over voted candidates only).
+        # Acquire a target when searching (rule-based, over CONFIRMED tracks only).
         if self.state == "SEARCH" or not self.trk.colour:
             target = self._pick_target()
             if target is None:
                 self.state = "SEARCH"
                 return self._search(yaw_rate, dt, avoid_yaw, blue)
-            self._set_track(target)
-            self._reset_pursuit()
-            self.state = "APPROACH"
+            self._lock(target)
 
         # Lost the track while pursuing. If we had COMMITTED to a ram, keep driving straight in
         # (blind, on the frozen last bearing) until the lunge window is spent — the pin only reaches
         # the balloon AFTER it leaves the frame — THEN back off to confirm. Otherwise recover.
-        if not self.trk.alive():
+        if not self._alive:
             if self._committed:
                 if self.state == "RAM" and self._ram_steps < LUNGE_STEPS:
                     self._ram_steps += 1  # DRIVE THROUGH the sight-loss to make physical contact
@@ -564,13 +542,13 @@ class BalloonBehavior:
     # -- recover (back off + re-align, or search if the target is gone) ------------------------
     def _recover(self, yaw_rate, avoid_yaw, blue):
         self._recover_steps -= 1
-        if self.trk.alive():
+        if self._alive:
             yaw = _clip(0.8 * KP_YAW * self.trk.az + KD_YAW * yaw_rate + avoid_yaw, -1, 1)
             heave = _heave_cmd(self.trk.el, self.trk.colour)
         else:
             yaw, heave = self._sweep_dir * SEARCH_YAW, 0.0
         if self._recover_steps <= 0:
-            if self.trk.alive():
+            if self._alive:
                 self.state = "ALIGN"       # re-align and retry
                 self._committed = False
             else:
