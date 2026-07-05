@@ -43,8 +43,10 @@ from umiusi_sim.perception.balloon_detector import (
     rgb_to_hsv,
 )
 
-# Channel order for the 3-colour heatmap. MUST match the eval harness' COLOURS list and the
-# COCO category map (1=red, 2=blue, 3=yellow) used when building training targets.
+# Channel order for the 3-colour heatmap. This is an INTERNAL ordering, NOT the COCO id order
+# (COCO is red=1/blue=2/yellow=3). It is safe because targets and decoding both map by NAME
+# (COLOUR_TO_IDX[name] / COLOURS[channel]) — never by (category_id - 1). Keep it identical to the
+# eval harness' COLOURS list; do NOT align channels to category_id (that would swap blue/yellow).
 COLOURS = ["red", "yellow", "blue"]
 COLOUR_TO_IDX = {c: i for i, c in enumerate(COLOURS)}
 STRIDE = 8  # network output stride (input H,W -> heatmap H/8, W/8)
@@ -197,22 +199,26 @@ def detect_learned(rgb: np.ndarray, model: TinyBalloonNet, input_size: int = 256
 
 
 def load_learned_detector(weights_path: str, input_size: int | None = None, width: int = 16,
-                          conf_thresh: float = 0.3, fovy_deg: float = 60.0):
+                          conf_thresh: float | None = None, fovy_deg: float = 60.0):
     """Load trained weights and return a ``rgb -> [Detection]`` callable for ``perception_eval``.
 
-    The checkpoint stores ``input_size``/``width``/``conf_thresh`` so callers need not repeat them
-    (explicit args override the checkpoint). This is the integration point used by the eval harness.
+    ``input_size`` and ``conf_thresh`` are caller-overridable: an explicit arg WINS, else the
+    checkpoint's stored value, else the default. ``width`` comes from the checkpoint when present
+    (it must match the saved weights) and the ``width=`` arg is only the fallback for bare state_dicts.
     """
     ckpt = torch.load(weights_path, map_location="cpu")
     if isinstance(ckpt, dict) and "state_dict" in ckpt:
         cfg = ckpt.get("cfg", {})
-        width = cfg.get("width", width)
+        width = cfg.get("width", width)  # weights fix the architecture; checkpoint wins
         input_size = input_size or cfg.get("input_size", 256)
-        conf_thresh = cfg.get("conf_thresh", conf_thresh)
+        if conf_thresh is None:  # caller wins; else the checkpoint's stored floor
+            conf_thresh = cfg.get("conf_thresh", 0.3)
         state = ckpt["state_dict"]
     else:  # bare state_dict
         state = ckpt
         input_size = input_size or 256
+    if conf_thresh is None:
+        conf_thresh = 0.3
     model = TinyBalloonNet(width=width)
     model.load_state_dict(state)
     model.eval()

@@ -13,11 +13,15 @@ Adding MORE data "just works": drop images into ``train2017/`` and append their 
 
 Heavy augmentation (albumentations, applied to image + boxes together):
   * geometric   : horizontal flip, shift/scale/rotate, random resized crop
-  * photometric : brightness/contrast, hue/sat/value jitter, RGB shift
+  * photometric : STRONG brightness/contrast, hue/sat/value jitter, RGB shift
   * blur        : gaussian / motion / median (motion blur mimics a moving robot)
-  * UNDERWATER  : a custom blue-green colour-cast + red-attenuation + haze transform -- the key aug
-                  for this domain (red light dies underwater; water tints everything cyan-green)
-Every transform is bounded so boxes stay valid; ``A.Resize`` to the network input closes the chain.
+  * UNDERWATER  : an AGGRESSIVE water colour-cast that SWEEPS blue<->green-grey (+ red attenuation,
+                  depth veil, desaturation) -- the key sim->real gap-closer, so the model can't key
+                  on absolute colour (sim renders greener now, real is green-grey, both must work)
+  * RESOLUTION  : random downscale-then-upscale + JPEG recompression -- emulates the real ~332x176
+                  compressed footage so the model is robust to low-res/blocky input
+Every transform is bounded so boxes stay valid; ``A.Resize`` to the network input closes the chain
+(the resolution degradation runs after, at network resolution).
 
 Usage (short baseline on the current 40 imgs):
     uv run python -m tools.perception_train --epochs 40 --batch 8 --input-size 256
@@ -54,22 +58,36 @@ DEFAULT_OUT = pathlib.Path("models/perception_learned/tiny_balloon.pt")
 # Augmentation
 # ----------------------------------------------------------------------------------------------
 def _underwater(image: np.ndarray, **kwargs) -> np.ndarray:
-    """Custom underwater colour-cast: attenuate red, push toward blue-green, add a mild haze.
+    """AGGRESSIVE underwater domain-randomisation colour-cast (the key sim->real gap-closer).
 
-    Mimics how the real dataset looks (see balloon_detector's REAL notes): red light is absorbed
-    within a metre or two so red reads as dark maroon, and everything picks up a cyan-green tint.
-    Randomised per call so the model sees a range of water conditions."""
+    Sweeps the WHOLE water-colour range the footage spans — from saturated BLUE (clean pool) to
+    desaturated GREEN-GREY (murky competition pool) — via wide, independent per-channel white-balance
+    gains, a depth-veil blend toward a randomly-coloured water tint, and a variable desaturation pull
+    toward grey (real footage is low-saturation and low-contrast). Applied strongly and to ALL
+    training frames (real AND sim), so the tiny CNN CANNOT key on an absolute colour ("blue == water");
+    it must use shape/contrast instead. Red is attenuated (physical: red light dies first underwater).
+    Randomised per call; pixels never move, so boxes stay exact."""
     img = image.astype(np.float32)
-    r_att = np.random.uniform(0.45, 0.85)          # kill part of the red channel
-    g_gain = np.random.uniform(1.0, 1.15)
-    b_gain = np.random.uniform(1.0, 1.2)
+    # Wide per-channel white-balance / gain. Red attenuated (physical); green & blue vary widely and
+    # independently so the cast sweeps blue-dominant <-> green-grey-dominant.
+    r_att = np.random.uniform(0.35, 0.95)
+    g_gain = np.random.uniform(0.80, 1.35)
+    b_gain = np.random.uniform(0.65, 1.35)
     img[..., 0] *= r_att
     img[..., 1] *= g_gain
     img[..., 2] *= b_gain
-    haze = np.array([np.random.uniform(10, 40), np.random.uniform(60, 110),
-                     np.random.uniform(70, 120)], dtype=np.float32)
-    alpha = np.random.uniform(0.05, 0.30)          # blend toward the water colour (depth haze)
-    img = (1 - alpha) * img + alpha * haze
+    # Depth veil: blend toward a water colour drawn ANYWHERE from green-grey to blue (red weakest).
+    g_anchor = np.random.uniform(55, 130)
+    veil = np.array([np.random.uniform(15, g_anchor),                 # red weakest
+                     g_anchor,
+                     np.random.uniform(40, g_anchor + 35)],           # blue < or > green (both casts)
+                    dtype=np.float32)
+    alpha = np.random.uniform(0.06, 0.45)          # depth-haze strength (blend toward the water colour)
+    img = (1 - alpha) * img + alpha * veil
+    # Desaturate toward grey (real footage is low-saturation) — variable amount.
+    gray = img.mean(axis=2, keepdims=True)
+    desat = np.random.uniform(0.0, 0.55)
+    img = (1 - desat) * img + desat * gray
     return np.clip(img, 0, 255).astype(np.uint8)
 
 
@@ -83,13 +101,19 @@ def build_aug(input_size: int, train: bool) -> A.Compose:
         A.Affine(scale=(0.7, 1.3), translate_percent=(-0.1, 0.1), rotate=(-12, 12), p=0.6),
         A.RandomResizedCrop(size=(input_size, input_size), scale=(0.5, 1.0), ratio=(0.75, 1.33),
                             p=0.5),
-        A.RandomBrightnessContrast(brightness_limit=0.3, contrast_limit=0.3, p=0.6),
-        A.HueSaturationValue(hue_shift_limit=15, sat_shift_limit=30, val_shift_limit=20, p=0.5),
-        A.RGBShift(r_shift_limit=20, g_shift_limit=20, b_shift_limit=20, p=0.4),
+        # STRONG photometric DR (real footage brightness/contrast/colour varies a lot).
+        A.RandomBrightnessContrast(brightness_limit=0.4, contrast_limit=0.4, p=0.7),
+        A.HueSaturationValue(hue_shift_limit=25, sat_shift_limit=45, val_shift_limit=30, p=0.6),
+        A.RGBShift(r_shift_limit=30, g_shift_limit=30, b_shift_limit=30, p=0.5),
         A.OneOf([A.GaussianBlur(blur_limit=(3, 7)), A.MotionBlur(blur_limit=(3, 9)),
-                 A.MedianBlur(blur_limit=5)], p=0.4),
-        A.Lambda(image=_underwater, p=0.6, name="underwater_cast"),
+                 A.MedianBlur(blur_limit=5)], p=0.5),
+        # THE key domain-gap aug: aggressive water colour-cast sweeping blue<->green-grey.
+        A.Lambda(image=_underwater, p=0.85, name="underwater_cast"),
         A.Resize(input_size, input_size),
+        # RESOLUTION / COMPRESSION degradation: emulate the real ~332x176 compressed footage
+        # (downscale-then-upscale loses fine detail; JPEG adds blocking). Pixel-only -> boxes intact.
+        A.Downscale(scale_range=(0.25, 0.6), p=0.5),
+        A.ImageCompression(quality_range=(28, 75), p=0.5),
     ], bbox_params=bbox)
 
 
@@ -230,6 +254,14 @@ def train(args) -> pathlib.Path:
     dl = DataLoader(ds, batch_size=args.batch, shuffle=True, num_workers=args.workers,
                     drop_last=len(ds) > args.batch)
     model = TinyBalloonNet(width=args.width)
+    if args.init_from is not None:
+        # Fine-tune: warm-start from a pretrained checkpoint (e.g. sim-pretrain -> real-finetune).
+        # Same architecture (width must match), so a strict load. Pair with a lower --lr.
+        ckpt_in = torch.load(args.init_from, map_location="cpu")
+        state = ckpt_in["state_dict"] if isinstance(ckpt_in, dict) and "state_dict" in ckpt_in \
+            else ckpt_in
+        model.load_state_dict(state)
+        print(f"init-from: warm-started weights from {args.init_from}")
     opt = torch.optim.Adam(model.parameters(), lr=args.lr)
     sched = torch.optim.lr_scheduler.CosineAnnealingLR(opt, T_max=args.epochs)
     print(f"train: {len(ds)} images, {args.epochs} epochs, batch {args.batch}, input {args.input_size}, "
@@ -273,6 +305,9 @@ def main():
     ap.add_argument("--out", type=pathlib.Path, default=DEFAULT_OUT)
     ap.add_argument("--input-size", type=int, default=256, help="256 & 320 both clear Pi4 10 fps")
     ap.add_argument("--width", type=int, default=16)
+    ap.add_argument("--init-from", type=pathlib.Path, default=None,
+                    help="warm-start weights from this checkpoint before training (fine-tune; "
+                         "use a lower --lr). Width must match.")
     ap.add_argument("--epochs", type=int, default=40)
     ap.add_argument("--batch", type=int, default=8)
     ap.add_argument("--lr", type=float, default=2.5e-3)

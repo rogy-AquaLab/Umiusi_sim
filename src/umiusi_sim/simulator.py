@@ -76,6 +76,15 @@ class UmiusiSimulator:
         self.cob_local = sys_com_local + np.array([0.0, self.buoyancy_offset, 0.0])
 
         self._renderer = None  # lazy mujoco.Renderer for render_camera(); cached per (w, h)
+        # Underwater camera degradation (perception realism): when camera_degrade is True,
+        # render_camera() applies the physically-based underwater degradation (colour attenuation +
+        # haze, from perception.underwater_sim) using the depth buffer, so the perception input looks
+        # like real murky footage. water_params fixes the water condition for the run (set at reset);
+        # None -> a moderately murky default. Off by default (clean render) so existing callers are
+        # unchanged; the perception/autonomy tools opt in.
+        self.camera_degrade = False
+        self.water_params = None
+        self._cam_rng = np.random.default_rng(0)
 
         self.reset()
 
@@ -171,20 +180,55 @@ class UmiusiSimulator:
         }
 
     # -- perception ------------------------------------------------------------
-    def render_camera(self, camera="front_cam", width=320, height=240):
+    def render_camera(self, camera="front_cam", width=320, height=240, degrade=None, water_params=None):
         """Return an (H, W, 3) uint8 RGB image from an onboard MJCF camera.
 
         Optional and self-contained: it reads the current physics state but does not
         advance or alter it. A mujoco.Renderer is created lazily and cached (re-created
         only if width/height change). Headless use needs an offscreen GL backend, e.g.
         `MUJOCO_GL=egl` (or osmesa) in the environment; a GUI/desktop GL context works too.
+
+        If ``degrade`` (or ``self.camera_degrade`` when ``degrade is None``) is True, the frame is
+        passed through the physically-based underwater degradation (``perception.underwater_sim``)
+        using the camera's depth buffer, so the perception input looks like real murky footage —
+        distant red darkens/blues out, haze builds with distance. The water condition is
+        ``water_params`` (or ``self.water_params``, or a moderately-murky default) — fixed for the
+        run so the cast is stable; per-frame noise/caustics still vary.
         """
         if self._renderer is None or (self._renderer.width, self._renderer.height) != (width, height):
             if self._renderer is not None:
                 self._renderer.close()
             self._renderer = mujoco.Renderer(self.model, height=height, width=width)
-        self._renderer.update_scene(self.data, camera=camera)
-        return self._renderer.render()
+        degrade = self.camera_degrade if degrade is None else degrade
+        # Perception mode hides site/decoration markers (e.g. the pin_tip glyph) so only real geoms
+        # show — a clean onboard view. Off-path (clean) keeps the default option for existing callers.
+        opt = self._perception_scene_option() if degrade else None
+        self._renderer.update_scene(self.data, camera=camera, scene_option=opt)
+        rgb = self._renderer.render()
+        if not degrade:
+            return rgb
+        from .perception import underwater_sim as us
+        self._renderer.enable_depth_rendering()
+        self._renderer.update_scene(self.data, camera=camera, scene_option=opt)
+        depth = self._renderer.render()
+        self._renderer.disable_depth_rendering()
+        params = water_params or self.water_params or us.WaterParams()
+        return us.degrade(rgb, depth, params, self._cam_rng)
+
+    def _perception_scene_option(self):
+        """Cached MjvOption for the perception camera: render real geoms only (no site/decoration
+        glyphs — the pin_tip site would otherwise show as a marker in the onboard view)."""
+        opt = getattr(self, "_perc_opt", None)
+        if opt is None:
+            opt = mujoco.MjvOption()
+            opt.sitegroup[:] = 0  # no site markers
+            for flag in ("mjVIS_CAMERA", "mjVIS_LIGHT", "mjVIS_JOINT", "mjVIS_ACTUATOR",
+                         "mjVIS_CONTACTPOINT", "mjVIS_CONTACTFORCE", "mjVIS_INERTIA", "mjVIS_COM"):
+                idx = getattr(mujoco.mjtVisFlag, flag, None)
+                if idx is not None:
+                    opt.flags[idx] = 0
+            self._perc_opt = opt
+        return opt
 
 
 if __name__ == "__main__":

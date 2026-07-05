@@ -14,7 +14,8 @@ Model (Jaffe-McGlamery / Sea-thru, simplified, per-pixel using depth):
   * ``t_c``   per-channel transmission. Red water-absorption coefficient is the LARGEST
               (beta_red > beta_green > beta_blue), so distant red darkens toward the water colour
               first — exactly why red balloons (+30) read as dark/blue in real footage.
-  * ``B_c``   veiling / backscatter colour (blue-green): what a distant pixel (t->0) fades to.
+  * ``B_c``   veiling / backscatter colour (green-grey, matching the turbid competition pool): what a
+              distant pixel (t->0) fades to.
 
 On top of that base image, optional, physically-motivated nuisances (each toggled + scaled by
 ``params``): turbidity blur (depth-scaled), backscatter shot noise, caustics (low-freq light
@@ -43,7 +44,7 @@ class WaterParams:
     beta_*  : per-channel attenuation [1/m]. beta_red > beta_green > beta_blue (red dies first).
               Bigger => murkier / shorter visibility. Clear water ~ (0.25, 0.06, 0.03);
               murky pool ~ (1.2, 0.5, 0.35).
-    B       : backscatter/veiling colour in [0,1] RGB — the blue-green a far pixel fades to.
+    B       : backscatter/veiling colour in [0,1] RGB — the green-grey a far pixel fades to.
     turbidity      : depth-scaled gaussian blur strength (0 = off). Distant pixels blur more.
     backscatter_noise : std (in 0..255 units) of veiling shot noise, scaled by (1-t).
     caustics       : amplitude in [0,1] of the low-freq sinusoidal light ripple (0 = off).
@@ -52,18 +53,25 @@ class WaterParams:
     wb_gain        : per-channel white-balance multiplier (camera colour cast).
     murk           : the [0,1] difficulty level this condition was sampled at (0 = clear, 1 = murky);
                      recorded for per-condition stratification/reporting.
+    cast           : the [0,1] water-COLOUR hue this frame was sampled at (0 = blue-green,
+                     ~0.5 = green-grey like the real pool, 1 = murky yellow-green). Randomized per
+                     frame so the training set spans casts (domain randomization). Recorded for eval.
+    cast_sat       : the [0,1] saturation of that cast (0 = near-neutral grey, 1 = strongly cast).
     """
 
-    beta: np.ndarray = field(default_factory=lambda: np.array([0.85, 0.40, 0.28]))
-    B: np.ndarray = field(default_factory=lambda: np.array([0.12, 0.30, 0.34]))
+    beta: np.ndarray = field(default_factory=lambda: np.array([0.85, 0.30, 0.36]))
+    B: np.ndarray = field(default_factory=lambda: np.array([0.14, 0.32, 0.30]))
     turbidity: float = 0.6
     backscatter_noise: float = 6.0
     caustics: float = 0.10
     caustics_freq: float = 4.0
+    particles: float = 0.0
     reflection: float = 0.25
     exposure: float = 1.0
     wb_gain: np.ndarray = field(default_factory=lambda: np.array([1.0, 1.0, 1.0]))
     murk: float = 0.5
+    cast: float = 0.5
+    cast_sat: float = 0.6
 
     def __post_init__(self):
         self.beta = np.asarray(self.beta, dtype=np.float64).reshape(3)
@@ -71,27 +79,55 @@ class WaterParams:
         self.wb_gain = np.asarray(self.wb_gain, dtype=np.float64).reshape(3)
 
 
-# Water condition is sampled along a single UNIFORM "murk" axis (0 = clear, 1 = murky) so difficulty
-# spreads evenly easy->hard (NOT biased toward murky): beta/B/turbidity/noise interpolate between a
-# CLEAR and a MURKY endpoint. Other nuisances (caustics/exposure/white-balance/reflection) are drawn
-# independently. Endpoints bracket real competition-pool footage.
-CLEAR = {  # murk = 0
-    "beta": np.array([0.30, 0.10, 0.06]),
-    "B": np.array([0.06, 0.20, 0.26]),
-    "turbidity": 0.05,
-    "backscatter_noise": 2.0,
-}
-MURKY = {  # murk = 1
-    "beta": np.array([1.35, 0.60, 0.42]),
-    "B": np.array([0.15, 0.36, 0.42]),
-    "turbidity": 1.4,
-    "backscatter_noise": 12.0,
-}
+# TWO independent random axes per frame:
+#  (1) MURK  in [0,1] — difficulty / magnitude: sets attenuation strength, turbidity blur, veiling
+#      noise and veil brightness (0 = clear, 1 = murky). Endpoints bracket real pool footage.
+#  (2) CAST  in [0,1] — water COLOUR hue, sampled INDEPENDENTLY so the veil colour is randomized per
+#      frame (domain randomization). This is the real fix for the Round-1 failure where the detector
+#      keyed on an absolute "blue == water" cast: the training set now spans casts, so the model must
+#      become colour-INVARIANT. cast=0 -> blue-green (ocean-like), ~0.5 -> green-grey (the real v1b
+#      pool), 1 -> murky yellow-green. The attenuation `beta` green/blue balance is made CONSISTENT
+#      with the cast (bluer water => blue penetrates => beta_blue smallest; greener/turbid water =>
+#      green penetrates => beta_green smallest), but beta_RED is ALWAYS the largest (red dies first:
+#      physical). A per-frame SATURATION (some frames strongly cast, some near-neutral grey) breaks
+#      any residual colour key.
+CLEAR = {"beta_red": 0.30, "turbidity": 0.05, "backscatter_noise": 2.0, "veil_val": 0.20}  # murk 0
+MURKY = {"beta_red": 1.35, "turbidity": 1.40, "backscatter_noise": 12.0, "veil_val": 0.46}  # murk 1
+
+# Unit-peak veil chromaticity anchors along the cast arc (blue-green <-> green-grey <-> yellow-green).
+_VEIL_BLUE = np.array([0.34, 0.72, 1.00])   # cast 0.0  bluer-green / cyan (ocean-like)
+_VEIL_GREY = np.array([0.60, 1.00, 0.86])   # cast 0.5  green-grey (real competition pool)
+_VEIL_YGRN = np.array([0.82, 1.00, 0.52])   # cast 1.0  murky yellow-green
+
+
+def _veil_chroma(cast: float) -> np.ndarray:
+    """Unit-peak veil chromaticity along the blue<->green-grey<->yellow-green arc (cast in [0,1])."""
+    if cast < 0.5:
+        c = _VEIL_BLUE * (1 - 2 * cast) + _VEIL_GREY * (2 * cast)
+    else:
+        c = _VEIL_GREY * (2 - 2 * cast) + _VEIL_YGRN * (2 * cast - 1)
+    return c / c.max()
+
+
+def cast_bucket(cast: float | None) -> str:
+    """Bucket a cast hue for eval stratification: blue / green_grey / yellow_green (None -> clean)."""
+    if cast is None:
+        return "clean"
+    if cast < 0.34:
+        return "blue"
+    if cast < 0.67:
+        return "green_grey"
+    return "yellow_green"
+
+
 DR_RANGES = {
-    "caustics": (0.0, 0.18),          # ripple amplitude; 0 => off
-    "caustics_freq": (2.5, 6.0),      # ripples across the frame
+    "caustics": (0.0, 0.28),          # ripple amplitude; 0 => off (widened for more variety)
+    "caustics_freq": (2.5, 7.0),      # ripples across the frame (widened)
+    "particles": (0.0, 0.6),          # suspended-particle / marine-snow speck strength (0 => off)
     "exposure": (0.75, 1.20),         # global gain
     "wb_jitter": 0.12,                 # +/- fraction per channel around 1.0
+    "cast_sat": (0.15, 1.0),           # veil colour saturation (0.15 = near-grey, 1.0 = strong cast)
+    "veil_val_jitter": 0.15,           # +/- fraction on veil brightness around the murk-set value
     # --- water-surface reflection distractor (the #1 false-detection source: mirrored balloons on
     # the underside of the surface). STRONG + almost always present so the detector learns them as
     # HARD NEGATIVES. Reflections are geometric (a mirrored-camera render, see gen_sim_dataset) and
@@ -110,14 +146,24 @@ DR_RANGES = {
 # some murkier frames for robustness.
 MURK_CENTRE = 0.57
 MURK_STD = 0.18
+# Cast (water COLOUR hue) is sampled around green-grey (the real v1b look) but with a WIDE spread so
+# every frame gets a different cast and the tails reach blue-green and yellow-green — the training
+# distribution spans casts (domain randomization) so the detector cannot key on an absolute colour.
+CAST_CENTRE = 0.50
+CAST_STD = 0.30
 
 
-def random_params(rng: np.random.Generator, murk: float | None = None) -> WaterParams:
-    """Sample a ``WaterParams``; difficulty ``murk`` in [0,1] (0=clear, 1=murky).
+def random_params(
+    rng: np.random.Generator, murk: float | None = None, cast: float | None = None
+) -> WaterParams:
+    """Sample a ``WaterParams``; ``murk`` in [0,1] (difficulty) and ``cast`` in [0,1] (colour hue).
 
-    beta/B/turbidity/noise are linearly interpolated CLEAR<->MURKY by ``murk``. Default draws murk from
-    a normal centred at MURK_CENTRE (realistic level) so difficulty clusters around "just right" with
-    clearer/murkier tails. caustics/exposure/white-balance/reflection are drawn independently.
+    ``murk`` sets magnitude (attenuation strength / turbidity / noise / veil brightness), drawn from a
+    normal centred at MURK_CENTRE. ``cast`` sets the water COLOUR — the veil hue AND the beta green/blue
+    balance — drawn INDEPENDENTLY from a wide normal centred at CAST_CENTRE (green-grey), so casts span
+    blue-green<->green-grey<->yellow-green per frame. beta_red is always the largest (red dies first).
+    A per-frame saturation randomizes how strongly cast vs near-grey each frame is.
+    caustics/exposure/white-balance/reflection are drawn independently.
     """
     def u(key):
         lo, hi = DR_RANGES[key]
@@ -125,17 +171,38 @@ def random_params(rng: np.random.Generator, murk: float | None = None) -> WaterP
 
     m = (float(np.clip(rng.normal(MURK_CENTRE, MURK_STD), 0.03, 0.97))
          if murk is None else float(np.clip(murk, 0.0, 1.0)))
-    beta = CLEAR["beta"] * (1 - m) + MURKY["beta"] * m   # already ordered red>green>blue at both ends
-    B = CLEAR["B"] * (1 - m) + MURKY["B"] * m
+    c = (float(np.clip(rng.normal(CAST_CENTRE, CAST_STD), 0.0, 1.0))
+         if cast is None else float(np.clip(cast, 0.0, 1.0)))
+
+    # Attenuation: red magnitude from murk; green/blue balance from the cast. bluer water (c->0) =>
+    # blue penetrates (beta_blue smallest); greener/turbid water (c->1) => green penetrates
+    # (beta_green smallest). beta_red is ALWAYS the largest.
+    red = CLEAR["beta_red"] * (1 - m) + MURKY["beta_red"] * m
+    frac_g = 0.50 - 0.20 * c    # 0.50 (blue water) -> 0.30 (green water)
+    frac_b = 0.30 + 0.28 * c    # 0.30 (blue water) -> 0.58 (green water)
+    beta = np.array([red, red * frac_g, red * frac_b])
+
+    # Veil colour: chromaticity from the cast hue, desaturated toward grey by a per-frame saturation,
+    # brightness from murk (murkier => brighter veil).
+    sat = u("cast_sat")
+    chroma = _veil_chroma(c)
+    chroma = (1 - sat) * chroma.mean() + sat * chroma       # desaturate toward grey
+    vj = DR_RANGES["veil_val_jitter"]
+    veil_val = (CLEAR["veil_val"] * (1 - m) + MURKY["veil_val"] * m) * (1.0 + rng.uniform(-vj, vj))
+    B = chroma * veil_val
+
     turbidity = CLEAR["turbidity"] * (1 - m) + MURKY["turbidity"] * m
     noise = CLEAR["backscatter_noise"] * (1 - m) + MURKY["backscatter_noise"] * m
     j = DR_RANGES["wb_jitter"]
     wb = 1.0 + rng.uniform(-j, j, size=3)
     reflection = u("reflection") if rng.random() < DR_RANGES["reflection_prob"] else 0.0
+    # suspended particles: present on ~half the frames, denser in murkier water.
+    particles = u("particles") * (0.5 + 0.5 * m) if rng.random() < 0.5 else 0.0
     return WaterParams(
         beta=beta, B=B, turbidity=turbidity, backscatter_noise=noise,
-        caustics=u("caustics"), caustics_freq=u("caustics_freq"),
+        caustics=u("caustics"), caustics_freq=u("caustics_freq"), particles=particles,
         reflection=reflection, exposure=u("exposure"), wb_gain=wb, murk=m,
+        cast=c, cast_sat=sat,
     )
 
 
@@ -176,6 +243,25 @@ def _depth_scaled_blur(img: np.ndarray, depth_norm: np.ndarray, strength: float)
         if m.any():
             out[m] = blurred[i][m] * (1 - frac[m]) + blurred[i + 1][m] * frac[m]
     return out
+
+
+def _add_particles(img: np.ndarray, t: np.ndarray, strength: float,
+                   rng: np.random.Generator) -> np.ndarray:
+    """Sprinkle suspended-particle specks (marine snow) onto a float image in-place-ish.
+
+    Mostly small BRIGHT motes (lit backscatter) with a few darker flecks, denser where the water is
+    more veiled (weight by the veiling fraction 1 - t). ``strength`` in [0,1] sets density/contrast.
+    Cheap: a sparse random mask, softened once. Boxes are untouched (pixels don't move).
+    """
+    h, w = img.shape[:2]
+    veil = (1.0 - t).mean(axis=2)                     # 0 near, ->1 far
+    density = 0.0008 + 0.010 * strength               # fraction of pixels seeded
+    seed = rng.random((h, w))
+    thresh = density * (0.3 + 0.7 * veil)             # more specks in the far/veiled region
+    bright = (seed < thresh).astype(np.float64)
+    dark = (seed > 1.0 - 0.25 * thresh).astype(np.float64)
+    speck = _gaussian_blur((bright - 0.6 * dark)[..., None] * np.ones((1, 1, 3)), 0.6)
+    return img + speck * (0.35 + 0.5 * strength)
 
 
 def _caustics(shape, amp: float, freq: float, rng: np.random.Generator) -> np.ndarray:
@@ -254,6 +340,12 @@ def degrade(
         noise = rng.normal(0.0, params.backscatter_noise / 255.0, img.shape) * veil
         img = img + noise
 
+    # 5b) suspended particles / marine snow — sparse bright specks (lit backscatter motes) plus a few
+    # darker flecks, denser in the veiled (far) region. A common real-footage distractor; adds
+    # texture the detector must ignore. Pixel positions unchanged => boxes stay exact.
+    if params.particles > 0:
+        img = _add_particles(img, t, params.particles, rng)
+
     # 6) exposure / white-balance (camera gain + colour cast)
     img = img * params.exposure * params.wb_gain.reshape(1, 1, 3)
 
@@ -327,9 +419,9 @@ def apply_surface_reflection(clean_rgb, reflection_rgb, reflect_mask, B, strengt
 def preset(name: str) -> WaterParams:
     """Named difficulty dials: 'clear' | 'moderate' | 'murky'."""
     if name == "clear":
-        return WaterParams(beta=np.array([0.30, 0.10, 0.06]), B=np.array([0.06, 0.20, 0.26]),
+        return WaterParams(beta=np.array([0.30, 0.09, 0.11]), B=np.array([0.10, 0.24, 0.22]),
                            turbidity=0.15, backscatter_noise=2.0, caustics=0.06, reflection=0.10)
     if name == "murky":
-        return WaterParams(beta=np.array([1.30, 0.58, 0.42]), B=np.array([0.14, 0.34, 0.40]),
+        return WaterParams(beta=np.array([1.30, 0.50, 0.62]), B=np.array([0.26, 0.44, 0.38]),
                            turbidity=1.3, backscatter_noise=11.0, caustics=0.15, reflection=0.35)
     return WaterParams()  # moderate
