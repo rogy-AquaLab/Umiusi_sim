@@ -229,7 +229,8 @@ def main():
         live-viewer step_fn so both drive the vehicle identically."""
         nonlocal score, n_frames_with_det, n_perc_ticks
         i = step_ctr[0]
-        if held["rgb"] is None or i % perc_stride == 0:  # perception tick: re-render + re-detect
+        fresh = held["rgb"] is None or i % perc_stride == 0
+        if fresh:  # perception tick: re-render + re-detect
             held["rgb"] = sim.render_camera("front_cam", width=CAM_W, height=CAM_H, degrade=True)
             held["dets"] = detector(held["rgb"])
             n_perc_ticks += 1
@@ -242,7 +243,8 @@ def main():
         st = sim.get_state()
         fwd = sim.data.xmat[sim.base_id].reshape(3, 3) @ np.array([1.0, 0.0, 0.0])  # +X = pin axis
         heading = float(np.arctan2(fwd[2], fwd[0]))  # world heading for the search sweep
-        cmd, info = behavior.step(detections, float(st["ang_vel"][1]), heading=heading, dt=control_dt)
+        cmd, info = behavior.step(detections, float(st["ang_vel"][1]), heading=heading,
+                                  dt=control_dt, fresh=fresh)
         state_counts[info["state"]] = state_counts.get(info["state"], 0) + 1
         if info["state"] != last_state[0]:  # print each FSM transition (visible in --render too)
             tgt = "" if info["target"] is None else f"  ({info['target']} @ {info['range']:.2f} m)"

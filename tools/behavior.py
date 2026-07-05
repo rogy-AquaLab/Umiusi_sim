@@ -43,11 +43,21 @@ from dataclasses import dataclass, field
 
 POSITIVE_COLOURS = ("red", "yellow")
 
+# --- detection range gate + target-selection bands (rule-based, NOT a reward) ------------------
+# Detections beyond MAX_TARGET_RANGE are DROPPED: they are mostly false positives (the detector's
+# far recall is poor) and unreachable anyway — gating them cuts the noise and focuses the FSM on
+# balloons it can actually reach. Selection then uses two clear range bands (see ``_pick_target``):
+#   NEAR (<= NEAR_RANGE): take the NEAREST positive — a near yellow is a bird in the hand.
+#   MID  (NEAR_RANGE .. MAX_TARGET_RANGE): prefer the nearest RED only (the +30 justifies the harder
+#         far approach); do NOT commit to a far yellow (+10 isn't worth a long, low-success approach).
+MAX_TARGET_RANGE = 4.5    # m; ignore any detection beyond this (far FP noise + unreachable)
+NEAR_RANGE = 2.5          # m; "bird in the hand" band: chase the nearest positive of any colour
+
 # --- drive gains (feed-forward command convention; mirrors competition_run) -------------------
 SPEED_CAP = 0.35          # max surge/heave command magnitude ("modest speed")
 KP_YAW = 1.1              # yaw P gain: yaw command per radian of bearing error
 KD_YAW = 0.15             # yaw D gain (damps the measured yaw rate)
-KP_HEAVE = 1.3            # heave P gain: command per radian of target elevation error (get to depth)
+KP_HEAVE = 1.4            # heave P gain: command per radian of target elevation error (get to depth)
 FACE_TOL = math.radians(45.0)   # surge hard only once within this bearing error (APPROACH)
 # --- SEARCH / exploration ---------------------------------------------------------------------
 SEARCH_YAW = 0.5          # in-place yaw-sweep rate command
@@ -57,30 +67,99 @@ SCAN_RATE = 1.5           # rad/s of the height-scan oscillation
 TRANSLATE_STEPS = 50      # steps (~1 s @50 Hz) to translate before the next sweep
 # --- closeness by BBOX (more reliable than the noisy range estimate) --------------------------
 ALIGN_BBOX = 0.18         # bbox height / frame >= this -> close: start the slow centred ALIGN
-RAM_COMMIT_BBOX = 0.26    # ...and >= this AND centred -> commit to the RAM
+RAM_COMMIT_BBOX = 0.26    # ...and >= this AND centred (and settled) -> commit to the RAM
 RAM_MAX_STEPS = 85        # committed and still visible this long (never popped) -> treat as a MISS
 PASS_PEAK_BBOX = 0.45     # a "clearly passed it" MISS needs the balloon to have filled this much...
 PASS_DROP_FRAC = 0.5      # ...then shrunk below this fraction of that peak while STILL visible
-CENTRE_AZ = math.radians(8.0)   # "centred" = bearing within this...
-CENTRE_EL = math.radians(11.0)  # ...and elevation within this (head-on enough for the 25° pin cone)
+CENTRE_AZ = math.radians(6.0)   # "centred" = bearing within this (tighter -> more head-on hits)...
+CENTRE_EL = math.radians(6.0)   # ...and elevation within this. Tight because the pin sits ~0.3 m
+#                           ahead of the camera, so a small el at commit grows into a vertical MISS
+#                           over the blind lunge; camera + pin are near co-located (both y~0.1 m), so
+#                           a truly el~0 approach puts the pin ON the balloon.
+COMMIT_EL = math.radians(12.0)  # elevation band to COMMIT to the ram: looser than CENTRE_EL because
+#                           the el-scaled surge (below) already refuses to close fast while off-depth,
+#                           so committing early is safe and lets the drive-THROUGH lunge fire even on
+#                           the tall (1.5 m) yellows that rarely settle inside CENTRE_EL.
 ALIGN_CREEP = 0.12        # small forward creep while aligning (keeps closing as it centres)
-ALIGN_TIMEOUT = 90        # steps stuck in ALIGN un-centred -> REPOSITION (back off, new line)
+ALIGN_TIMEOUT = 110       # steps stuck in ALIGN un-centred -> REPOSITION (back off, new line)
+# --- final ALIGN -> settle -> lunge (raise the head-on physical-hit rate) ----------------------
+# The pin tip sits ~0.3 m ahead of the camera, so a balloon "popped" (pin within ~0.13 m of centre)
+# is reached only AFTER the camera range drops well below the RAM-commit range — by which point the
+# balloon has filled / left the frame and the detector drops it. So once centred + close we (a)
+# SETTLE briefly (near-stationary, drive az/el to ~0) to kill approach overshoot, then (b) LUNGE
+# straight in at full surge and DRIVE THROUGH the sight-loss for LUNGE_STEPS to actually make
+# contact BEFORE backing off to judge pop vs miss. Without the drive-through the pin never lands.
+# Forward surge is SCALED DOWN when off-depth so the vehicle matches the balloon's HEIGHT first
+# (climb/descend toward it) and only then closes level — the pin then reaches the balloon's front
+# face head-on instead of passing under/over it while still changing depth (the single biggest
+# head-on-hit lever for the tall 1.5 m yellows). Full surge at |el| <= EL_FULL_SURGE, tapering to
+# EL_MIN_SURGE by EL_ZERO_SURGE. Because heave (KP_HEAVE) is far stronger than the floored surge,
+# depth still converges first even at the floor — the floor just keeps closing so throughput (esp.
+# on the low reds, which approach fine) is not sacrificed. Smooth taper, never a hard stall.
+EL_FULL_SURGE = math.radians(5.0)
+EL_ZERO_SURGE = math.radians(14.0)
+EL_MIN_SURGE = 0.35       # surge floor (fraction) when far off-depth — keep approaching, just slower
+SETTLE_STEPS = 3          # hold centred + near-stationary this long before the lunge (kill overshoot);
+#                           kept short so we commit before the close-range detector flicker aborts us
+LUNGE_STEPS = 26          # after commit, keep driving straight in (even blind) this long to reach contact
+RAM_SURGE = 0.26          # committed-approach surge: LESS than SPEED_CAP so heave has time to drive
+#                           el->0 (get the pin to the balloon's HEIGHT) BEFORE the pin reaches the
+#                           balloon plane — a full-surge lunge overshoots in x and the pin passes
+#                           UNDER a tall balloon (a vertical/glancing miss, not a head-on pop).
 # --- recover / confirm / give-up --------------------------------------------------------------
 RECOVER_SURGE = 0.28      # reverse speed while backing off a missed ram
 RECOVER_STEPS = 30        # steps (~0.6 s) to back off before re-aligning
-CONFIRM_FRAMES = 26       # target gone this many frames while backing off a ram -> camera POP
-CONFIRM_SURGE = 0.30      # firm reverse during CONFIRM: a merely-passed (not popped) balloon must
+CONFIRM_FRAMES = 55       # target gone this many frames while backing off a ram -> camera POP. Long
+#                           (~0.8 m back-off) so a merely out-of-frame / passed balloon RE-ENTERS the
+#                           view (-> MISS); only a truly popped (hidden) one stays gone -> POP. A
+#                           longer back-off only converts FALSE pops to honest misses, never the
+#                           reverse, so it strictly improves camera-confirmed-pop accuracy.
+CONFIRM_SURGE = 0.34      # firm reverse during CONFIRM: a merely-passed (not popped) balloon must
 #                           come BACK into view (-> re-associates -> MISS); only a truly popped
 #                           (hidden) one stays gone the whole back-off -> confirmed pop.
-MAX_ATTEMPTS = 4          # ram attempts on one target before abandoning it
+CONFIRM_MIN_PEAK = RAM_COMMIT_BBOX  # only believe a POP if we actually got to ram range (else the
+#                           disappearance is an out-of-frame / detector dropout, not a real pop).
+CONFIRM_EDGE = math.radians(18.0)   # ...and only if the target was near-CENTRED (not drifting to a
+#                           frame edge) when it vanished: a real head-on pop disappears from the
+#                           CENTRE; a tall balloon we passed under leaves toward the TOP edge (large
+#                           |el|) -> that is a MISS, not a pop. Kills false "popped a tall yellow".
+MAX_ATTEMPTS = 6          # ram attempts on one target before abandoning it (retry a near one more)
 MAX_PURSUIT_STEPS = 500   # ~10 s pursuing one target before abandoning it
+# --- give-up memory (don't get TRAPPED on an unreachable colour) -------------------------------
+# ``_attempts`` resets whenever we briefly lose then re-acquire a target, so on its own it can never
+# abandon a balloon we keep re-locking (e.g. a near tall yellow the pin can't reach — bird in the
+# hand that turns out to be a stone). A per-COLOUR failure count PERSISTS across re-acquires: after
+# GIVEUP_FAILS misses on a colour we SUPPRESS it for SUPPRESS_STEPS so selection falls through to a
+# reachable alternative (usually the red), then re-allow it. We still TRY the near bird-in-hand
+# first — this only stops us looping on it forever when it won't pop.
+GIVEUP_FAILS = 4          # misses on one colour (across re-acquires) before we look elsewhere
+SUPPRESS_STEPS = 350      # ~7 s to prefer other colours after giving up on one
 # --- blue avoidance ---------------------------------------------------------------------------
 AVOID_AZ = math.radians(28.0)   # a blue within this bearing of dead-ahead is "in the way"
 AVOID_RANGE = 1.6         # ...and closer than this -> steer around it
 AVOID_YAW = 0.5           # avoidance yaw magnitude added away from the blue
 # --- temporal track ---------------------------------------------------------------------------
-LOCK_HOLD_STEPS = 8       # bridge detector dropouts: a track is "alive" until this many misses
+LOCK_HOLD_STEPS = 12      # bridge detector dropouts: a track is "alive" until this many misses (the
+#                           learned detector flickers badly on a LARGE, close balloon -> hold longer
+#                           so we can commit + lunge through the dropout instead of aborting)
 ASSOC_BEARING = math.radians(14.0)  # associate a detection to the track if within this bearing
+# --- multi-frame voting for ACQUISITION (kill flickery false positives, esp. yellow) ----------
+# A positive detection must be VOTED IN over several perception frames before the FSM will lock
+# onto it. Flickery one-frame FPs never accumulate enough votes, so they can't steer selection;
+# this also stabilises which balloon we commit to. Votes advance only on FRESH perception frames
+# (``step(..., fresh=True)``) — not on the held frames between detector ticks.
+ACQUIRE_VOTES = 3         # a candidate must be seen in this many recent perception frames to lock on
+VOTE_MAX = 6              # cap so a long-lived candidate re-acquires fast but can still decay away
+
+
+@dataclass
+class _Cand:
+    """A voting candidate positive balloon (a would-be target, before it earns a lock)."""
+    colour: str
+    az: float
+    el: float
+    det: object                     # latest Detection associated to this candidate
+    votes: int = 1
 
 
 @dataclass
@@ -106,6 +185,8 @@ class BalloonBehavior:
     dt: float = 0.02
     state: str = "SEARCH"
     trk: _Track = field(default_factory=_Track)
+    cands: list = field(default_factory=list)   # voting candidates (acquisition FP rejection)
+    fails: dict = field(default_factory=dict)   # per-colour persistent miss count (give-up memory)
     # search / sweep
     _swept: float = 0.0
     _sweep_dir: float = 1.0
@@ -116,10 +197,13 @@ class BalloonBehavior:
     _pursuit_steps: int = 0
     _attempts: int = 0
     _align_steps: int = 0
+    _settle_steps: int = 0          # steps held centred+still before the lunge (overshoot kill)
     _committed: bool = False        # have we committed to ramming this target?
-    _ram_steps: int = 0             # steps since the current RAM commit
+    _ram_steps: int = 0             # steps since the current RAM commit (align-loss lunge counts too)
     _recover_steps: int = 0
     _confirm_frames: int = 0
+    _suppress_colour: str = ""      # colour currently suppressed by the give-up memory
+    _suppress_steps: int = 0        # steps left on that suppression
     # stats (for the run report)
     n_ram: int = 0
     n_recover: int = 0
@@ -128,10 +212,60 @@ class BalloonBehavior:
     n_miss: int = 0
 
     # -- detection selection / association -----------------------------------------------------
-    def _pick_target(self, dets):
-        """Acquire the nearest red/yellow = the LARGEST apparent (biggest bbox area)."""
-        pos = [d for d in dets if d.colour in POSITIVE_COLOURS]
-        return max(pos, key=lambda d: d.area_px) if pos else None
+    def _vote(self, dets):
+        """Advance the acquisition vote map on a FRESH perception frame (``dets`` already range-gated).
+
+        Each positive detection reinforces (or spawns) a candidate matched by colour + bearing;
+        candidates not seen this frame decay. Only candidates with >= ACQUIRE_VOTES are eligible to
+        become a target, so a flickery one-frame false positive can never steer selection."""
+        seen = []
+        for d in dets:
+            if d.colour not in POSITIVE_COLOURS:
+                continue
+            c = self._match_cand(d)
+            if c is None:
+                c = _Cand(d.colour, d.bearing[0], d.bearing[1], d, 0)
+                self.cands.append(c)
+            c.colour, c.az, c.el, c.det = d.colour, d.bearing[0], d.bearing[1], d
+            c.votes = min(VOTE_MAX, c.votes + 1)
+            seen.append(id(c))
+        for c in self.cands:
+            if id(c) not in seen:
+                c.votes -= 1
+        self.cands = [c for c in self.cands if c.votes > 0]
+
+    def _match_cand(self, d):
+        """The existing candidate matching detection ``d`` (same colour, closest bearing in gate)."""
+        best, best_d = None, ASSOC_BEARING
+        for c in self.cands:
+            if c.colour != d.colour:
+                continue
+            dd = math.hypot(d.bearing[0] - c.az, d.bearing[1] - c.el)
+            if dd < best_d:
+                best, best_d = c, dd
+        return best
+
+    def _pick_target(self):
+        """Rule-based selection over VOTED candidates (two clear range bands; no learning/reward):
+          NEAR (range <= NEAR_RANGE): the NEAREST positive of ANY colour — a near yellow is easy,
+              guaranteed points, a bird in the hand.
+          MID  (NEAR_RANGE .. MAX_TARGET_RANGE): the nearest RED only — the +30 justifies a harder
+              far approach; a far yellow (+10) is NOT worth the long, low-success run, so skip it.
+          Blue is never a candidate (only POSITIVE_COLOURS are voted). Returns a Detection or None."""
+        eligible = [c for c in self.cands if c.votes >= ACQUIRE_VOTES]
+        if not eligible:
+            return None
+        if self._suppress_steps > 0 and self._suppress_colour:  # give-up memory: try other colours
+            eligible = [c for c in eligible if c.colour != self._suppress_colour]
+            if not eligible:
+                return None     # only the given-up colour is in view -> SEARCH (turn) for the rest
+        near = [c for c in eligible if c.det.range_m <= NEAR_RANGE]
+        if near:
+            return min(near, key=lambda c: c.det.range_m).det   # bird in the hand: nearest positive
+        reds = [c for c in eligible if c.colour == "red"]       # mid-range: only red is worth it
+        if reds:
+            return min(reds, key=lambda c: c.det.range_m).det
+        return None                                             # only far yellows left -> keep looking
 
     def _associate(self, dets):
         """The detection matching the current track (same colour, closest bearing within gate)."""
@@ -182,7 +316,20 @@ class BalloonBehavior:
         self._pursuit_steps = 0
         self._attempts = 0
         self._align_steps = 0
+        self._settle_steps = 0
         self._committed = False
+
+    def _register_fail(self):
+        """Record a miss/abandon on the current target's COLOUR (persists across re-acquires). After
+        GIVEUP_FAILS on a colour, suppress it briefly so selection tries a reachable alternative."""
+        c = self.trk.colour
+        if not c:
+            return
+        self.fails[c] = self.fails.get(c, 0) + 1
+        if self.fails[c] >= GIVEUP_FAILS:
+            self._suppress_colour = c
+            self._suppress_steps = SUPPRESS_STEPS
+            self.fails[c] = 0
 
     def _start_sweep(self):
         """(Re)start an in-place sweep, biased toward where the target was last seen."""
@@ -207,6 +354,7 @@ class BalloonBehavior:
     def _abandon(self):
         """Give up a stubborn target: reset pursuit, search AWAY from it (flip + translate)."""
         self.n_abandon += 1
+        self._register_fail()                # abandoning also feeds the give-up memory for its colour
         self._reset_pursuit()
         self.state = "SEARCH"
         self._start_sweep()
@@ -215,10 +363,20 @@ class BalloonBehavior:
         self._clear_track()
 
     # -- main tick -----------------------------------------------------------------------------
-    def step(self, detections, yaw_rate, heading=0.0, dt=None):
-        """Return (command, info). command = {surge, heave, yaw}. Camera-only decisions."""
+    def step(self, detections, yaw_rate, heading=0.0, dt=None, fresh=True):
+        """Return (command, info). command = {surge, heave, yaw}. Camera-only decisions.
+
+        ``fresh`` is True on a fresh perception frame and False when the caller is re-driving on the
+        HELD detections between detector ticks — acquisition votes advance only on fresh frames."""
         dt = self.dt if dt is None else dt
+        # RANGE GATE: drop far detections (mostly false positives + unreachable) up front so every
+        # downstream decision (voting, track association, blue avoidance) only sees reachable balloons.
+        detections = [d for d in detections if d.range_m <= MAX_TARGET_RANGE]
         avoid_yaw, blue = self._blue_avoidance(detections)
+        if self._suppress_steps > 0:
+            self._suppress_steps -= 1       # give-up memory decays -> the colour becomes eligible again
+        if fresh:
+            self._vote(detections)
 
         # Temporal track update: associate a detection to the current track (or count a miss).
         if self.trk.colour:
@@ -234,9 +392,9 @@ class BalloonBehavior:
         if self.state == "RECOVER":
             return self._recover(yaw_rate, avoid_yaw, blue)
 
-        # Acquire a target when searching.
+        # Acquire a target when searching (rule-based, over voted candidates only).
         if self.state == "SEARCH" or not self.trk.colour:
-            target = self._pick_target(detections)
+            target = self._pick_target()
             if target is None:
                 self.state = "SEARCH"
                 return self._search(yaw_rate, dt, avoid_yaw, blue)
@@ -244,9 +402,16 @@ class BalloonBehavior:
             self._reset_pursuit()
             self.state = "APPROACH"
 
-        # Lost the track while pursuing -> confirm (if committed) or recover.
+        # Lost the track while pursuing. If we had COMMITTED to a ram, keep driving straight in
+        # (blind, on the frozen last bearing) until the lunge window is spent — the pin only reaches
+        # the balloon AFTER it leaves the frame — THEN back off to confirm. Otherwise recover.
         if not self.trk.alive():
             if self._committed:
+                if self.state == "RAM" and self._ram_steps < LUNGE_STEPS:
+                    self._ram_steps += 1  # DRIVE THROUGH the sight-loss to make physical contact
+                    yaw = _clip(KP_YAW * self.trk.az + KD_YAW * yaw_rate, -1, 1)
+                    heave = _clip(KP_HEAVE * self.trk.el, -SPEED_CAP, SPEED_CAP)
+                    return {"surge": RAM_SURGE, "heave": heave, "yaw": yaw}, self._info(blue)
                 self._enter_confirm()
                 return self._confirm(yaw_rate, avoid_yaw, blue)
             self._attempts += 1
@@ -259,7 +424,8 @@ class BalloonBehavior:
             return self._search(yaw_rate, dt, avoid_yaw, blue)
 
         az, el, bbox = self.trk.az, self.trk.el, self.trk.bbox_frac
-        centred = abs(az) < CENTRE_AZ and abs(el) < CENTRE_EL
+        centred = abs(az) < CENTRE_AZ and abs(el) < CENTRE_EL     # head-on enough for a clean pop
+        commit_ok = abs(az) < CENTRE_AZ and abs(el) < COMMIT_EL   # good enough to commit the ram
 
         # RAM in progress: drive straight in. A real pop makes the balloon vanish -> the track is
         # lost -> handled above as CONFIRM. Here we only catch the case where it stayed visible:
@@ -272,23 +438,34 @@ class BalloonBehavior:
             if passed or self._ram_steps > RAM_MAX_STEPS:
                 self.n_miss += 1
                 self._attempts += 1
+                self._register_fail()
                 self._enter_recover()
                 return self._recover(yaw_rate, avoid_yaw, blue)
-            # Tight tracking through the ram (full gains) so it stays head-on to contact.
+            # Tight tracking through the ram (full gains) so it stays head-on to contact; surge is
+            # eased off if depth drifts (el grows) so the pin stays level to the balloon's front face.
             yaw = _clip(KP_YAW * az + KD_YAW * yaw_rate, -1, 1)
             heave = _clip(KP_HEAVE * el, -SPEED_CAP, SPEED_CAP)
-            return {"surge": SPEED_CAP, "heave": heave, "yaw": yaw}, self._info(blue)
+            return {"surge": RAM_SURGE * _el_surge_scale(el), "heave": heave, "yaw": yaw}, self._info(blue)
 
-        # Commit to a RAM: close enough (bbox) AND pointed head-on.
-        if bbox >= RAM_COMMIT_BBOX and centred:
-            self.state = "RAM"
+        # Close enough (bbox) AND pointed head-on: SETTLE briefly (near-stationary, drive az/el to
+        # ~0) to kill approach overshoot, then COMMIT to the RAM lunge. If centring slips during the
+        # settle, fall through to ALIGN and re-earn it.
+        if bbox >= RAM_COMMIT_BBOX and commit_ok:
+            self._settle_steps += 1
             self._committed = True
+            if self._settle_steps < SETTLE_STEPS:
+                self.state = "ALIGN"
+                yaw = _clip(KP_YAW * az + KD_YAW * yaw_rate, -1, 1)
+                heave = _clip(KP_HEAVE * el, -SPEED_CAP, SPEED_CAP)
+                return {"surge": 0.5 * ALIGN_CREEP, "heave": heave, "yaw": yaw}, self._info(blue)
+            self.state = "RAM"
             self._align_steps = 0
             self._ram_steps = 0
             self.n_ram += 1
             yaw = _clip(KP_YAW * az + KD_YAW * yaw_rate, -1, 1)
             heave = _clip(KP_HEAVE * el, -SPEED_CAP, SPEED_CAP)
-            return {"surge": SPEED_CAP, "heave": heave, "yaw": yaw}, self._info(blue)
+            return {"surge": RAM_SURGE, "heave": heave, "yaw": yaw}, self._info(blue)
+        self._settle_steps = 0  # lost closeness/centring -> restart the settle next time
 
         # ALIGN: close but not yet committable -> slow, precisely centre the balloon first.
         if bbox >= ALIGN_BBOX:
@@ -307,17 +484,20 @@ class BalloonBehavior:
                 return self._recover(yaw_rate, avoid_yaw, blue)
             yaw = _clip(KP_YAW * az + KD_YAW * yaw_rate + avoid_yaw, -1, 1)
             heave = _clip(KP_HEAVE * el, -SPEED_CAP, SPEED_CAP)
-            # Creep in unless badly off-bearing (then turn first) or avoiding a blue — keeps closing
-            # (and driving heave toward the balloon's depth) while it refines the centre.
-            surge = 0.0 if (abs(az) > FACE_TOL or blue is not None) else ALIGN_CREEP
+            # Creep in, but scaled down by depth error — level onto the balloon's height first, then
+            # close. Hold entirely if badly off-bearing (turn first) or avoiding a blue.
+            surge = 0.0 if (abs(az) > FACE_TOL or blue is not None) else ALIGN_CREEP * _el_surge_scale(el)
             return {"surge": surge, "heave": heave, "yaw": yaw}, self._info(blue)
 
-        # APPROACH (far): yaw onto the bearing, surge (throttled while mis-pointed), heave to centre.
+        # APPROACH (far): yaw onto the bearing, heave to the target's depth, and surge in — but scale
+        # the surge by depth error too, so a tall/low balloon is met by CLIMBING/DESCENDING to its
+        # height first and only then closing level (otherwise we arrive at its range still off-depth
+        # and the pin passes under/over it). Throttle further while mis-pointed or avoiding a blue.
         self.state = "APPROACH"
         self._align_steps = 0
         yaw = _clip(KP_YAW * az + KD_YAW * yaw_rate + avoid_yaw, -1, 1)
         heave = _clip(KP_HEAVE * el, -SPEED_CAP, SPEED_CAP)
-        surge = SPEED_CAP * max(0.0, math.cos(az))
+        surge = SPEED_CAP * max(0.0, math.cos(az)) * _el_surge_scale(el)
         if abs(az) > FACE_TOL:
             surge *= 0.3
         if blue is not None:
@@ -326,23 +506,39 @@ class BalloonBehavior:
 
     # -- post-ram confirmation (CAMERA-based pop vs miss) --------------------------------------
     def _confirm(self, yaw_rate, avoid_yaw, blue):
-        """Back off gently and watch: the target reappearing = MISS; gone CONFIRM_FRAMES = POP."""
+        """Back off and watch: the target reappearing = MISS; gone CONFIRM_FRAMES = POP.
+
+        A pop is only BELIEVED if we actually reached ram range (peak_bbox >= CONFIRM_MIN_PEAK). A
+        disappearance from a target we never got close to is far more likely an out-of-frame /
+        detector dropout than a real pop, so it is treated as a MISS and retried, not scored — this
+        keeps the camera-confirmed-pop count honest. While backing off we also re-drive heave toward
+        the last elevation so a still-present balloon that left the top of the frame comes back."""
         self._confirm_frames += 1
-        if self.trk.misses == 0:  # a matching detection came back -> it did NOT pop -> MISS
+        # A credible pop: we reached ram range AND the target vanished from the CENTRE (head-on),
+        # not by drifting to a frame edge. Anything else that "stayed gone" is an out-of-frame /
+        # detector dropout -> retry as a MISS rather than claim a false pop.
+        credible = (self.trk.peak_bbox >= CONFIRM_MIN_PEAK
+                    and abs(self.trk.el) <= CONFIRM_EDGE and abs(self.trk.az) <= CONFIRM_EDGE)
+        if self.trk.misses == 0 or (not credible and self._confirm_frames >= CONFIRM_FRAMES):
+            # matching detection came back (MISS), or it wasn't a credible pop and stayed gone.
             self.n_miss += 1
             self._attempts += 1
+            self._register_fail()
             self._enter_recover()
             return self._recover(yaw_rate, avoid_yaw, blue)
-        if self._confirm_frames >= CONFIRM_FRAMES:  # gone long enough -> camera-confirmed POP
+        if self._confirm_frames >= CONFIRM_FRAMES:  # credible AND gone long enough -> camera POP
             self.n_confirmed_pop += 1
+            self.fails.pop(self.trk.colour, None)   # success clears that colour's give-up memory
             self._clear_track()
             self._reset_pursuit()
             self.state = "SEARCH"
             self._start_sweep()
             return self._search(yaw_rate, self.dt, avoid_yaw, blue)
-        # Firmly reverse (holding the last bearing) so a merely-passed balloon comes back into view.
+        # Firmly reverse (holding the last bearing + elevation) so a merely-passed balloon that left
+        # the frame comes back into view (-> re-associates -> MISS).
         yaw = _clip(0.6 * KP_YAW * self.trk.az + KD_YAW * yaw_rate, -1, 1)
-        return {"surge": -CONFIRM_SURGE, "heave": 0.0, "yaw": yaw}, self._info(blue)
+        heave = _clip(KP_HEAVE * self.trk.el, -SPEED_CAP, SPEED_CAP)
+        return {"surge": -CONFIRM_SURGE, "heave": heave, "yaw": yaw}, self._info(blue)
 
     # -- recover (back off + re-align, or search if the target is gone) ------------------------
     def _recover(self, yaw_rate, avoid_yaw, blue):
@@ -382,3 +578,10 @@ class BalloonBehavior:
 
 def _clip(x, lo, hi):
     return lo if x < lo else hi if x > hi else x
+
+
+def _el_surge_scale(el):
+    """Forward-surge multiplier in [EL_MIN_SURGE, 1]: full when the target is at the vehicle's depth,
+    tapering to the floor when far off-depth — level onto the balloon's height first, but keep
+    closing (heave, being stronger, still wins the depth race)."""
+    return _clip((EL_ZERO_SURGE - abs(el)) / (EL_ZERO_SURGE - EL_FULL_SURGE), EL_MIN_SURGE, 1.0)
