@@ -3,13 +3,15 @@
 MuJoCo simulation + reinforcement learning for the **UMIUSI** azimuth-thruster underwater robot.
 
 It simulates each thruster's **servo drive** (azimuth angle) and **thruster output** (ESC command → thrust) with an
-explicit **analytical hydrodynamic model** (buoyancy, drag, added mass). It trains policies for attitude hold and
+explicit **analytical hydrodynamic model** (buoyancy, drag, added mass; see [`docs/physics.md`](docs/physics.md)).
+It trains policies for attitude hold and
 attitude + direction cruise, and — toward the target competition — hosts a **balloon-popping scenario** that runs
 end-to-end (drive the world, pop balloons, score) with onboard cameras and an analytical feed-forward controller.
 
 - **Training** depends only on Python (MuJoCo + Gymnasium + Stable-Baselines3 + PyTorch) — **no ROS 2 required**.
-- A thin **ROS 2 bridge** (under `ros2_ws/`) is planned only for evaluation / sim-to-real, reusing the existing
-  `sinsei_umiusi_control` interfaces.
+- A **ROS 2 bridge** (under `ros2_ws/`, **done**) lets the real `sinsei_umiusi_control` controllers — or a
+  trained RL policy — drive the sim unchanged, for evaluation / sim-to-real. See
+  [`ros2_ws/src/umiusi_sim_bridge/README.md`](../ros2_ws/src/umiusi_sim_bridge/README.md).
 
 Design rationale and architecture notes are maintained as separate working docs outside this
 repository; this README plus code comments are the in-repo reference.
@@ -48,7 +50,9 @@ mujoco_ws/                # workspace container (NOT version-controlled)
         envs/umiusi_pose_env.py #   UmiusiPoseEnv: attitude / depth / pose / attitude_velocity
         train.py  eval.py   #   PPO default (--algo sac/td3); models/ is gitignored
     configs/                # umiusi.yaml (physics) + train_ppo.yaml (env/reward/algo)
-    tools/                  # validate_sim, drive, snapshot, camera_demo, scenario_demo, competition_run, analyze_steady
+    tools/                  # sim: validate_sim, drive, snapshot, camera_demo, scenario_demo, competition_run, analyze_steady
+                            #   perception: perception_demo/train/eval/eval_learned/bench/pseudolabel, underwater_correct, gen_sim_dataset
+                            #   ROS (rosbridge): ros_view (viewer), ros_policy (RL -> cmd/direct)
     examples/               # pretrained example policies (cruise_policy/) so eval/drive run out of the box
     media/                  # rendered placement screenshots
     pyproject.toml  uv.lock # uv-managed deps (CPU torch pinned); reproducible via `uv sync`
@@ -245,7 +249,9 @@ balloon detector (colour + bearing + range from the onboard camera).
   trained RL policy can also drive it as the low-level controller over the thruster direct-override
   path (`tools/ros_policy.py`), and `tools/ros_view.py` renders it live (both over rosbridge). The
   community `mujoco_ros2_control` was ruled out (joint/sensor interfaces only, not our ESC/servo GPIO
-  + site-force actuation + analytical hydro). Remaining: aarch64 MuJoCo for the Pi; FF-frame sign reconcile.
+  + site-force actuation + analytical hydro). Build/run + the full data-flow are documented in
+  [`ros2_ws/src/umiusi_sim_bridge/README.md`](../ros2_ws/src/umiusi_sim_bridge/README.md). Remaining:
+  aarch64 MuJoCo for the Pi; FF-frame sign reconcile.
 - **3-D depth-holding locomotion.** The trained low-level cruise is orientation + *horizontal* direction
   only. The final drivetrain wants orientation + depth-hold + horizontal cruise, but the depth-sensor
   choice isn't fixed yet, so that training is on hold. (The env already supports a 3-D velocity command
@@ -263,8 +269,14 @@ balloon detector (colour + bearing + range from the onboard camera).
   data: `tools.gen_sim_dataset` renders the balloon scene, applies a physically-based underwater
   degradation (`perception.underwater_sim`: depth-based colour attenuation + backscatter haze +
   turbidity + surface reflection, domain-randomised), and auto-labels balloons from the segmentation
-  buffer — free perfectly-labelled data to pretrain on + a hard, difficulty-dialable eval set. Next: more
-  labelled frames, then the final int8 export + a real Pi 4 benchmark.
+  buffer — free perfectly-labelled data to pretrain on + a hard, difficulty-dialable eval set.
+  Detectors are compared head-to-head (classical vs learned, per-colour P/R/F1) with
+  `tools.perception_eval` / `perception_eval_learned`, and `tools.perception_pseudolabel` auto-drafts
+  COCO labels for fast human correction. **Sim-to-real** (see `ai/balloon/campaign_results.md`):
+  real-data-only is currently best on real footage; the sim's value is a large, condition-tagged
+  stress-eval set, and closing the sim↔real **colour-cast gap** (domain-randomised water colour + a
+  strong colour/resolution training aug) is the lever for making synthetic data help. Next: more
+  labelled real frames, then the final int8 export + a real Pi 4 benchmark.
 - **Autonomy (behavior FSM).** The remaining piece is a behavior FSM (search → approach → ram →
   reacquire) consuming detections to replace `competition_run`'s ground-truth driver, plus multi-frame
   tracking. The feed-forward frame mapping (`Vx→−X` etc., see `control.py`) still needs reconciling.
