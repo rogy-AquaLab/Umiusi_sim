@@ -1,0 +1,10 @@
+# Shipped learned balloon detector (best for the perception-in-the-loop autonomy).
+arch: TinyBalloonNet          # CenterNet-lite, per-colour heatmap
+width: 16
+input_size: 320
+conf_thresh: 0.3
+colours: [red, yellow, blue]  # detector output order (avoid: blue -10)
+train: sim-pretrain + colour-invariant domain randomisation (campaign round-3 "mix")
+source_checkpoint: camp3_mix.pt
+metrics: near-4m recall ~0.88 on sim_eval (operating range); colour-invariant, hardened on look-up/far/murk
+load: load_learned_detector("examples/balloon_detector/model.pt")   # cfg (width/input/conf) is baked in

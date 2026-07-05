@@ -57,7 +57,8 @@ mujoco_ws/                # workspace container (NOT version-controlled)
                             #   perception: perception_demo/train/eval/eval_learned/bench/pseudolabel, underwater_correct, gen_sim_dataset
                             #   autonomy: behavior (perception FSM), autonomy_run (perception-in-loop balloon-pop, no RL)
                             #   ROS (rosbridge): ros_view (viewer), ros_policy (RL -> cmd/direct)
-    examples/               # pretrained example policies (cruise_policy/) so eval/drive run out of the box
+    examples/               # shipped example models — cruise_policy/ (RL) + balloon_detector/ (learned
+                            #   detector) — so eval / drive / autonomy run out of the box
     media/                  # rendered placement screenshots
     pyproject.toml  uv.lock # uv-managed deps (CPU torch pinned); reproducible via `uv sync`
     # local-only (gitignored / outside the repo): models/ (trained policies), umiusi_model/ (CAD provenance),
@@ -186,6 +187,8 @@ MUJOCO_GL=egl uv run --extra perception python -m tools.autonomy_run --headless 
 MUJOCO_GL=egl uv run --extra perception python -m tools.autonomy_run --full-run           # record the FULL competition to mp4
 DISPLAY=:0    uv run --extra perception python -m tools.autonomy_run --render              # watch live (passive viewer)
 ```
+The learned detector ships in [`examples/balloon_detector/`](examples/balloon_detector/) (the default
+`--model`), so this runs right after cloning; pass `--model` to use your own trained checkpoint.
 
 **From Python:**
 ```python

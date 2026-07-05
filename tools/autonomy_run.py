@@ -39,7 +39,7 @@ from umiusi_sim.perception import underwater_sim as us
 from umiusi_sim.perception.learned_detector import load_learned_detector
 from umiusi_sim.simulator import UmiusiSimulator
 
-_DEFAULT_MODEL = "models/perception_learned/camp_mix.pt"
+_DEFAULT_MODEL = "examples/balloon_detector/model.pt"  # shipped best detector (camp3 mix, colour-invariant)
 _DEFAULT_OUT = Path("/home/satoi/mujoco_ws/ai_out")
 START = (0.0, 1.0, 0.0)  # ~1 m off the pool floor, on the +X approach axis
 CAM_W, CAM_H = 320, 240
