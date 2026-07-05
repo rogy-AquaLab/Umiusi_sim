@@ -37,6 +37,7 @@ from umiusi_sim.description.scenarios import competition_balloon as scn
 from umiusi_sim.perception import render_appearance as ra
 from umiusi_sim.perception import underwater_sim as us
 from umiusi_sim.perception.learned_detector import load_learned_detector
+from umiusi_sim.perception.tracker import sanitise_near_colours
 from umiusi_sim.simulator import UmiusiSimulator
 
 _DEFAULT_MODEL = "examples/balloon_detector/model.pt"  # shipped best detector (camp3 mix, colour-invariant)
@@ -233,7 +234,10 @@ def main():
         fresh = held["rgb"] is None or i % perc_stride == 0
         if fresh:  # perception tick: re-render + re-detect
             held["rgb"] = sim.render_camera("front_cam", width=CAM_W, height=CAM_H, degrade=True)
-            held["dets"] = detector(held["rgb"])
+            # Close-range red/blue colour confirmation from the actual pixels: underwater the blue
+            # cast makes near red/blue labels risky, so re-check them before the FSM can commit to a
+            # pop — a near "red" that reads blue is relabelled blue and thus AVOIDED (never pop blue).
+            held["dets"] = sanitise_near_colours(held["rgb"], detector(held["rgb"]))
             n_perc_ticks += 1
             for d in held["dets"]:
                 det_counts[d.colour] = det_counts.get(d.colour, 0) + 1
