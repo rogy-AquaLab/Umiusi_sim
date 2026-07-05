@@ -16,5 +16,17 @@ from umiusi_sim.perception.balloon_detector import (
     Detection,
     detect_balloons,
 )
+from umiusi_sim.perception.tracker import (
+    Track,
+    Tracker,
+    confirm_colour,
+    plausible_detections,
+    sanitise_near_colours,
+    size_consistent,
+)
 
-__all__ = ["Detection", "detect_balloons", "SIM_THRESHOLDS", "REAL_THRESHOLDS"]
+__all__ = [
+    "Detection", "detect_balloons", "SIM_THRESHOLDS", "REAL_THRESHOLDS",
+    "Track", "Tracker", "plausible_detections", "size_consistent",
+    "confirm_colour", "sanitise_near_colours",
+]
