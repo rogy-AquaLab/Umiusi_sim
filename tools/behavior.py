@@ -45,21 +45,37 @@ from umiusi_sim.perception.tracker import ASSOC_BEARING, Tracker, plausible_dete
 
 POSITIVE_COLOURS = ("red", "yellow")
 
-# --- detection range gate + target-selection bands (rule-based, NOT a reward) ------------------
+# --- detection range gate + target selection (rule-based, NOT a reward) ------------------------
 # Detections beyond MAX_TARGET_RANGE are DROPPED: they are mostly false positives (the detector's
 # far recall is poor) and unreachable anyway — gating them cuts the noise and focuses the FSM on
-# balloons it can actually reach. Selection then uses two clear range bands (see ``_pick_target``):
-#   NEAR (<= NEAR_RANGE): take the NEAREST positive — a near yellow is a bird in the hand.
-#   MID  (NEAR_RANGE .. MAX_TARGET_RANGE): prefer the nearest RED only (the +30 justifies the harder
-#         far approach); do NOT commit to a far yellow (+10 isn't worth a long, low-success approach).
+# balloons it can actually reach. Selection is then simply "the NEAREST reachable NON-BLUE track"
+# (see ``_pick_target``): on the new ~19-balloon field, maximising COUNT/THROUGHPUT (clear the field
+# near-to-far) beats chasing a far red past several near yellows — the 3-5 min budget rewards popping
+# whatever is closest. Popping near-to-far also CLEARS the field as we advance, so far fewer un-popped
+# balloons are left ahead to under-pass (the wire-entanglement lever; see the path guard below). Blue
+# is strictly avoided (never a target, -10).
 MAX_TARGET_RANGE = 4.5    # m; ignore any detection beyond this (far FP noise + unreachable)
-NEAR_RANGE = 2.5          # m; "bird in the hand" band: chase the nearest positive of any colour
+# --- wire-avoidance path guard (competition-critical: tethers tangle if we under-pass a balloon) --
+# Passing UNDER an un-popped balloon risks snagging its vertical tether wire (esp. the tall 1.5 m
+# yellows). Two FSM mechanisms keep us off the wires:
+#   * PREEMPT: while approaching, always re-lock onto the NEAREST non-blue track — so an un-popped
+#     balloon that lies closer (i.e. in the straight path) gets popped FIRST, clearing the wire.
+#   * DETOUR: steer laterally around any close, dead-ahead un-popped balloon that is NOT our current
+#     ram target (a blue decoy, or a balloon we've given up on) so we arc around its wire, not under it.
+# PATH_CLEAR_RADIUS is the horizontal keep-out around a wire we plan the detour against; it is the
+# scenario's TETHER_RADIUS (0.20 m capture zone) plus a hull-half-width margin so the vehicle body,
+# not just its centre, clears the wire. Kept local so the FSM stays ROS/scenario-decoupled.
+PATH_CLEAR_RADIUS = 0.40  # m; horizontal keep-out corridor around an un-popped balloon's tether
+PREEMPT_MARGIN = 0.30     # m; re-lock to a nearer non-blue target only if it is at least this closer
+#                           (hysteresis — stops lock thrashing between two similar-range balloons)
 
 # --- drive gains (feed-forward command convention; mirrors competition_run) -------------------
 SPEED_CAP = 0.35          # max surge/heave command magnitude ("modest speed")
 KP_YAW = 1.1              # yaw P gain: yaw command per radian of bearing error
 KD_YAW = 0.15             # yaw D gain (damps the measured yaw rate)
-KP_HEAVE = 1.4            # heave P gain: command per radian of target elevation error (get to depth)
+KP_HEAVE = 1.5            # heave P gain: command per radian of target elevation error (get to depth).
+#                           A touch stronger than the old 1.4 so the vehicle wins the DEPTH race —
+#                           reaches the balloon's height (esp. the tall 1.5 m yellows) before closing.
 FACE_TOL = math.radians(45.0)   # surge hard only once within this bearing error (APPROACH)
 # --- SEARCH / exploration ---------------------------------------------------------------------
 SEARCH_YAW = 0.5          # in-place yaw-sweep rate command
@@ -98,9 +114,16 @@ ALIGN_TIMEOUT = 110       # steps stuck in ALIGN un-centred -> REPOSITION (back 
 # EL_MIN_SURGE by EL_ZERO_SURGE. Because heave (KP_HEAVE) is far stronger than the floored surge,
 # depth still converges first even at the floor — the floor just keeps closing so throughput (esp.
 # on the low reds, which approach fine) is not sacrificed. Smooth taper, never a hard stall.
+# DEPTH-FIRST gate (the tall-yellow lever): the surge is measured against the AIM-point elevation error
+# (el + aim bias), so the vehicle must be near the balloon's HEIGHT before it closes the last of the
+# horizontal gap. The floor is LOWER than the old 0.35 (climb/descend more before closing) but NOT
+# near-zero — a near-zero floor stalls the approach so long the vehicle arrives high/slow and either
+# passes OVER the balloon or never builds the closing speed a pop needs (measured: it cratered the pop
+# rate). 0.22 keeps it approaching, just biased toward matching depth first; heave (KP_HEAVE, stronger)
+# still wins the depth race. Full surge once |el_err| <= EL_FULL_SURGE — level onto the front face.
 EL_FULL_SURGE = math.radians(5.0)
-EL_ZERO_SURGE = math.radians(14.0)
-EL_MIN_SURGE = 0.35       # surge floor (fraction) when far off-depth — keep approaching, just slower
+EL_ZERO_SURGE = math.radians(15.0)
+EL_MIN_SURGE = 0.22       # surge floor when far off-depth — lower than old 0.35 (climb more), not a stall
 SETTLE_STEPS = 3          # hold centred + near-stationary this long before the lunge (kill overshoot);
 #                           kept short so we commit before the close-range detector flicker aborts us
 LUNGE_STEPS = 26          # after commit, keep driving straight in (even blind) this long to reach contact
@@ -121,9 +144,12 @@ RAM_SURGE = 0.26          # committed-approach surge: LESS than SPEED_CAP so hea
 # so a level, dead-centre aim keeps the pin-axis error small at contact — adding an above-bias there
 # would only shift the tip a couple cm high at close range, which the near-frontal cone reads as extra
 # angle and can push a good ram past POP_ANGLE_TOL_DEG. So: yellows get the above-bias, reds/others
-# aim at the centre. 4 deg is small (~2 cm vertical at the ~0.3 m contact range — well inside the
-# 0.13 m pop sphere), enough to catch the upper face of a tall yellow.
-RAM_AIM_ABOVE_DEG = 4.0
+# aim at the centre. 5 deg is small (~3 cm vertical at the ~0.3 m contact range — well inside the
+# 0.13 m pop sphere), enough to catch the upper face of a tall yellow without sitting so high that the
+# pin passes OVER it or the near-frontal cone (POP_ANGLE_TOL_DEG=20) rejects a downward-angled hit.
+# (An aggressive 8 deg over-corrected — the vehicle rammed from too far above and stopped popping;
+# measured pop rate cratered. 5 deg is the modest nudge up from the old 4 that still helps.)
+RAM_AIM_ABOVE_DEG = 5.0
 AIM_EL_BIAS = math.radians(RAM_AIM_ABOVE_DEG)
 AIM_ABOVE_COLOURS = ("yellow",)  # colours the above-bias applies to (the tall balloons)
 # --- recover / confirm / give-up --------------------------------------------------------------
@@ -220,28 +246,20 @@ class BalloonBehavior:
 
     # -- target selection / locked-track sync (over the tracker's CONFIRMED tracks) -------------
     def _pick_target(self):
-        """Rule-based selection over the tracker's CONFIRMED tracks (two range bands; no reward):
-          NEAR (range <= NEAR_RANGE): the NEAREST positive of ANY colour — a near yellow is easy,
-              guaranteed points, a bird in the hand.
-          MID  (NEAR_RANGE .. MAX_TARGET_RANGE): the nearest RED only — the +30 justifies a harder
-              far approach; a far yellow (+10) is NOT worth the long, low-success run, so skip it.
-          Only POSITIVE_COLOURS are selectable (blue is tracked only for avoidance). Returns a Track
-          or None. Consuming CONFIRMED tracks (not raw detections) is what keeps a flickery one-frame
-          false positive from ever steering selection."""
+        """Selection over the tracker's CONFIRMED tracks: the NEAREST reachable NON-BLUE track.
+
+        On the ~19-balloon field, throughput wins — pop whatever is closest (near-to-far) rather than
+        chase a far red past several near yellows. This also clears the field as we advance, so fewer
+        un-popped balloons are left ahead to under-pass (wire avoidance). Only POSITIVE_COLOURS are
+        selectable (blue is tracked solely for avoidance, never a target). Returns a Track or None.
+        Consuming CONFIRMED tracks (not raw detections) keeps a flickery one-frame false positive from
+        ever steering selection."""
         eligible = [t for t in self.tracker.confirmed() if t.colour in POSITIVE_COLOURS]
-        if not eligible:
-            return None
         if self._suppress_steps > 0 and self._suppress_colour:  # give-up memory: try other colours
             eligible = [t for t in eligible if t.colour != self._suppress_colour]
-            if not eligible:
-                return None     # only the given-up colour is in view -> SEARCH (turn) for the rest
-        near = [t for t in eligible if t.range_m <= NEAR_RANGE]
-        if near:
-            return min(near, key=lambda t: t.range_m)           # bird in the hand: nearest positive
-        reds = [t for t in eligible if t.colour == "red"]       # mid-range: only red is worth it
-        if reds:
-            return min(reds, key=lambda t: t.range_m)
-        return None                                             # only far yellows left -> keep looking
+        if not eligible:
+            return None
+        return min(eligible, key=lambda t: t.range_m)           # nearest reachable non-blue
 
     def _lock(self, track):
         """Lock the FSM onto a tracker track: seed the pursuit snapshot and start the approach."""
@@ -303,6 +321,30 @@ class BalloonBehavior:
         side = -1.0 if b.az >= 0 else 1.0  # turn away; dead-centre -> deterministic left
         gain = AVOID_YAW * (1.0 - min(1.0, b.range_m / AVOID_RANGE) * 0.5)
         return side * gain, b
+
+    def _wire_avoidance(self):
+        """Yaw bias to arc AROUND (not under) any close, dead-ahead un-popped balloon that is NOT the
+        current ram target — a balloon in our path whose vertical tether we would otherwise snag by
+        under-passing it (the tall yellows especially). The current target is excluded: we ram it
+        head-on and pop it, which removes its wire. Uses the lateral offset of each confirmed track
+        from dead-ahead: a track within PATH_CLEAR_RADIUS of the path AND closer than AVOID_RANGE is a
+        wire to dodge. Blue decoys are handled by ``_blue_avoidance``; this catches the un-poppable
+        (suppressed / off-bearing) balloons we would otherwise drive straight under. 0 if the path is
+        clear."""
+        threats = []
+        for t in self.tracker.confirmed():
+            if t.id == self._target_id or t.colour == "blue":
+                continue                       # our target (popped head-on) / blues (own handler)
+            if not (math.isfinite(t.range_m) and t.range_m < AVOID_RANGE):
+                continue
+            lateral = t.range_m * math.sin(abs(t.az))   # horizontal offset from dead-ahead
+            if abs(t.az) < AVOID_AZ and lateral < PATH_CLEAR_RADIUS:
+                threats.append(t)
+        if not threats:
+            return 0.0
+        b = min(threats, key=lambda t: t.range_m)
+        side = -1.0 if b.az >= 0 else 1.0      # turn away from it; dead-centre -> deterministic left
+        return side * AVOID_YAW * (1.0 - min(1.0, b.range_m / AVOID_RANGE) * 0.5)
 
     def _info(self, blue):
         return {"state": self.state, "target": self.trk.colour or None, "range": self.trk.range_m,
@@ -419,6 +461,16 @@ class BalloonBehavior:
             self._abandon()
             return self._search(yaw_rate, dt, avoid_yaw, blue)
 
+        # PREEMPT (nearest-first + wire avoidance): while still approaching (not close / not committed
+        # to a ram), if a DIFFERENT non-blue track is meaningfully NEARER than the locked target,
+        # switch to it. Popping the nearest first clears balloons — especially any lying in our path —
+        # as we advance, instead of driving under them toward a farther target and snagging a tether.
+        if not self._committed and self.trk.bbox_frac < ALIGN_BBOX:
+            cand = self._pick_target()
+            if (cand is not None and cand.id != self._target_id
+                    and cand.range_m < self.trk.range_m - PREEMPT_MARGIN):
+                self._lock(cand)
+
         az, el, bbox = self.trk.az, self.trk.el, self.trk.bbox_frac
         # Elevation is measured against the AIM point (biased AIM_EL_BIAS above centre), so the FSM
         # commits/centres when pointed at the aim, not the raw centre — descend onto the upper face.
@@ -444,7 +496,8 @@ class BalloonBehavior:
             # eased off if depth drifts (el grows) so the pin stays level to the balloon's front face.
             yaw = _clip(KP_YAW * az + KD_YAW * yaw_rate, -1, 1)
             heave = _heave_cmd(el, self.trk.colour)
-            return {"surge": RAM_SURGE * _el_surge_scale(el), "heave": heave, "yaw": yaw}, self._info(blue)
+            return {"surge": RAM_SURGE * _el_surge_scale(el, self.trk.colour), "heave": heave,
+                    "yaw": yaw}, self._info(blue)
 
         # Close enough (bbox) AND pointed head-on: SETTLE briefly (near-stationary, drive az/el to
         # ~0) to kill approach overshoot, then COMMIT to the RAM lunge. If centring slips during the
@@ -485,7 +538,8 @@ class BalloonBehavior:
             heave = _heave_cmd(el, self.trk.colour)
             # Creep in, but scaled down by depth error — level onto the balloon's height first, then
             # close. Hold entirely if badly off-bearing (turn first) or avoiding a blue.
-            surge = 0.0 if (abs(az) > FACE_TOL or blue is not None) else ALIGN_CREEP * _el_surge_scale(el)
+            surge = (0.0 if (abs(az) > FACE_TOL or blue is not None)
+                     else ALIGN_CREEP * _el_surge_scale(el, self.trk.colour))
             return {"surge": surge, "heave": heave, "yaw": yaw}, self._info(blue)
 
         # APPROACH (far): yaw onto the bearing, heave to the target's depth, and surge in — but scale
@@ -494,13 +548,16 @@ class BalloonBehavior:
         # and the pin passes under/over it). Throttle further while mis-pointed or avoiding a blue.
         self.state = "APPROACH"
         self._align_steps = 0
-        yaw = _clip(KP_YAW * az + KD_YAW * yaw_rate + avoid_yaw, -1, 1)
+        # Steer around (not under) any un-popped balloon in our path to the target — its tether would
+        # otherwise snag as we under-pass it (blue decoys handled separately by ``avoid_yaw``).
+        wire_yaw = self._wire_avoidance()
+        yaw = _clip(KP_YAW * az + KD_YAW * yaw_rate + avoid_yaw + wire_yaw, -1, 1)
         heave = _heave_cmd(el, self.trk.colour)
-        surge = SPEED_CAP * max(0.0, math.cos(az)) * _el_surge_scale(el)
+        surge = SPEED_CAP * max(0.0, math.cos(az)) * _el_surge_scale(el, self.trk.colour)
         if abs(az) > FACE_TOL:
             surge *= 0.3
-        if blue is not None:
-            surge *= 0.5
+        if blue is not None or wire_yaw != 0.0:
+            surge *= 0.5    # ease off while arcing around a blue / an in-path wire
         return {"surge": surge, "heave": heave, "yaw": yaw}, self._info(blue)
 
     # -- post-ram confirmation (CAMERA-based pop vs miss) --------------------------------------
@@ -559,10 +616,15 @@ class BalloonBehavior:
 
     # -- SEARCH handler ------------------------------------------------------------------------
     def _search(self, yaw_rate, dt, avoid_yaw, blue):
-        """Deliberate exploration: full 360° in-place sweep (height-scanning), then translate."""
+        """Deliberate exploration: full 360° in-place sweep (height-scanning), then translate. While
+        TRANSLATING (the only forward motion in SEARCH) it steers around un-popped balloons in its
+        path so relocating across the field does not drive under their tethers."""
         if self._translating > 0:
             self._translating -= 1
-            return ({"surge": SEARCH_SURGE, "heave": 0.0, "yaw": 0.4 * avoid_yaw}, self._info(blue))
+            wire_yaw = self._wire_avoidance()
+            surge = SEARCH_SURGE * (0.5 if wire_yaw != 0.0 else 1.0)
+            return ({"surge": surge, "heave": 0.0, "yaw": 0.4 * avoid_yaw + wire_yaw},
+                    self._info(blue))
         self._swept += abs(yaw_rate) * dt
         self._scan_phase += SCAN_RATE * dt
         heave = SCAN_HEAVE * math.sin(self._scan_phase)  # scan the different balloon heights
@@ -592,8 +654,11 @@ def _heave_cmd(el, colour):
     return _clip(KP_HEAVE * (el + _aim_bias(colour)), -SPEED_CAP, SPEED_CAP)
 
 
-def _el_surge_scale(el):
-    """Forward-surge multiplier in [EL_MIN_SURGE, 1]: full when the target is at the vehicle's depth,
-    tapering to the floor when far off-depth — level onto the balloon's height first, but keep
-    closing (heave, being stronger, still wins the depth race)."""
-    return _clip((EL_ZERO_SURGE - abs(el)) / (EL_ZERO_SURGE - EL_FULL_SURGE), EL_MIN_SURGE, 1.0)
+def _el_surge_scale(el, colour=""):
+    """Forward-surge multiplier in [EL_MIN_SURGE, 1] against the AIM-point elevation error (el plus the
+    colour's aim bias): full (1.0) within EL_FULL_SURGE of the aim depth, tapering to the near-zero
+    floor by EL_ZERO_SURGE. So the vehicle CLIMBS/DESCENDS to the balloon's height first (esp. the tall
+    yellows, whose aim sits a hair above centre) and only then closes the last horizontal gap level,
+    meeting the front face head-on instead of passing under it while still changing depth."""
+    err = abs(el + _aim_bias(colour))
+    return _clip((EL_ZERO_SURGE - err) / (EL_ZERO_SURGE - EL_FULL_SURGE), EL_MIN_SURGE, 1.0)

@@ -270,7 +270,7 @@ def plausible_detections(detections, frame_h: int = 240, frame_w: int = 320, fov
 # read robust hue statistics. Bands are wide to survive the residual cast; the decision only needs to
 # separate genuine red from genuine blue, and it errs toward calling a patch blue (safety: never pop
 # blue). Hue is in [0,360): red wraps 0, blue/cyan sits ~180-260.
-COLOUR_CONFIRM_RANGE_M = 2.5    # only re-check labels this near (== behaviour NEAR_RANGE)
+COLOUR_CONFIRM_RANGE_M = 2.5    # only re-check labels this near (close-range colour-confirm band)
 _INTERIOR_FRAC = 0.5            # central fraction of the box sampled (drop rim/tether/edge pixels)
 _S_MIN = 0.12                  # ignore near-grey pixels (unlit / washed out) when voting on hue
 _V_MIN = 0.10                  # ignore near-black rim pixels
