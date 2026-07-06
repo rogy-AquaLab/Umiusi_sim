@@ -69,6 +69,9 @@ class WaterParams:
     reflection: float = 0.25
     exposure: float = 1.0
     wb_gain: np.ndarray = field(default_factory=lambda: np.array([1.0, 1.0, 1.0]))
+    motion_blur: float = 0.0        # directional motion-blur kernel LENGTH [px] (0 = off); the moving vehicle
+    motion_angle: float = 0.0       # motion-blur direction [rad] (0 = horizontal)
+    vignette: float = 0.0           # lens corner-darkening strength in [0,1] (0 = off)
     murk: float = 0.5
     cast: float = 0.5
     cast_sat: float = 0.6
@@ -124,8 +127,18 @@ DR_RANGES = {
     "caustics": (0.0, 0.28),          # ripple amplitude; 0 => off (widened for more variety)
     "caustics_freq": (2.5, 7.0),      # ripples across the frame (widened)
     "particles": (0.0, 0.6),          # suspended-particle / marine-snow speck strength (0 => off)
-    "exposure": (0.75, 1.20),         # global gain
-    "wb_jitter": 0.12,                 # +/- fraction per channel around 1.0
+    # Exposure/gain + white-balance model the Raspberry-Pi camera's AUTO-EXPOSURE + AUTO-WHITE-BALANCE,
+    # which swing hard in the operating range as the vehicle approaches a bright/dark balloon. Widened
+    # (was 0.75-1.20 / 0.12) so the detector cannot key on a fixed brightness/colour temperature.
+    "exposure": (0.55, 1.45),         # global gain (raspi auto-exposure swing)
+    "wb_jitter": 0.18,                 # +/- fraction per channel around 1.0 (auto-white-balance)
+    # Motion blur (the vehicle MOVES while the rolling shutter integrates) — a directional streak whose
+    # length ~ speed. Present on ~half the frames; boxes stay exact (linear kernel is centred).
+    "motion_blur": (0.0, 9.0),        # kernel length [px]
+    "motion_blur_prob": 0.5,
+    # Lens vignetting: gentle radial corner-darkening (cheap wide-angle optics). Photometric only.
+    "vignette": (0.10, 0.50),
+    "vignette_prob": 0.6,
     "cast_sat": (0.15, 1.0),           # veil colour saturation (0.15 = near-grey, 1.0 = strong cast)
     "veil_val_jitter": 0.15,           # +/- fraction on veil brightness around the murk-set value
     # --- water-surface reflection distractor (the #1 false-detection source: mirrored balloons on
@@ -198,10 +211,15 @@ def random_params(
     reflection = u("reflection") if rng.random() < DR_RANGES["reflection_prob"] else 0.0
     # suspended particles: present on ~half the frames, denser in murkier water.
     particles = u("particles") * (0.5 + 0.5 * m) if rng.random() < 0.5 else 0.0
+    # motion blur (moving vehicle) + lens vignetting — near-range robustness DR.
+    motion_blur = u("motion_blur") if rng.random() < DR_RANGES["motion_blur_prob"] else 0.0
+    motion_angle = float(rng.uniform(0.0, np.pi))
+    vignette = u("vignette") if rng.random() < DR_RANGES["vignette_prob"] else 0.0
     return WaterParams(
         beta=beta, B=B, turbidity=turbidity, backscatter_noise=noise,
         caustics=u("caustics"), caustics_freq=u("caustics_freq"), particles=particles,
-        reflection=reflection, exposure=u("exposure"), wb_gain=wb, murk=m,
+        reflection=reflection, exposure=u("exposure"), wb_gain=wb,
+        motion_blur=motion_blur, motion_angle=motion_angle, vignette=vignette, murk=m,
         cast=c, cast_sat=sat,
     )
 
@@ -262,6 +280,48 @@ def _add_particles(img: np.ndarray, t: np.ndarray, strength: float,
     dark = (seed > 1.0 - 0.25 * thresh).astype(np.float64)
     speck = _gaussian_blur((bright - 0.6 * dark)[..., None] * np.ones((1, 1, 3)), 0.6)
     return img + speck * (0.35 + 0.5 * strength)
+
+
+def _motion_blur(img: np.ndarray, length: float, angle: float) -> np.ndarray:
+    """Directional (linear) motion-blur streak — the vehicle moves while the frame integrates.
+
+    Kernel is a centred line of length ``length`` px at ``angle`` rad, so the blur is symmetric about
+    each pixel and box centres/extents are unchanged (labels stay exact). cv2 if present, else a cheap
+    separable-ish numpy fallback along the nearest axis.
+    """
+    k = int(round(length))
+    if k < 2:
+        return img
+    ker = np.zeros((k, k), dtype=np.float32)
+    c = (k - 1) / 2.0
+    dx, dy = np.cos(angle), np.sin(angle)
+    for t in np.linspace(-c, c, k * 2):
+        xi = int(round(c + t * dx))
+        yi = int(round(c + t * dy))
+        if 0 <= xi < k and 0 <= yi < k:
+            ker[yi, xi] = 1.0
+    s = ker.sum()
+    if s <= 0:
+        return img
+    ker /= s
+    if cv2 is not None:
+        return cv2.filter2D(img.astype(np.float32), -1, ker).astype(img.dtype)
+    # numpy fallback: blur along the dominant axis only (approximation)
+    ax = 1 if abs(dx) >= abs(dy) else 0
+    lin = np.ones(k, dtype=np.float64) / k
+    return np.apply_along_axis(lambda m: np.convolve(m, lin, mode="same"), ax, img)
+
+
+def _vignette(img: np.ndarray, strength: float) -> np.ndarray:
+    """Gentle radial corner-darkening (cheap wide-angle optics). Multiplicative, boxes untouched."""
+    if strength <= 0:
+        return img
+    h, w = img.shape[:2]
+    yy, xx = np.mgrid[0:h, 0:w].astype(np.float64)
+    cy, cx = (h - 1) / 2.0, (w - 1) / 2.0
+    r2 = ((xx - cx) / max(cx, 1)) ** 2 + ((yy - cy) / max(cy, 1)) ** 2
+    mask = 1.0 - strength * np.clip(r2 / 2.0, 0.0, 1.0)   # centre=1, corners=1-strength
+    return img * mask[..., None]
 
 
 def _caustics(shape, amp: float, freq: float, rng: np.random.Generator) -> np.ndarray:
@@ -346,8 +406,15 @@ def degrade(
     if params.particles > 0:
         img = _add_particles(img, t, params.particles, rng)
 
-    # 6) exposure / white-balance (camera gain + colour cast)
+    # 6) exposure / white-balance (camera gain + colour cast; raspi auto-exposure/AWB swing)
     img = img * params.exposure * params.wb_gain.reshape(1, 1, 3)
+
+    # 7) motion blur (moving vehicle) then lens vignetting — near-range robustness DR. Both are
+    # applied last (on the ~final image) and keep pixel positions symmetric, so boxes stay exact.
+    if params.motion_blur > 0:
+        img = _motion_blur(img, params.motion_blur, params.motion_angle)
+    if params.vignette > 0:
+        img = _vignette(img, params.vignette)
 
     return np.clip(img * 255.0, 0, 255).astype(np.uint8)
 
