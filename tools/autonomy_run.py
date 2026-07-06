@@ -223,6 +223,10 @@ def main():
     last_state = [None]     # for printing FSM state transitions in the live viewer
     held = {"rgb": None, "dets": []}  # last onboard frame + detections (held between perception ticks)
     prev_pin = {"xyz": None}  # last step's pin-tip world pos, for finite-difference pin-tip velocity
+    # Tether-entanglement tally (the wire-avoidance headline metric): count UNDER-PASS events —
+    # each time the hull enters the tether keep-out of an un-popped balloon while below it (rising
+    # edge, so a single lingering under-pass counts once). ``names`` = the distinct balloons snagged.
+    entangle = {"prev": set(), "events": 0, "names": set()}
 
     def autonomy_step():
         """ONE control step: (every perc_stride) render degraded onboard cam -> detect; (every step)
@@ -280,6 +284,18 @@ def main():
                 scn.hide_balloon(sim.model, b["name"])  # deflate: vanish from the onboard camera
                 print(f"t={i * control_dt:5.1f}s  POP {b['name']} ({b['colour']}) {b['points']:+d} "
                       f"-> total {score}   [state={info['state']}]", flush=True)
+
+        # Tether entanglement: which un-popped balloons is the hull currently under-passing? Count the
+        # rising edges (fresh snags) — the wire-avoidance metric surfaced in the run summary.
+        snag = set(scn.entanglement(sim.data.xpos[sim.base_id], balloons, popped_set))
+        fresh_snag = snag - entangle["prev"]
+        if fresh_snag:
+            entangle["events"] += len(fresh_snag)
+            entangle["names"].update(fresh_snag)
+            for nm in sorted(fresh_snag):
+                print(f"t={i * control_dt:5.1f}s  TANGLE under-pass of un-popped {nm} "
+                      f"(entanglement events {entangle['events']})", flush=True)
+        entangle["prev"] = snag
         step_ctr[0] += 1
         return rgb, detections, info
 
@@ -332,6 +348,10 @@ def main():
           f"{behavior.n_confirmed_pop / max(1, attempts):.0%})  abandoned targets={behavior.n_abandon}")
     print(f"pops: GT-scored={len(popped_set)}/{n_positive} positive  "
           f"camera-confirmed(FSM belief)={behavior.n_confirmed_pop}")
+    print(f"tether entanglement: {entangle['events']} under-pass events over "
+          f"{len(entangle['names'])} distinct un-popped balloons "
+          f"{sorted(entangle['names']) if entangle['names'] else ''}  (lower is better — the "
+          f"wire-avoidance metric)")
     if remaining:
         print("remaining:")
         for b in remaining:

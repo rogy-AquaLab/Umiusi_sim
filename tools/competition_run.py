@@ -142,6 +142,9 @@ def main():
 
     popped_set, score, timeline = set(), 0, []
     prev_pin = None  # last step's pin-tip world pos, for finite-difference pin-tip velocity
+    # Tether-entanglement tally (wire-avoidance metric): count rising-edge under-passes of un-popped
+    # balloons (hull within the tether keep-out while below the balloon; see scn.entanglement).
+    entangle = {"prev": set(), "events": 0, "names": set()}
     for step in range(n_steps):
         state = sim.get_state()
         pin_tip = sim.data.site_xpos[pin_sid].copy()
@@ -166,6 +169,14 @@ def main():
                 timeline.append((t, b, score))
                 print(f"t={t:5.1f}s  popped {b['name']} ({b['colour']}) {b['points']:+d} -> total {score}")
 
+        # Tether entanglement: rising-edge under-passes of un-popped balloons (wire-avoidance metric).
+        snag = set(scn.entanglement(sim.data.xpos[sim.base_id], balloons, popped_set))
+        fresh_snag = snag - entangle["prev"]
+        if fresh_snag:
+            entangle["events"] += len(fresh_snag)
+            entangle["names"].update(fresh_snag)
+        entangle["prev"] = snag
+
         if recorder is not None:
             recorder.update_scene(sim.data, camera="track")
             frames.append(recorder.render())
@@ -184,6 +195,9 @@ def main():
     remaining = [b for b in balloons if b["name"] not in popped_set]
     print("-" * 72)
     print(f"FINAL SCORE: {score}   ({len(popped_set)}/{len(balloons)} balloons popped)")
+    print(f"tether entanglement: {entangle['events']} under-pass events over "
+          f"{len(entangle['names'])} distinct un-popped balloons "
+          f"{sorted(entangle['names']) if entangle['names'] else ''}  (lower is better)")
     if timeline:
         print("pop timeline:")
         for t, b, tot in timeline:
