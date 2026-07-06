@@ -1,33 +1,38 @@
-# umiusi_sim — MuJoCo simulation + RL for the UMIUSI azimuth-thruster underwater robot.
+# umiusi_sim — MuJoCo simulation + RL + perception for the UMIUSI azimuth-thruster underwater robot.
 #
-# Two installable packages under src/ (clean responsibility split):
-#   umiusi_sim  — reusable simulator + analytical hydrodynamics + robot description (MJCF)
-#   umiusi_rl   — Gymnasium env + PPO/SAC/TD3 training + evaluation (depends on umiusi_sim)
+# THREE installable packages under src/ (clean responsibility split — see ai/project_spec.yaml):
+#   umiusi_sim         — CORE simulator + analytical hydrodynamics + robot description (MJCF).
+#                        deps below carry NO torch, so the sim runs standalone.
+#   umiusi_perception  — learned detector + tracker + underwater restoration + dataset-gen +
+#                        the balloon-popping autonomy FSM.  install extra: [perception]
+#   umiusi_rl          — Gymnasium env + PPO/SAC/TD3 training + evaluation.  install extra: [rl]
 #
-# Setup (recommended, no manual venv):  uv sync          then  uv run python -m tools.validate_sim
+# Setup (recommended):  uv sync                     # core sim only (no torch)
+#                       uv sync --extra perception  # + detector/autonomy
+#                       uv sync --extra rl          # + training/eval
+# Plain-pip fallback:   python -m venv .venv && . .venv/bin/activate && pip install -e '.[perception,rl]'
 # CPU-only torch is pinned via the PyTorch CPU index below (this host has no CUDA GPU).
 
 [project]
 name = "umiusi_sim"
 version = "0.1.0"
-description = "MuJoCo simulation + RL for the UMIUSI azimuth-thruster underwater robot"
+description = "MuJoCo simulation + RL + perception for the UMIUSI azimuth-thruster underwater robot"
 license = { text = "MIT" }
 requires-python = ">=3.10"
+# CORE (umiusi_sim): simulator + physics + description only. NO torch — the sim runs standalone.
 dependencies = [
     "mujoco>=3.2",
     "numpy>=1.24",
     "pyyaml>=6.0",
-    "gymnasium>=0.29",
-    "stable-baselines3>=2.3",
-    "torch>=2.2",
 ]
 
 [project.optional-dependencies]
-# Tooling for videos/snapshots (imageio), training curves (tensorboard), mesh decimation, lint.
-dev = ["imageio[ffmpeg]>=2.31", "tensorboard>=2.15", "fast-simplification", "ruff>=0.5"]
-# Perception (phase 5b): classical-CV balloon detector. scipy.ndimage.label gives lightweight
-# connected-component labelling (preferred over pulling in opencv); RGB->HSV is done in numpy.
-perception = ["scipy>=1.10", "opencv-python-headless>=4.8"]
+# umiusi_rl: Gymnasium env + SB3 training/eval + training curves.
+rl = ["gymnasium>=0.29", "stable-baselines3>=2.3", "torch>=2.2", "tensorboard>=2.15"]
+# umiusi_perception: learned detector (torch) + classical CV (scipy connected-components + opencv).
+perception = ["torch>=2.2", "scipy>=1.10", "opencv-python-headless>=4.8"]
+# Tooling for videos/snapshots (imageio), mesh decimation, lint.
+dev = ["imageio[ffmpeg]>=2.31", "fast-simplification", "ruff>=0.5"]
 # Decoupled ROS viewer (tools/ros_view.py): attaches to a running ROS-driven sim over rosbridge
 # (ws://localhost:9090) and renders it live. roslibpy is pure-Python (no ROS install needed), so
 # it installs into this uv venv; the sim publishes /umiusi_sim/qpos which the viewer replays.
@@ -53,7 +58,7 @@ learn = [
 requires = ["setuptools>=61"]
 build-backend = "setuptools.build_meta"
 
-# --- Package discovery (src-layout: two top-level packages) -------------------
+# --- Package discovery (src-layout: three top-level packages) -----------------
 [tool.setuptools.packages.find]
 where = ["src"]
 

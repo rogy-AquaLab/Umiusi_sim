@@ -3432,15 +3432,11 @@ name = "umiusi-sim"
 version = "0.1.0"
 source = { editable = "." }
 dependencies = [
-    { name = "gymnasium" },
     { name = "mujoco" },
     { name = "numpy", version = "2.2.6", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.11'" },
     { name = "numpy", version = "2.4.6", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version == '3.11.*'" },
     { name = "numpy", version = "2.5.0", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.12'" },
     { name = "pyyaml" },
-    { name = "stable-baselines3" },
-    { name = "torch", version = "2.12.1", source = { registry = "https://download.pytorch.org/whl/cpu" }, marker = "sys_platform == 'darwin'" },
-    { name = "torch", version = "2.12.1+cpu", source = { registry = "https://download.pytorch.org/whl/cpu" }, marker = "sys_platform != 'darwin'" },
 ]
 
 [package.optional-dependencies]
@@ -3448,7 +3444,6 @@ dev = [
     { name = "fast-simplification" },
     { name = "imageio", extra = ["ffmpeg"] },
     { name = "ruff" },
-    { name = "tensorboard" },
 ]
 learn = [
     { name = "albumentations" },
@@ -3466,6 +3461,15 @@ perception = [
     { name = "scipy", version = "1.15.3", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.11'" },
     { name = "scipy", version = "1.17.1", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version == '3.11.*'" },
     { name = "scipy", version = "1.18.0", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.12'" },
+    { name = "torch", version = "2.12.1", source = { registry = "https://download.pytorch.org/whl/cpu" }, marker = "sys_platform == 'darwin'" },
+    { name = "torch", version = "2.12.1+cpu", source = { registry = "https://download.pytorch.org/whl/cpu" }, marker = "sys_platform != 'darwin'" },
+]
+rl = [
+    { name = "gymnasium" },
+    { name = "stable-baselines3" },
+    { name = "tensorboard" },
+    { name = "torch", version = "2.12.1", source = { registry = "https://download.pytorch.org/whl/cpu" }, marker = "sys_platform == 'darwin'" },
+    { name = "torch", version = "2.12.1+cpu", source = { registry = "https://download.pytorch.org/whl/cpu" }, marker = "sys_platform != 'darwin'" },
 ]
 viz = [
     { name = "roslibpy" },
@@ -3475,7 +3479,7 @@ viz = [
 requires-dist = [
     { name = "albumentations", marker = "extra == 'learn'", specifier = ">=1.4" },
     { name = "fast-simplification", marker = "extra == 'dev'" },
-    { name = "gymnasium", specifier = ">=0.29" },
+    { name = "gymnasium", marker = "extra == 'rl'", specifier = ">=0.29" },
     { name = "imageio", extras = ["ffmpeg"], marker = "extra == 'dev'", specifier = ">=2.31" },
     { name = "mujoco", specifier = ">=3.2" },
     { name = "numpy", specifier = ">=1.24" },
@@ -3487,14 +3491,15 @@ requires-dist = [
     { name = "roslibpy", marker = "extra == 'viz'", specifier = ">=1.5" },
     { name = "ruff", marker = "extra == 'dev'", specifier = ">=0.5" },
     { name = "scipy", marker = "extra == 'perception'", specifier = ">=1.10" },
-    { name = "stable-baselines3", specifier = ">=2.3" },
-    { name = "tensorboard", marker = "extra == 'dev'", specifier = ">=2.15" },
+    { name = "stable-baselines3", marker = "extra == 'rl'", specifier = ">=2.3" },
+    { name = "tensorboard", marker = "extra == 'rl'", specifier = ">=2.15" },
     { name = "thop", marker = "extra == 'learn'", specifier = ">=0.1.1" },
-    { name = "torch", specifier = ">=2.2", index = "https://download.pytorch.org/whl/cpu" },
+    { name = "torch", marker = "extra == 'perception'", specifier = ">=2.2", index = "https://download.pytorch.org/whl/cpu" },
+    { name = "torch", marker = "extra == 'rl'", specifier = ">=2.2", index = "https://download.pytorch.org/whl/cpu" },
     { name = "torchvision", marker = "extra == 'learn'", specifier = ">=0.17", index = "https://download.pytorch.org/whl/cpu" },
     { name = "ultralytics", marker = "extra == 'learn'", specifier = ">=8.2" },
 ]
-provides-extras = ["dev", "perception", "viz", "learn"]
+provides-extras = ["rl", "perception", "dev", "viz", "learn"]
 
 [[package]]
 name = "urllib3"
