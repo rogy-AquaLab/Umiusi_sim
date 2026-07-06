@@ -326,7 +326,7 @@ def main():
 
     if not args.no_eval:
         print("\n" + "=" * 60 + "\nVAL COMPARISON: learned vs color vs hough\n" + "=" * 60)
-        from tools.perception_eval_learned import compare
+        from umiusi_perception.eval import compare
         compare(str(ckpt), args.data_root, args.val_split,
                 ["learned", "color", "hough"], input_size=args.input_size, conf=args.conf)
     return 0
