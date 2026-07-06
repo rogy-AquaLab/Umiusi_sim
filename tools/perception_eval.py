@@ -32,8 +32,8 @@ import imageio.v2 as imageio
 import numpy as np
 from PIL import Image, ImageDraw
 
-from umiusi_sim.perception import REAL_THRESHOLDS, SIM_THRESHOLDS, detect_balloons
-from umiusi_sim.perception.hough_detector import detect_combined, detect_hough
+from umiusi_perception import REAL_THRESHOLDS, SIM_THRESHOLDS, detect_balloons
+from umiusi_perception.hough_detector import detect_combined, detect_hough
 
 DATA_ROOT = pathlib.Path("/home/satoi/mujoco_ws/ai/balloon")
 CATMAP = {1: "red", 2: "blue", 3: "yellow"}

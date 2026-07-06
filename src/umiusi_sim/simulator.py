@@ -216,7 +216,7 @@ class UmiusiSimulator:
         `MUJOCO_GL=egl` (or osmesa) in the environment; a GUI/desktop GL context works too.
 
         If ``degrade`` (or ``self.camera_degrade`` when ``degrade is None``) is True, the frame is
-        passed through the physically-based underwater degradation (``perception.underwater_sim``)
+        passed through the physically-based underwater degradation (``rendering.underwater_sim``)
         using the camera's depth buffer, so the perception input looks like real murky footage —
         distant red darkens/blues out, haze builds with distance. The water condition is
         ``water_params`` (or ``self.water_params``, or a moderately-murky default) — fixed for the
@@ -234,7 +234,7 @@ class UmiusiSimulator:
         rgb = self._renderer.render()
         if not degrade:
             return rgb
-        from .perception import underwater_sim as us
+        from .rendering import underwater_sim as us
         self._renderer.enable_depth_rendering()
         self._renderer.update_scene(self.data, camera=camera, scene_option=opt)
         depth = self._renderer.render()

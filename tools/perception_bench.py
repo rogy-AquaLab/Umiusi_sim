@@ -53,7 +53,7 @@ os.environ.setdefault("MKL_NUM_THREADS", "1")
 import numpy as np  # noqa: E402
 import torch  # noqa: E402
 
-from umiusi_sim.perception.learned_detector import PatchVerifierNet, TinyBalloonNet  # noqa: E402
+from umiusi_perception.learned_detector import PatchVerifierNet, TinyBalloonNet  # noqa: E402
 
 torch.set_num_threads(1)
 
@@ -169,7 +169,7 @@ def _project_pi4_fps(gflops: float) -> tuple[float, float]:
 def bench_cnn(name: str, make_model, sizes: list[int], calib_imgs: list[np.ndarray],
               iters: int) -> list[dict]:
     """Benchmark a full-image CNN candidate (tiny CNN or YOLOv8n) across input sizes."""
-    from umiusi_sim.perception.learned_detector import preprocess
+    from umiusi_perception.learned_detector import preprocess
     rows = []
     for sz in sizes:
         model = make_model()
@@ -188,7 +188,7 @@ def bench_cnn(name: str, make_model, sizes: list[int], calib_imgs: list[np.ndarr
 
 def bench_yolov8n(sizes: list[int], calib_imgs: list[np.ndarray], iters: int) -> list[dict]:
     """YOLOv8n via ultralytics; export architecture-only (nc=3) to ONNX, quantise, time."""
-    from umiusi_sim.perception.learned_detector import preprocess
+    from umiusi_perception.learned_detector import preprocess
     rows = []
     for sz in sizes:
         gf = params = float("nan")
@@ -224,7 +224,7 @@ def bench_hough_hybrid(sizes: list[int], sample_imgs: list[np.ndarray], calib_im
     """Hough-proposal + tiny-CNN verifier: time Hough on the full image + verifier on N patches."""
     import cv2
 
-    from umiusi_sim.perception.hough_detector import _preprocess, _run_hough
+    from umiusi_perception.hough_detector import _preprocess, _run_hough
     cv2.setNumThreads(1)
 
     # Verifier cost is size-independent (fixed 32x32 patches); measure it once.

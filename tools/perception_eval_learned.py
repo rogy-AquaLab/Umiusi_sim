@@ -5,7 +5,7 @@ classical baselines on the SAME val split, via the SAME IoU harness. To honour t
 files, do not edit existing source" constraint, this reuses ``tools/perception_eval``'s machinery
 (``load_split``, ``evaluate``, ``make_detfn``, ``print_report``, greedy IoU match) rather than
 editing it -- it simply adds a ``learned`` method whose detection function comes from
-``umiusi_sim.perception.learned_detector.load_learned_detector``. Folding ``learned`` into
+``umiusi_perception.learned_detector.load_learned_detector``. Folding ``learned`` into
 ``perception_eval``'s own ``--method`` later is a one-line change (add it to ``make_detfn``).
 
 Usage:
@@ -20,8 +20,8 @@ import argparse
 import pathlib
 import sys
 
-from umiusi_sim.perception import REAL_THRESHOLDS
-from umiusi_sim.perception.learned_detector import load_learned_detector
+from umiusi_perception import REAL_THRESHOLDS
+from umiusi_perception.learned_detector import load_learned_detector
 
 from tools.perception_eval import (
     DATA_ROOT,

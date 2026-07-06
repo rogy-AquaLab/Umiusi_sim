@@ -41,7 +41,7 @@ from __future__ import annotations
 import math
 from dataclasses import dataclass, field
 
-from umiusi_sim.perception.tracker import ASSOC_BEARING, Tracker, plausible_detections
+from umiusi_perception.tracker import ASSOC_BEARING, Tracker, plausible_detections
 
 POSITIVE_COLOURS = ("red", "yellow")
 
@@ -184,7 +184,7 @@ SUPPRESS_STEPS = 350      # ~7 s to prefer other colours after giving up on one
 AVOID_AZ = math.radians(28.0)   # a blue within this bearing of dead-ahead is "in the way"
 AVOID_RANGE = 1.6         # ...and closer than this -> steer around it
 AVOID_YAW = 0.5           # avoidance yaw magnitude added away from the blue
-# --- temporal track (the ONE mechanism: see umiusi_sim.perception.tracker) ---------------------
+# --- temporal track (the ONE mechanism: see umiusi_perception.tracker) ---------------------
 # Multi-frame association, acquisition-vote FP rejection AND lock-hold persistence now all live in
 # ``perception.tracker.Tracker`` (ROS/sim-free, reused by the robot nodes). The FSM consumes CONFIRMED
 # tracks from it. The tuned thresholds live there: association gate (ASSOC_BEARING/ASSOC_RANGE_FRAC),

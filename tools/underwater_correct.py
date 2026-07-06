@@ -11,7 +11,7 @@ from pathlib import Path
 import imageio.v2 as imageio
 import numpy as np
 
-from umiusi_sim.perception.underwater import underwater_correct
+from umiusi_perception.underwater import underwater_correct
 
 EXTS = {".jpg", ".jpeg", ".png"}
 

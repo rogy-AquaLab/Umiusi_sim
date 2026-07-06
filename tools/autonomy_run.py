@@ -9,9 +9,9 @@ degraded ``front_cam`` frame.
 Pipeline, per control step:
   1. render the degraded onboard camera (``sim.render_camera(degrade=True)``) — the SAME appearance
      the detector was trained on (oval balloons, pin geom hidden, subtle tethers, sunlit pool; see
-     ``perception.render_appearance``) plus the physically-based underwater degradation;
+     ``umiusi_sim.description.appearance``) plus the physically-based underwater degradation;
   2. run the learned detector -> ``[Detection]`` (colour / bearing / range / bbox);
-  3. the behaviour FSM (``tools/behavior``) picks the nearest red/yellow, steers onto its bearing,
+  3. the behaviour FSM (``umiusi_perception.autonomy``) picks the nearest red/yellow, steers onto its bearing,
      surges in, RAMs, and avoids blue;
   4. drive via the analytical feed-forward allocation; score geometric pin-tip pops (ground-truth
      geometry — the "did it physically pop" check, exactly as in competition_run).
@@ -31,13 +31,13 @@ import mujoco
 import numpy as np
 from PIL import Image, ImageDraw
 
-from tools.behavior import BalloonBehavior
+from umiusi_perception.autonomy import BalloonBehavior
+from umiusi_perception.learned_detector import load_learned_detector
+from umiusi_perception.tracker import sanitise_near_colours
 from umiusi_sim.control import feedforward_allocation
+from umiusi_sim.description import appearance as ra
 from umiusi_sim.description.scenarios import competition_balloon as scn
-from umiusi_sim.perception import render_appearance as ra
-from umiusi_sim.perception import underwater_sim as us
-from umiusi_sim.perception.learned_detector import load_learned_detector
-from umiusi_sim.perception.tracker import sanitise_near_colours
+from umiusi_sim.rendering import underwater_sim as us
 from umiusi_sim.simulator import UmiusiSimulator
 
 _DEFAULT_MODEL = "examples/balloon_detector/model.pt"  # shipped best detector (camp3 mix, colour-invariant)

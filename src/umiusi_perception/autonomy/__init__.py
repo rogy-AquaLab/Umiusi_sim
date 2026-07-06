@@ -7,6 +7,6 @@ real robot's ``navigator_node`` (``ros2_ws/src/umiusi_autonomy``). Keeping it he
 package, not ``tools/``) is what lets the deploy nodes ``import`` it directly.
 """
 
-from umiusi_sim.autonomy.behavior import BalloonBehavior
+from umiusi_perception.autonomy.behavior import BalloonBehavior
 
 __all__ = ["BalloonBehavior"]

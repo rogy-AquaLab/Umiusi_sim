@@ -24,8 +24,8 @@ import numpy as np
 from PIL import Image, ImageDraw
 
 from umiusi_sim.description.scenarios import competition_balloon as scn
-from umiusi_sim.perception import detect_balloons
-from umiusi_sim.perception.balloon_detector import _pinhole
+from umiusi_perception import detect_balloons
+from umiusi_perception.balloon_detector import _pinhole
 from umiusi_sim.simulator import UmiusiSimulator
 
 _TMP = pathlib.Path(tempfile.gettempdir()) / "umiusi_sim"

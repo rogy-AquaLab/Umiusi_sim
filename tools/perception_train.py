@@ -43,7 +43,7 @@ import numpy as np
 import torch
 from torch.utils.data import DataLoader, Dataset
 
-from umiusi_sim.perception.learned_detector import (
+from umiusi_perception.learned_detector import (
     COLOUR_TO_IDX,
     STRIDE,
     TinyBalloonNet,

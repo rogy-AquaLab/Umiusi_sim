@@ -38,7 +38,7 @@ from dataclasses import dataclass
 
 import numpy as np
 
-from umiusi_sim.perception.balloon_detector import (
+from umiusi_perception.balloon_detector import (
     BALLOON_DIAMETER_M,
     COLOUR_POINTS,
     Detection,

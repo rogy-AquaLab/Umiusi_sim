@@ -44,7 +44,7 @@ from __future__ import annotations
 import cv2
 import numpy as np
 
-from umiusi_sim.perception.balloon_detector import (
+from umiusi_perception.balloon_detector import (
     BALLOON_DIAMETER_M,
     COLOUR_POINTS,
     REAL_THRESHOLDS,
@@ -259,7 +259,7 @@ def detect_combined(rgb: np.ndarray, fovy_deg: float = 60.0,
     """Convenience: run the colour detector and the Hough detector and ``combine`` them.
 
     Imported lazily to avoid a hard import cycle at module load."""
-    from umiusi_sim.perception.balloon_detector import detect_balloons
+    from umiusi_perception.balloon_detector import detect_balloons
     colour_dets = detect_balloons(rgb, fovy_deg=fovy_deg, thresholds=thresholds,
                                   reject_reflections=reject_reflections, max_area_frac=max_area_frac)
     recover_frac = RECOVER_MIN_FRAC if mode == "recover" else COLOUR_MIN_FRAC

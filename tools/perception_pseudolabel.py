@@ -21,7 +21,7 @@ import cv2
 import imageio.v2 as imageio
 import numpy as np
 
-from umiusi_sim.perception.learned_detector import load_learned_detector
+from umiusi_perception.learned_detector import load_learned_detector
 
 # COCO category ids match the existing annotations (annotations/train.json).
 CAT_ID = {"red": 1, "blue": 2, "yellow": 3}

@@ -30,8 +30,8 @@ import numpy as np
 from scipy.spatial.transform import Rotation as Rot
 
 from umiusi_sim.description.scenarios import competition_balloon as scn
-from umiusi_sim.perception import render_appearance as ra
-from umiusi_sim.perception import underwater_sim as us
+from umiusi_sim.description import appearance as ra
+from umiusi_sim.rendering import underwater_sim as us
 
 try:
     import cv2

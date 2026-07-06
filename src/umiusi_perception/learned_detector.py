@@ -35,7 +35,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-from umiusi_sim.perception.balloon_detector import (
+from umiusi_perception.balloon_detector import (
     BALLOON_DIAMETER_M,
     COLOUR_POINTS,
     Detection,

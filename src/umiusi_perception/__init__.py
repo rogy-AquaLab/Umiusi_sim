@@ -10,13 +10,13 @@ enables ``reject_reflections=True`` to drop water-surface reflections. See ``bal
 for the method, the derivation of the real windows, and the tunable constants.
 """
 
-from umiusi_sim.perception.balloon_detector import (
+from umiusi_perception.balloon_detector import (
     REAL_THRESHOLDS,
     SIM_THRESHOLDS,
     Detection,
     detect_balloons,
 )
-from umiusi_sim.perception.tracker import (
+from umiusi_perception.tracker import (
     Track,
     Tracker,
     confirm_colour,
