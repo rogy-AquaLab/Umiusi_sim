@@ -43,35 +43,42 @@ repository; this README plus code comments are the in-repo reference.
 
 ```
 mujoco_ws/                # workspace container (NOT version-controlled)
-  umiusi_sim/             # ← THIS git repo (monorepo: two installable packages under src/)
+  umiusi_sim/             # ← THIS git repo (monorepo: THREE installable packages under src/)
     src/
-      umiusi_sim/           # PACKAGE 1: reusable simulator (no ROS, no RL) — usable by other robots/tasks
+      umiusi_sim/           # PACKAGE 1 (CORE): reusable simulator. deps: mujoco + numpy + pyyaml (NO torch)
         simulator.py        #   UmiusiSimulator: reset() / step(action) / render_camera()
         control.py          #   analytical feed-forward allocation (AttitudeController port, no learning)
         physics/            #   analytical hydrodynamics + thruster model
-        description/        #   robot description: umiusi.xml (MJCF) + onboard cameras
+        rendering/          #   underwater_sim.py — onboard-camera degradation forward model (what it sees)
+        description/        #   robot description: umiusi.xml (MJCF) + appearance.py (MjSpec appearance)
           scenarios/        #     composed worlds (MjSpec) — competition_balloon.py (pool+balloons+pin)
-      umiusi_rl/            # PACKAGE 2: RL experiments (depends on umiusi_sim)
+      umiusi_perception/   # PACKAGE 2: detection + autonomy (depends on umiusi_sim; extra=[perception])
+        balloon_detector.py #   classical HSV; learned_detector.py (TinyBalloonNet); tracker.py
+        underwater.py       #   underwater colour RESTORATION;  eval.py — shared IoU eval harness
+        autonomy/behavior.py #   BalloonBehavior — the rule-based search→approach→ram→confirm FSM
+      umiusi_rl/           # PACKAGE 3: RL experiments (depends on umiusi_sim; extra=[rl])
         envs/umiusi_pose_env.py #   UmiusiPoseEnv: attitude / depth / pose / attitude_velocity
         train.py  eval.py   #   PPO default (--algo sac/td3); models/ is gitignored
     configs/                # umiusi.yaml (physics) + train_ppo.yaml (env/reward/algo)
-    tools/                  # sim: validate_sim, drive, snapshot, camera_demo, scenario_demo, competition_run, analyze_steady
-                            #   perception: perception_demo/train/eval/eval_learned/bench/pseudolabel, underwater_correct, gen_sim_dataset
-                            #   autonomy: behavior (perception FSM), autonomy_run (perception-in-loop balloon-pop, no RL)
-                            #   ROS (rosbridge): ros_view (viewer), ros_policy (RL -> cmd/direct)
+    tools/                  # THIN CLI entry points over the packages (uv run python -m tools.<name>):
+                            #   sim: validate_sim, drive, snapshot, camera_demo, scenario_demo, competition_run
+                            #   perception: perception_demo/train/eval/eval_learned/bench/pseudolabel, gen_sim_dataset
+                            #   autonomy: autonomy_run (perception-in-loop balloon-pop, no RL)
+                            #   ROS (rosbridge): ros_view (viewer), ros_policy (RL -> cmd/direct); sim_server (IPC backend)
     examples/               # shipped example models — cruise_policy/ (RL) + balloon_detector/ (learned
                             #   detector) — so eval / drive / autonomy run out of the box
     media/                  # rendered placement screenshots
     pyproject.toml  uv.lock # uv-managed deps (CPU torch pinned); reproducible via `uv sync`
     # local-only (gitignored / outside the repo): models/ (trained policies), umiusi_model/ (CAD provenance),
     # and the ~/mujoco_ws/ai/ working docs (project_spec, architecture, sim_spec) kept beside the repo.
-  ros2_ws/                 # separate ROS 2 workspace (bridge, later phases; its own repo when needed)
+  ros2_ws/                 # separate ROS 2 workspace: umiusi_sim_bridge (IPC relay) + umiusi_autonomy (deploy nodes)
 ```
 
-The split keeps the **reusable simulation** (`umiusi_sim`) independent of the **RL experiments**
-(`umiusi_rl`): `umiusi_rl` imports `umiusi_sim` as a library. If a second consumer appears (e.g. a
-perception / Pi 4 stack), `umiusi_sim` can be promoted to its own repo consumed via a normal
-`pip install` git dependency with no churn to the import paths.
+Three cleanly-layered packages, one repo: the **core simulator** (`umiusi_sim`, mujoco/numpy only)
+imports neither of the others; **perception** (`umiusi_perception`) and **RL** (`umiusi_rl`) each
+import the core. So the sim runs standalone without torch, and RL/perception are opt-in extras. If a
+second consumer appears, any package can be promoted to its own repo via a normal `pip install` git
+dependency with no churn to the import paths.
 
 ---
 
@@ -79,24 +86,35 @@ perception / Pi 4 stack), `umiusi_sim` can be promoted to its own repo consumed 
 
 WSL Ubuntu 24.04, Python ≥3.10, CPU-only. ROS 2 is **not** needed for the simulation/RL.
 
-The project uses [**uv**](https://docs.astral.sh/uv/) — one command builds a reproducible virtual
-environment from `pyproject.toml` + `uv.lock` (CPU-only torch is pinned, so no CUDA download).
+Dependencies are split so you install only what you use: the **core sim needs no torch**; the
+detector/autonomy (`[perception]`) and training (`[rl]`) are opt-in extras.
 
 ```bash
 # 1. system deps (MuJoCo GUI + video encoding)
 sudo apt update && sudo apt install -y build-essential libglfw3 libglfw3-dev ffmpeg
-
-# 2. install uv (once)
-curl -LsSf https://astral.sh/uv/install.sh | sh
-
-# 3. create the environment (installs both packages editable + all deps)
-cd ~/mujoco_ws/umiusi_sim
-uv sync --extra dev
 ```
 
-Run any command with `uv run` (it uses the managed `.venv` automatically), e.g.
-`uv run python -m tools.validate_sim`. All commands below assume the repo root
-(`~/mujoco_ws/umiusi_sim`); drop the `uv run` prefix if you `source .venv/bin/activate` first.
+**Recommended — [uv](https://docs.astral.sh/uv/)** (one command, reproducible from `uv.lock`; CPU
+torch pinned, so no CUDA download):
+```bash
+curl -LsSf https://astral.sh/uv/install.sh | sh      # install uv once
+cd ~/mujoco_ws/umiusi_sim
+uv sync                                    # core sim only (mujoco/numpy) — no torch
+uv sync --extra perception --extra dev     # + learned detector + autonomy (+ imageio/ruff)
+uv sync --extra rl --extra dev             # + RL training/eval
+```
+Run any command with `uv run` (uses the managed `.venv`), and pass the extra it needs, e.g.
+`uv run --extra perception python -m tools.autonomy_run`.
+
+**Fallback — plain venv + pip** (no uv):
+```bash
+cd ~/mujoco_ws/umiusi_sim
+python -m venv .venv && . .venv/bin/activate
+pip install -e '.[perception,rl,dev]'      # or just '.[perception]' / bare '.' for the core sim
+```
+
+All commands below assume the repo root (`~/mujoco_ws/umiusi_sim`); drop the `uv run` prefix if you
+`source .venv/bin/activate` first.
 
 ---
 
@@ -179,11 +197,12 @@ behavior FSM replace the ground-truth driver in the next phase.
 
 **Perception-in-the-loop autonomy** (vision replaces the ground-truth driver, still no RL) — the robot
 detects balloons from its OWN underwater-degraded `front_cam` with the learned detector, and a
-**rule-based behaviour FSM** (`tools/behavior.py`: search → approach → align → ram → camera-confirm,
-with multi-frame track voting) drives it through the same feed-forward allocation. A ~4.5 m detection
-range gate + a two-band target rule (near ≤2.5 m: nearest positive incl. yellow; mid 2.5–4.5 m: red
-only; never blue) pick the target, and pops are confirmed from the camera alone (balloons vanish when
-popped):
+**rule-based behaviour FSM** (`umiusi_perception.autonomy.BalloonBehavior`: search → approach → align
+→ ram → camera-confirm, with multi-frame track voting) drives it through the same feed-forward
+allocation. A ~4.5 m detection range gate drops far false positives, selection is the **nearest
+reachable non-blue** track (maximise throughput / clear the field near-to-far, which also avoids
+under-passing un-popped balloons — the wire-entanglement lever), and pops are confirmed from the
+camera alone (balloons vanish when popped):
 ```bash
 MUJOCO_GL=egl uv run --extra perception python -m tools.autonomy_run --headless --seed 1  # short self-test (mp4)
 MUJOCO_GL=egl uv run --extra perception python -m tools.autonomy_run --full-run           # record the FULL competition to mp4
@@ -268,31 +287,32 @@ synthetic-data pipeline) feeding a rule-based behaviour FSM that pops balloons p
 end-to-end (`tools/autonomy_run`, no RL).
 
 **Not supported yet:**
-- **ROS 2 integration — done** (in the sibling `ros2_ws/`, not this repo). A custom MuJoCo
-  `ros2_control` hardware plugin (`umiusi_sim_bridge`) runs the analytical hydro at 100 Hz, so the REAL
-  `sinsei_umiusi_control` controllers drive the sim unchanged (swap the plugin for CAN to deploy). A
-  trained RL policy can also drive it as the low-level controller over the thruster direct-override
-  path (`tools/ros_policy.py`), and `tools/ros_view.py` renders it live (both over rosbridge). The
-  community `mujoco_ros2_control` was ruled out (joint/sensor interfaces only, not our ESC/servo GPIO
-  + site-force actuation + analytical hydro). Build/run + the full data-flow are documented in
-  [`ros2_ws/src/umiusi_sim_bridge/README.md`](../ros2_ws/src/umiusi_sim_bridge/README.md). Remaining:
-  aarch64 MuJoCo for the Pi; FF-frame sign reconcile.
+- **ROS 2 integration — done** (in the sibling `ros2_ws/`, not this repo). Physics lives in **one**
+  place (the Python sim); the `ros2_control` hardware plugin (`umiusi_sim_bridge`) is a **thin IPC
+  relay** — it marshals each control cycle's command/state over a Unix socket to the Python sim server
+  (`tools/sim_server.py`), holding no physics itself, so the REAL `sinsei_umiusi_control` controllers
+  drive the sim unchanged (swap the plugin for CAN to deploy). A trained RL policy can also drive it
+  over the thruster direct-override path (`tools/ros_policy.py`), and `tools/ros_view.py` renders it
+  live (both over rosbridge). **Deploy nodes** (`ros2_ws/src/umiusi_autonomy`): `perception_node` +
+  `navigator_node` wrap `umiusi_perception` so the same detector + FSM run on the robot. See
+  [`ros2_ws/src/umiusi_sim_bridge/README.md`](../ros2_ws/src/umiusi_sim_bridge/README.md) and the
+  `umiusi_autonomy` README. Remaining: aarch64 MuJoCo for the Pi; FF-frame sign reconcile.
 - **3-D depth-holding locomotion.** The trained low-level cruise is orientation + *horizontal* direction
   only. The final drivetrain wants orientation + depth-hold + horizontal cruise, but the depth-sensor
   choice isn't fixed yet, so that training is on hold. (The env already supports a 3-D velocity command
   via `vel_cmd_horizontal: false`.)
 - **Perception.** On the **sim** scene, classical colour detection is done (`tools.perception_demo`,
-  `umiusi_sim.perception`, `uv sync --extra perception`: colour + bearing + range, ~100%). On **real
+  `umiusi_perception`, `uv sync --extra perception`: colour + bearing + range, ~100%). On **real
   underwater images** classical CV hits a recall wall (red attenuates to near-invisible, blue ≈ pool
   water); colour + a Hough-circle shape pass cut the false-positive flood but can't recover red. A
-  **learned tiny-CNN detector** (`umiusi_sim.perception.learned_detector`, `tools.perception_train` /
+  **learned tiny-CNN detector** (`umiusi_perception.learned_detector`, `tools.perception_train` /
   `perception_bench`, `uv sync --extra learn`) breaks that wall — a 40-image baseline lifts red recall
   0.00→0.82, blue→0.63 — and is **Pi-4-safe** (int8 ONNX, ~12–30 fps @320px projected). An
-  **underwater colour-restoration** preprocess (`perception.underwater`, `tools.underwater_correct`:
+  **underwater colour-restoration** preprocess (`umiusi_perception.underwater`, `tools.underwater_correct`:
   red-channel compensation + white balance + CLAHE) recovers red-vs-blue — the hardest real-world
   ambiguity, since deep red attenuates to look blue — for both labelling and detector input. Synthetic
   data: `tools.gen_sim_dataset` renders the balloon scene, applies a physically-based underwater
-  degradation (`perception.underwater_sim`: depth-based colour attenuation + backscatter haze +
+  degradation (`umiusi_sim.rendering.underwater_sim`: depth-based colour attenuation + backscatter haze +
   turbidity + surface reflection, domain-randomised), and auto-labels balloons from the segmentation
   buffer — free perfectly-labelled data to pretrain on + a hard, difficulty-dialable eval set.
   Detectors are compared head-to-head (classical vs learned, per-colour P/R/F1) with
@@ -302,13 +322,14 @@ end-to-end (`tools/autonomy_run`, no RL).
   stress-eval set, and closing the sim↔real **colour-cast gap** (domain-randomised water colour + a
   strong colour/resolution training aug) is the lever for making synthetic data help. Next: more
   labelled real frames, then the final int8 export + a real Pi 4 benchmark.
-- **Autonomy (behavior FSM) — done.** A rule-based behaviour FSM (`tools/behavior.py`: search →
+- **Autonomy (behavior FSM) — done.** A rule-based behaviour FSM (`umiusi_perception.autonomy`: search →
   approach → align → ram → camera-confirm, with multi-frame track voting, a ~4.5 m detection range gate,
-  a two-band near/mid target rule, and blue avoidance) consumes the learned detector's output to replace
-  `competition_run`'s ground-truth driver, driving perception-in-the-loop via the analytical feed-forward
-  allocation (`tools/autonomy_run.py`; `--full-run` records the whole competition, `--render` watches
-  live). Remaining: sim-to-real detector quality + the feed-forward frame-sign reconcile (`Vx→−X` etc.,
-  see `control.py`).
+  nearest-reachable-non-blue target selection + a wire-avoidance path guard, and blue avoidance) consumes
+  the learned detector's output to replace `competition_run`'s ground-truth driver, driving
+  perception-in-the-loop via the analytical feed-forward allocation (`tools/autonomy_run.py`;
+  `--full-run` records the whole competition, `--render` watches live). Deployed on the robot by the
+  `ros2_ws/src/umiusi_autonomy` nodes (same FSM). Remaining: ram/pop reliability (the ~15% hit-rate
+  control lever), sim-to-real detector quality + the feed-forward frame-sign reconcile (see `control.py`).
 - **Decoupled viewer — done (ROS path).** For the standalone Python sim, `tools.drive` / `--render`
   each launch their own in-process viewer. An rviz-style viewer that attaches to a *separately-running*
   sim now exists once the ROS bridge is up: the C++ `MujocoSystem` plugin publishes the MuJoCo `qpos`,

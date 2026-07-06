@@ -9,7 +9,7 @@ one library reused in both worlds.**
 | concern | what it is | where it lives |
 |---|---|---|
 | **Physics / sim** | buoyancy · drag · lift · thruster forces · MuJoCo step | **`umiusi_sim` (Python) — the single implementation** |
-| **Perception + navigator** (high level) | camera → learned detector → detections → behaviour FSM → velocity/attitude command | **one Python library** (`umiusi_sim.perception` + `tools/behavior.py`), reused in sim **and** on the robot |
+| **Perception + navigator** (high level) | camera → learned detector → detections → behaviour FSM → velocity/attitude command | **one Python library** (`umiusi_perception`, incl. `umiusi_perception.autonomy`), reused in sim (`tools/autonomy_run`) **and** on the robot (`ros2_ws/src/umiusi_autonomy`) |
 | **Low-level control** | Gate → Attitude → Thruster (or an RL policy) → per-thruster servo/ESC | ROS 2 `sinsei_umiusi_control` controllers (unchanged) |
 | **Learning** | RL (cruise/attitude) + detector training | **Python, offline** → emits models (`.zip`, `.pt`/`.onnx`) |
 
@@ -41,7 +41,7 @@ real hardware), so the C++ port's only justification — "Pi parity" — does no
 
 (3) REAL ROBOT — NO sim
     [camera] ─▶ perception_node (loads examples/balloon_detector) ─▶ /detections
-    /detections + /state/imu ─▶ navigator_node (tools/behavior FSM) ─▶ /cmd/target (or /cmd/direct)
+    /detections + /state/imu ─▶ navigator_node (umiusi_perception.autonomy FSM) ─▶ /cmd/target (or /cmd/direct)
     /cmd/target ─▶ sinsei Gate→Attitude→Thruster ─▶ CAN plugin ─▶ real thrusters
     (optional: RL policy node replaces AttitudeController via /cmd/direct/…)
 ```
@@ -68,7 +68,7 @@ cycle's command/state to/from the Python sim:
 
 ## Perception + navigator = one library, two front-ends
 
-`umiusi_sim.perception` (detector) and `tools/behavior.py` (the balloon FSM) are **plain Python
+`umiusi_perception` (detector) and `umiusi_perception.autonomy` (the balloon FSM) are **plain Python
 library code with no ROS and no sim dependency** — they take detections / state and return commands.
 
 - **Sim front-end**: `tools/autonomy_run.py` feeds them the degraded sim camera + drives the Python sim.
@@ -87,5 +87,5 @@ RL (`umiusi_rl`, PPO on the Python sim) and detector training (`tools/perception
 ## Consequences / decisions
 
 - **Do not** port lift/CoP (or any physics) to C++ — the bridge relays to Python instead.
-- Keep `tools/behavior.py` + `umiusi_sim.perception` free of ROS/sim imports so both front-ends reuse them.
+- Keep `umiusi_perception.autonomy` + `umiusi_perception` free of ROS/sim imports so both front-ends reuse them.
 - The real robot runs three things (perception_node, navigator_node, low-level controllers) — **no sim process**.

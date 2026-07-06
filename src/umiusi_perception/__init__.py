@@ -1,13 +1,18 @@
-"""Perception (phase 5b): onboard-camera balloon detection for the competition.
+"""umiusi_perception — onboard balloon detection + tracking + the balloon-popping autonomy.
 
-``balloon_detector.detect_balloons(rgb, thresholds=...)`` turns a front_cam RGB frame into
-per-balloon Detections (colour, image bbox/centroid, bearing az/el, range estimate). Classical
-CV (HSV thresholding + connected components) — deliberately simple and replaceable.
+The vision-and-behaviour stack for the competition, one ROS-free library reused UNCHANGED in the
+sim (``tools/autonomy_run``) and on the robot (``ros2_ws/src/umiusi_autonomy``). Depends on the
+core ``umiusi_sim`` (install extra ``[perception]``); the core does not depend on it. Contents:
 
-Two colour PROFILES are shipped: ``SIM_THRESHOLDS`` (default; tuned to clean sim renders) and
-``REAL_THRESHOLDS`` (data-driven from a labelled real underwater dataset). Real imagery also
-enables ``reject_reflections=True`` to drop water-surface reflections. See ``balloon_detector``
-for the method, the derivation of the real windows, and the tunable constants.
+  * ``balloon_detector`` — classical HSV+connected-components detector. ``detect_balloons(rgb, ...)``
+    -> per-balloon ``Detection``s (colour, bbox/centroid, bearing az/el, range). Ships two colour
+    PROFILES: ``SIM_THRESHOLDS`` (clean sim renders) and ``REAL_THRESHOLDS`` (real underwater data).
+  * ``learned_detector`` — the Pi-4-safe learned detector (``TinyBalloonNet``, CenterNet-lite);
+    ``load_learned_detector(weights)`` returns the same ``rgb -> [Detection]`` interface.
+  * ``tracker`` — multi-frame association / confirm-vote / persistence + near-colour re-confirmation.
+  * ``underwater`` — underwater colour RESTORATION (inference preprocessing).
+  * ``eval`` — the shared IoU evaluation harness (learned vs classical, per-colour P/R/F1).
+  * ``autonomy`` — ``BalloonBehavior``, the rule-based search/approach/align/ram/confirm FSM.
 """
 
 from umiusi_perception.balloon_detector import (
