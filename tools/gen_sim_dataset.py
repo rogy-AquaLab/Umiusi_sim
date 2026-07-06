@@ -51,6 +51,16 @@ DRAW_BGR = {"red": (40, 40, 220), "blue": (220, 120, 40), "yellow": (40, 210, 23
 OCCLUSION_MAX = 0.80  # drop a box if >80% of its expected projected area is missing (occluded/clipped)
 CLOSEUP_KEEP_FRAC = 0.02  # a frame-clipped balloon covering >=2% of the frame is a close-up -> KEEP it
 
+# --- DISTANCE-LIMITED LABELS ---------------------------------------------------------------------
+# Only balloons whose camera distance <= MAX_LABEL_RANGE are emitted as POSITIVE labels; balloons
+# farther than this stay UNLABELED, so the detector trains them as background/negatives and learns
+# NOT to fire on far/tiny balloons — baking the deployment range gate into the model and cutting the
+# far false-positive source at the SOURCE. Set to ~7 m (NOT tighter): the robot still needs far
+# balloons as coarse navigation cues to approach them, and the downstream tracker + range gate +
+# size/range filter mop up residual far FPs — going blind past ~4-5 m is worse than a few far FPs.
+# Configurable via --max-label-range (0 or negative disables the limit, e.g. for a full-range eval).
+MAX_LABEL_RANGE = 7.0  # metres
+
 # Balloon shape (ellipsoid aspect) is shared with the live perception render — see
 # perception.render_appearance. Seg->bbox stays exact; _boxes_from_seg uses this aspect.
 BALLOON_ASPECT = ra.BALLOON_ASPECT
@@ -112,7 +122,7 @@ SURFACE_Y = scn.POOL_DEPTH  # water-surface plane height [m] (=3.3); reflections
 
 
 def prep_render_spec(spec: mujoco.MjSpec, hide_tethers: bool = False, mirror: bool = False,
-                     lighting=None, wall_rgba=None, floor_rgb=None) -> None:
+                     lighting=None, wall_rgba=None, floor_rgb=None, headlamp: float | None = None) -> None:
     """Mutate a composed MjSpec IN PLACE for the rendered dataset (competition_balloon.py stays
     untouched — these edits happen only here, between build_spec and compile):
 
@@ -154,6 +164,66 @@ def prep_render_spec(spec: mujoco.MjSpec, hide_tethers: bool = False, mirror: bo
     # field. The surface geom is named 'perception_surface' (used below for the reflection mask).
     ra.brighten_like_pool(spec, POOL_CENTER_X, scn.POOL_DEPTH, POOL_LEN_X, POOL_LEN_Z,
                           scn.FLOOR_Y, add_surface=not mirror, lighting=lighting)
+    # Robot's own forward light cone (near-range shading cue). Not on the mirror/reflection scene.
+    if headlamp is not None and not mirror:
+        add_headlamp(spec, diffuse=headlamp)
+
+
+# --- robot headlamp (near-range light cone) ------------------------------------------------------
+# The vehicle carries its own forward light. Attached to base_link at the camera offset, pointing +X
+# (the camera look axis), with distance ATTENUATION so it lights NEAR balloons strongly and fades to
+# nothing on the far field — exactly the operating-range shading cue the detector should rely on.
+# Dataset-only (added here, not in the shared render_appearance), so live-inference appearance and
+# competition physics are untouched.
+HEADLAMP_PROB = 0.6                 # fraction of frames the headlamp is on
+HEADLAMP_DIFFUSE = (0.35, 1.05)     # per-frame lamp brightness
+
+
+def add_headlamp(spec: mujoco.MjSpec, diffuse: float, cutoff_deg: float = 38.0) -> None:
+    """Attach a forward SPOT light to base_link at the front_cam offset (robot's own light cone)."""
+    base = spec.body("base_link")
+    lt = base.add_light()
+    lt.name = "perception_headlamp"
+    lt.type = mujoco.mjtLightType.mjLIGHT_SPOT
+    lt.pos = [float(CAM_OFFSET[0]), float(CAM_OFFSET[1]), float(CAM_OFFSET[2])]
+    lt.dir = [1.0, 0.0, 0.0]                       # +X = camera look axis (base frame)
+    lt.diffuse = [diffuse, diffuse, diffuse * 0.97]  # near-white, a hair warm
+    lt.specular = [0.0, 0.0, 0.0]
+    lt.cutoff = float(cutoff_deg)
+    lt.exponent = 12.0
+    lt.attenuation = [0.5, 0.7, 1.1]               # 1/(c0+c1 d+c2 d^2): near lit, far dark
+    lt.castshadow = False
+
+
+# --- mild lens distortion (near-range DR) --------------------------------------------------------
+# A cheap wide-angle lens barrel/pincushion-distorts the image. We warp the RGB, DEPTH and SEG buffers
+# with the SAME map (nearest for depth/seg) BEFORE box extraction, so boxes recomputed from the warped
+# seg stay EXACT. Mild (|k1| small) and applied to a fraction of frames.
+LENS_DISTORT_PROB = 0.45
+LENS_K1 = 0.14  # max |k1| radial coefficient (barrel<0 / pincushion>0), normalised-radius model
+
+
+def _lens_distort_maps(h: int, w: int, k1: float):
+    """cv2.remap sample maps for a radial distortion with coefficient ``k1`` (normalised radius)."""
+    yy, xx = np.mgrid[0:h, 0:w].astype(np.float32)
+    cx, cy = (w - 1) / 2.0, (h - 1) / 2.0
+    nx = (xx - cx) / cx
+    ny = (yy - cy) / cy
+    r2 = nx * nx + ny * ny
+    f = 1.0 + k1 * r2
+    map_x = (cx + nx * f * cx).astype(np.float32)
+    map_y = (cy + ny * f * cy).astype(np.float32)
+    return map_x, map_y
+
+
+def _apply_distort(rgb, depth, seg, map_x, map_y):
+    """Warp co-registered RGB(bilinear)/DEPTH(nearest)/SEG(nearest) by a shared distortion map."""
+    rgb_d = cv2.remap(rgb, map_x, map_y, cv2.INTER_LINEAR, borderMode=cv2.BORDER_REPLICATE)
+    depth_d = cv2.remap(depth, map_x, map_y, cv2.INTER_NEAREST, borderMode=cv2.BORDER_REPLICATE)
+    seg_d = cv2.remap(seg, map_x, map_y, cv2.INTER_NEAREST, borderMode=cv2.BORDER_REPLICATE)
+    if seg_d.ndim == 2:                    # remap may drop a size-1 channel axis
+        seg_d = seg_d[..., None]
+    return rgb_d, depth_d, seg_d
 
 
 def _resize_wall(g, name: str, wall_rgba=WALL_RGBA) -> None:
@@ -182,12 +252,19 @@ PITCH_BUCKETS = {
 }
 
 # Extreme close-up ("about to ram") frames: place the camera right in front of one balloon so it
-# fills much of the frame. ~30% of front_cam frames. The real robot approaches until a balloon is
-# this close, so the detector (and eval) must cover it — including the frame-clipped case.
-CLOSEUP_PROB = 0.30
+# fills much of the frame. The real robot approaches until a balloon is this close, so the detector
+# (and eval) must cover it — including the frame-clipped case. Raised from 0.30 to bias the training
+# mix toward the OPERATING range (near detection is what the mission needs).
+CLOSEUP_PROB = 0.42
 # camera-to-balloon-CENTRE distance [m]. Balloon radius is 0.10 m: stay well outside it (and outside
 # the renderer near-plane) while filling much of the frame — 0.25 m ~= 70% frame height, 0.6 m ~= 30%.
 CLOSEUP_DIST = (0.25, 0.6)
+# NEAR-APPROACH frames: a softer approach than a ram close-up — the camera is 0.8-2.8 m behind a target
+# balloon (still looking at it) so it sits at operating range with OTHER balloons also in view. Fills
+# the near-distance band between ram close-ups and the wide field, where the pop happens. Applied to a
+# fraction of the front_cam frames that aren't ram close-ups.
+NEAR_APPROACH_PROB = 0.30
+NEAR_APPROACH_DIST = (0.8, 2.8)
 CAM_OFFSET = np.array([0.10, 0.12, 0.0])  # front_cam pos in the base frame (from umiusi.xml)
 
 
@@ -212,6 +289,24 @@ def _closeup_pose(data: mujoco.MjData, rng: np.random.Generator, layout) -> dict
             "roll_deg": 0.0, "closeup": True, "dist_bucket": "closeup"}
 
 
+def _near_approach_pose(data: mujoco.MjData, rng: np.random.Generator, layout) -> dict:
+    """Place the CAMERA 0.8-2.8 m behind a target balloon (operating-range approach, other balloons
+    still in view). Like ``_closeup_pose`` but farther and with more yaw/pitch/height jitter so the
+    target isn't always dead-centre — fills the near-distance band where the pop actually happens.
+    """
+    _, colour, bx, bz = layout[int(rng.integers(len(layout)))]
+    by = float(scn.BALLOON_SPECS[colour]["height"])
+    cc = float(rng.uniform(*NEAR_APPROACH_DIST))
+    yaw = float(rng.uniform(-0.22, 0.22))     # +-13 deg heading (target near, not exactly, centre)
+    pitch = float(rng.uniform(-0.20, 0.20))
+    dy = float(rng.uniform(-0.25, 0.25))      # small height offset so it isn't perfectly level
+    data.qpos[0:3] = [bx - cc - CAM_OFFSET[0], by - CAM_OFFSET[1] + dy, bz - CAM_OFFSET[2]]
+    q = Rot.from_euler("yz", [yaw, pitch]).as_quat()  # about +Y then +Z; [x,y,z,w]
+    data.qpos[3:7] = [float(q[3]), float(q[0]), float(q[1]), float(q[2])]
+    return {"pitch_bucket": "level", "pitch_deg": round(float(np.degrees(pitch)), 1),
+            "roll_deg": 0.0, "closeup": False, "dist_bucket": "near"}
+
+
 def randomize_base_pose(data: mujoco.MjData, rng: np.random.Generator, camera: str, layout=None) -> dict:
     """Randomize the free base pose so the balloon field is seen from varied viewpoints.
 
@@ -220,8 +315,11 @@ def randomize_base_pose(data: mujoco.MjData, rng: np.random.Generator, camera: s
     so conditions span near/far and looking-up/level/down; ~30% of front_cam frames are extreme
     close-ups (ram approach). Returns a condition dict for tagging.
     """
-    if camera == "front_cam" and layout and rng.random() < CLOSEUP_PROB:
-        return _closeup_pose(data, rng, layout)
+    if camera == "front_cam" and layout:
+        if rng.random() < CLOSEUP_PROB:
+            return _closeup_pose(data, rng, layout)
+        if rng.random() < NEAR_APPROACH_PROB:
+            return _near_approach_pose(data, rng, layout)
     x = float(rng.uniform(-1.5, 3.0))              # along the (long) run, behind/among the near balloons
     z = float(rng.uniform(-3.0, 3.0))              # lateral, within the (wider) pool
     if camera == "down_cam":
@@ -257,7 +355,7 @@ def _geom_colour(model: mujoco.MjModel, gid: int) -> str | None:
     return colour if colour in COLOUR_TO_CAT else None
 
 
-def _boxes_from_seg(model, seg, depth, fpx, min_area_px):
+def _boxes_from_seg(model, seg, depth, fpx, min_area_px, max_label_range=MAX_LABEL_RANGE):
     """Extract GT balloon boxes from the segmentation buffer.
 
     For each balloon sphere geom present:
@@ -266,15 +364,16 @@ def _boxes_from_seg(model, seg, depth, fpx, min_area_px):
       * expected full projected area from the sphere: pi * (fpx * R / d)^2, d = median mask depth
       * occlusion/clip fraction = 1 - visible_px / full_area
     Drop rules -> a box is kept only if: colour is a balloon, visible bbox area >= min_area_px,
-    and occlusion fraction <= OCCLUSION_MAX (this also catches boxes mostly off-screen, since a
-    clipped balloon has visible_px << full_area).
+    occlusion fraction <= OCCLUSION_MAX (this also catches boxes mostly off-screen, since a clipped
+    balloon has visible_px << full_area), AND distance <= ``max_label_range`` (far balloons stay
+    UNLABELED background; set <=0 to disable the range limit).
 
     Returns (boxes, drops) where boxes = list of dicts and drops = counts by reason.
     """
     h, w = seg.shape[:2]
     objid = seg[..., 0]
     boxes = []
-    drops = {"size": 0, "occluded": 0, "offscreen": 0}
+    drops = {"size": 0, "occluded": 0, "offscreen": 0, "far": 0}
     for gid in np.unique(objid):
         if gid < 0:
             continue
@@ -308,6 +407,12 @@ def _boxes_from_seg(model, seg, depth, fpx, min_area_px):
             continue
         if occ > OCCLUSION_MAX and not closeup_keep:
             drops["offscreen" if touches_border else "occluded"] += 1
+            continue
+        # DISTANCE-LIMITED LABEL: a genuinely far balloon is left UNLABELED (trains as background) so
+        # the detector learns not to fire on far/tiny balloons. Close-up frame-clipped balloons are
+        # near by definition (kept). max_label_range <= 0 disables the limit (full-range labels).
+        if max_label_range > 0 and d > max_label_range and not closeup_keep:
+            drops["far"] += 1
             continue
         boxes.append({
             "colour": colour,
@@ -414,6 +519,10 @@ def main() -> int:
     ap.add_argument("--height", type=int, default=480)
     ap.add_argument("--seed", type=int, default=0)
     ap.add_argument("--min-area-px", type=int, default=64, help="drop boxes smaller than this (w*h)")
+    ap.add_argument("--max-label-range", type=float, default=MAX_LABEL_RANGE,
+                    help="only balloons within this many metres are labelled POSITIVE; farther ones "
+                         "stay unlabelled background (bakes in the range gate). <=0 disables the limit "
+                         "(full-range labels — use for a fair eval set).")
     ap.add_argument("--clean", action="store_true", help="skip degradation (reference render)")
     ap.add_argument("--hide-tethers", action="store_true", help="hide balloon tethers entirely")
     ap.add_argument("--force-reflection", type=float, default=None, metavar="STRENGTH",
@@ -440,7 +549,7 @@ def main() -> int:
     coco = {"images": [], "annotations": [], "categories": CATEGORIES}
     ann_id = 1
     total_boxes = {"red": 0, "blue": 0, "yellow": 0}
-    total_drops = {"size": 0, "occluded": 0, "offscreen": 0}
+    total_drops = {"size": 0, "occluded": 0, "offscreen": 0, "far": 0}
     depth_lo, depth_hi = np.inf, -np.inf
     seen_balloon_ids = set()
     scene_opt = _geom_only_option()  # geoms-only (no sites/decorations) for every render pass
@@ -448,6 +557,9 @@ def main() -> int:
     total_pitch = {"up": 0, "level": 0, "down": 0}
     total_refl_frames = 0
     total_closeups = 0
+    total_near = 0
+    total_headlamp = 0
+    total_distort = 0
     for i in range(args.n):
         layout = sample_big_layout(rng)
         # Per-frame LIGHTING + scene-tone domain randomisation (biggest gap after the colour fix):
@@ -458,9 +570,14 @@ def main() -> int:
         wtint = np.array([rng.uniform(0.9, 1.1), 1.0, rng.uniform(0.9, 1.1)])
         wall_rgba = (*np.clip(wtone * wtint, 0.10, 0.90), 1.0)
         floor_rgb = tuple(np.clip(float(rng.uniform(0.30, 0.62)) * wtint, 0.10, 0.85))
+        # Near-range DR drawn from the SCENE stream (so --clean matches degraded): robot headlamp
+        # (forward light cone) present ~HEADLAMP_PROB of frames, and a mild lens distortion k1.
+        headlamp = float(rng.uniform(*HEADLAMP_DIFFUSE)) if rng.random() < HEADLAMP_PROB else None
+        distort_k1 = (float(rng.uniform(-LENS_K1, LENS_K1))
+                      if cv2 is not None and rng.random() < LENS_DISTORT_PROB else None)
         spec = scn.build_spec(layout)
         prep_render_spec(spec, hide_tethers=args.hide_tethers, lighting=lighting,
-                         wall_rgba=wall_rgba, floor_rgb=floor_rgb)
+                         wall_rgba=wall_rgba, floor_rgb=floor_rgb, headlamp=headlamp)
         model = spec.compile()
         # Small near-clip plane so extreme close-up balloons (~0.2 m) aren't clipped. The default
         # near plane scales with the (now large) scene extent -> ~0.9 m, which would hide ram close-ups.
@@ -474,6 +591,13 @@ def main() -> int:
             rgb, depth, seg = render_buffers(renderer, model, data, args.camera, scene_opt)
         finally:
             renderer.close()
+
+        # Mild lens distortion: warp RGB/DEPTH/SEG by a shared radial map BEFORE box extraction so the
+        # seg-derived boxes stay exact on the distorted image. Maps reused for the reflection composite.
+        dmap = None
+        if distort_k1 is not None:
+            dmap = _lens_distort_maps(args.height, args.width, distort_k1)
+            rgb, depth, seg = _apply_distort(rgb, depth, seg, *dmap)
 
         # focal length in pixels from the vertical FOV (for the occlusion/projection test)
         cam_id = model.camera(args.camera).id
@@ -489,11 +613,15 @@ def main() -> int:
             if gid >= 0 and _geom_colour(model, gid):
                 seen_balloon_ids.add(int(gid))
 
-        boxes, drops = _boxes_from_seg(model, seg, depth, fpx, args.min_area_px)
+        boxes, drops = _boxes_from_seg(model, seg, depth, fpx, args.min_area_px,
+                                       max_label_range=args.max_label_range)
         for k in total_drops:
             total_drops[k] += drops[k]
         total_pitch[pose_cond["pitch_bucket"]] += 1
         total_closeups += int(pose_cond.get("closeup", False))
+        total_near += int(pose_cond.get("dist_bucket") == "near")
+        total_headlamp += int(headlamp is not None)
+        total_distort += int(distort_k1 is not None)
 
         # water condition (sampled at a uniform 'murk' difficulty) + optional forced reflection
         params = us.random_params(water_rng)
@@ -510,6 +638,11 @@ def main() -> int:
             refl_rgb, refl_balloon = render_reflection_mask(
                 layout, data.qpos, args.camera, scene_opt, args.width, args.height,
                 lighting=lighting, wall_rgba=wall_rgba, floor_rgb=floor_rgb)
+            if dmap is not None:  # warp the reflection buffers by the same map so they stay aligned
+                refl_rgb = cv2.remap(refl_rgb, dmap[0], dmap[1], cv2.INTER_LINEAR,
+                                     borderMode=cv2.BORDER_REPLICATE)
+                refl_balloon = cv2.remap(refl_balloon.astype(np.uint8), dmap[0], dmap[1],
+                                         cv2.INTER_NEAREST, borderMode=cv2.BORDER_REPLICATE).astype(bool)
             reflect_mask = surface_mask & refl_balloon
             if reflect_mask.any():
                 rgb = us.apply_surface_reflection(
@@ -539,6 +672,10 @@ def main() -> int:
             "light_level": lighting.light_level,
             "sun_tilt_deg": lighting.sun_tilt_deg,
             "reflection": round(params.reflection, 3) if reflected else 0.0,
+            "headlamp": round(headlamp, 3) if headlamp is not None else 0.0,
+            "distort_k1": round(distort_k1, 3) if distort_k1 is not None else 0.0,
+            "motion_blur": None if args.clean else round(params.motion_blur, 2),
+            "vignette": None if args.clean else round(params.vignette, 3),
         }
         coco["images"].append({
             "id": i + 1, "file_name": fname, "width": args.width, "height": args.height,
@@ -558,7 +695,8 @@ def main() -> int:
             _imwrite(prev_dir / fname, prev)
 
         print(f"frame {i:04d}: kept={len(boxes):2d} "
-              f"drops(sz={drops['size']},occ={drops['occluded']},off={drops['offscreen']}) "
+              f"drops(sz={drops['size']},occ={drops['occluded']},off={drops['offscreen']},"
+              f"far={drops['far']}) "
               f"look={pose_cond['pitch_bucket']:5s}({pose_cond['pitch_deg']:+.0f}deg) "
               f"murk={condition['murk']} cast={condition['cast']}({condition['cast_bucket']}) "
               f"refl={reflected}")
@@ -572,13 +710,17 @@ def main() -> int:
     print(f"boxes by colour: red={total_boxes['red']} blue={total_boxes['blue']} "
           f"yellow={total_boxes['yellow']}  total={sum(total_boxes.values())}")
     print(f"boxes DROPPED: size(<{args.min_area_px}px)={total_drops['size']} "
-          f"occluded={total_drops['occluded']} offscreen={total_drops['offscreen']}  "
+          f"occluded={total_drops['occluded']} offscreen={total_drops['offscreen']} "
+          f"far(>{args.max_label_range:g}m)={total_drops['far']}  "
           f"total={sum(total_drops.values())}")
     if np.isfinite(depth_lo):
         print(f"depth buffer (scene, m): min={depth_lo:.3f} max={depth_hi:.3f}  "
               f"[far-plane background >50 m excluded]")
     print(f"pitch buckets: up={total_pitch['up']} level={total_pitch['level']} down={total_pitch['down']}"
-          f"   close-ups: {total_closeups}/{args.n}   surface reflection: {total_refl_frames}/{args.n}")
+          f"   close-ups: {total_closeups}/{args.n}   near-approach: {total_near}/{args.n}"
+          f"   surface reflection: {total_refl_frames}/{args.n}")
+    print(f"near-range DR: headlamp={total_headlamp}/{args.n}  lens-distort={total_distort}/{args.n}"
+          f"   label range: <= {args.max_label_range:g} m")
     print(f"unique balloon seg geom ids seen: {sorted(seen_balloon_ids)}")
     print(f"wrote: {img_dir}/  {args.out/'annotations.json'}  previews: {prev_dir}/")
     return 0
