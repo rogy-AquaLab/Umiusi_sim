@@ -1,16 +1,21 @@
 # umiusi_sim — MuJoCo simulation + RL + perception for the UMIUSI azimuth-thruster underwater robot.
 #
-# THREE installable packages under src/ (clean responsibility split — see ai/project_spec.yaml):
-#   umiusi_sim         — CORE simulator + analytical hydrodynamics + robot description (MJCF).
-#                        deps below carry NO torch, so the sim runs standalone.
+# ONE distribution ("umiusi_sim"), ONE git repo, THREE import-packages under src/ — a deliberate
+# monorepo (see ai/project_spec.yaml). Each package's HEAVY deps are gated behind an extra, and the
+# shared base carries only numpy + pyyaml, so you install just what you run:
+#   umiusi_sim         — CORE simulator + hydrodynamics + robot description (MJCF).  extra: [sim] (mujoco)
+#                        NB: umiusi_sim.control (feed-forward allocation) is pure numpy — NO mujoco —
+#                        so the deploy path can use it without installing the simulator.
 #   umiusi_perception  — learned detector + tracker + underwater restoration + dataset-gen +
-#                        the balloon-popping autonomy FSM.  install extra: [perception]
-#   umiusi_rl          — Gymnasium env + PPO/SAC/TD3 training + evaluation.  install extra: [rl]
+#                        the balloon-popping autonomy FSM.  extra: [perception] (torch, NO mujoco)
+#   umiusi_rl          — Gymnasium env + PPO/SAC/TD3 training + evaluation.  extra: [rl] (implies [sim])
 #
-# Setup (recommended):  uv sync                     # core sim only (no torch)
-#                       uv sync --extra perception  # + detector/autonomy
-#                       uv sync --extra rl          # + training/eval
-# Plain-pip fallback:   python -m venv .venv && . .venv/bin/activate && pip install -e '.[perception,rl]'
+# Install matrix (see README "Setup" for the full table):
+#   uv sync --extra dev          # EVERYTHING for local dev (sim + perception + rl + tooling)  ← daily driver
+#   uv sync --extra sim          # core simulator only (mujoco/numpy, no torch)
+#   pip install '.[perception]'  # DEPLOY on the robot/Pi: detector + FSM + control, mujoco-FREE
+#   pip install '.[rl]'          # training box: simulator + RL
+# Plain-pip fallback everywhere:  python -m venv .venv && . .venv/bin/activate && pip install -e '.[dev]'
 # CPU-only torch is pinned via the PyTorch CPU index below (this host has no CUDA GPU).
 
 [project]
@@ -19,20 +24,27 @@ version = "0.1.0"
 description = "MuJoCo simulation + RL + perception for the UMIUSI azimuth-thruster underwater robot"
 license = { text = "MIT" }
 requires-python = ">=3.10"
-# CORE (umiusi_sim): simulator + physics + description only. NO torch — the sim runs standalone.
+# Shared BASE (always installed): only the tiny, torch/mujoco-free deps used across all three
+# packages — numpy (control math, arrays) + pyyaml (config). mujoco lives in the [sim] extra so the
+# deploy install ([perception]) stays mujoco-free; torch lives in [perception]/[rl].
 dependencies = [
-    "mujoco>=3.2",
     "numpy>=1.24",
     "pyyaml>=6.0",
 ]
 
 [project.optional-dependencies]
-# umiusi_rl: Gymnasium env + SB3 training/eval + training curves.
-rl = ["gymnasium>=0.29", "stable-baselines3>=2.3", "torch>=2.2", "tensorboard>=2.15"]
+# umiusi_sim CORE simulator runtime: MuJoCo. Kept OUT of the base so [perception] deploys don't drag
+# it onto the Pi (aarch64 MuJoCo is a separate lift — see ai/backlog.md item 7).
+sim = ["mujoco>=3.2"]
 # umiusi_perception: learned detector (torch) + classical CV (scipy connected-components + opencv).
+# Deliberately does NOT pull mujoco — this is the on-robot deploy install.
 perception = ["torch>=2.2", "scipy>=1.10", "opencv-python-headless>=4.8"]
-# Tooling for videos/snapshots (imageio), mesh decimation, lint.
-dev = ["imageio[ffmpeg]>=2.31", "fast-simplification", "ruff>=0.5"]
+# umiusi_rl: Gymnasium env + SB3 training/eval + curves. Imports umiusi_sim.simulator, so it needs
+# the [sim] extra too (self-reference resolved by pip/uv).
+rl = ["umiusi_sim[sim]", "gymnasium>=0.29", "stable-baselines3>=2.3", "torch>=2.2", "tensorboard>=2.15"]
+# Full local-dev environment: all three packages + the video/snapshot/mesh/lint tooling. `uv sync
+# --extra dev` (or `pip install -e '.[dev]'`) is the one-command bootstrap for working on the repo.
+dev = ["umiusi_sim[sim,perception,rl]", "imageio[ffmpeg]>=2.31", "fast-simplification", "ruff>=0.5"]
 # Decoupled ROS viewer (tools/ros_view.py): attaches to a running ROS-driven sim over rosbridge
 # (ws://localhost:9090) and renders it live. roslibpy is pure-Python (no ROS install needed), so
 # it installs into this uv venv; the sim publishes /umiusi_sim/qpos which the viewer replays.
