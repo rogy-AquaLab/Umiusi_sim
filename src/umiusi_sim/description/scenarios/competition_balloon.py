@@ -30,8 +30,12 @@ from pathlib import Path
 
 import mujoco
 import numpy as np
+import yaml
 
-_BASE_MODEL = Path(__file__).resolve().parents[1] / "umiusi.xml"
+_SCN_DIR = Path(__file__).resolve()
+_BASE_MODEL = _SCN_DIR.parents[1] / "umiusi.xml"
+# Repo root: .../src/umiusi_sim/description/scenarios/competition_balloon.py -> parents[4].
+_DEFAULT_CONFIG = _SCN_DIR.parents[4] / "configs" / "umiusi.yaml"
 
 # --- pool (VISUAL only) ------------------------------------------------------
 # ASSUMPTION: the competition uses the "3.3 m-deep area" but the real pool length/width are
@@ -55,9 +59,10 @@ BALLOON_SPECS = {
 }
 
 # Fixed placeholder layout: (name, colour, x, z). Height comes from BALLOON_SPECS.
-# The FIRST balloon is YELLOW, fixed ~1.5 m in front of the start pose (start at x=0, +X).
-# The others are a small fixed set standing in for PER-EPISODE RANDOM XY — see
-# ``sample_layout`` for the documented randomization placeholder.
+# The FIRST balloon is YELLOW, fixed ~1.5 m in front of the start pose (start at x=0, +X). This
+# entry is also the deterministic "near target" that ``sample_layout`` always keeps as balloon 0.
+# The others are a small fixed set kept only for the legacy fixed-layout path (seed < 0); the real
+# per-episode field is drawn by ``sample_layout`` from the YAML-configured COUNTS below.
 BALLOON_LAYOUT = [
     ("balloon_yellow_start", "yellow", 1.5, 0.0),
     ("balloon_red_1", "red", 2.6, 0.8),
@@ -65,6 +70,23 @@ BALLOON_LAYOUT = [
     ("balloon_yellow_2", "yellow", 3.4, -0.4),
     ("balloon_red_2", "red", 3.9, 0.6),
 ]
+
+# --- per-episode field defaults (overridable from configs/umiusi.yaml -> competition.balloons) --
+# PLACEHOLDER per-colour counts for the sampled field. The exact rulebook red/yellow/blue ratio is
+# TBD / user-tunable: the competition videos suggest ~6-8 reds with yellows and blues a comparable
+# spread, so we default to red 7 / yellow 7 / blue 5. Edit configs/umiusi.yaml (NOT this file) to
+# retune. The deterministic tall yellow start balloon COUNTS AS ONE of the yellows.
+DEFAULT_BALLOON_COUNTS = {"red": 7, "yellow": 7, "blue": 5}
+# Minimum centre-to-centre XY separation between balloons [m] enforced by the Poisson-disk /
+# rejection sampler, so the field stays evenly spread (not clustered). Overridable via YAML.
+DEFAULT_MIN_SEPARATION = 0.6
+
+# --- tether entanglement -----------------------------------------------------
+# Each balloon is tethered by a vertical wire from a floor anchor at its XY up to the balloon (see
+# the ``*_tether`` geoms in build_spec). The robot ENTANGLES a wire if it under-passes the balloon:
+# its horizontal position comes within TETHER_RADIUS of the balloon's XY while it is BELOW the
+# balloon. Small radius ~ the wire "capture" zone; see ``entanglement`` below.
+TETHER_RADIUS = 0.20  # m; horizontal capture radius around a balloon's vertical tether wire
 
 # --- pin (popping tool, rigid child of base_link) ----------------------------
 # Protrudes forward (+X) from the hull front (~x=0.09) at hull mid-height (y~0.10, level with
@@ -263,20 +285,120 @@ def hide_balloon(model, name):
     model.geom_rgba[gid, 3] = 0.0
 
 
-def sample_layout(rng, n_random=4):
-    """PLACEHOLDER per-episode randomization: keep the YELLOW start balloon fixed, sample the
-    rest at random XY within the pool footprint. Returns a BALLOON_LAYOUT-shaped list.
+def load_field_config(config_path=_DEFAULT_CONFIG):
+    """Read the competition balloon-field config (per-colour COUNTS + min separation) from
+    ``configs/umiusi.yaml`` (``competition.balloons``). Missing file/keys fall back to the module
+    defaults, so callers work without any config present. Returns ``(counts, min_separation)``."""
+    counts = dict(DEFAULT_BALLOON_COUNTS)
+    min_sep = DEFAULT_MIN_SEPARATION
+    try:
+        with open(config_path) as f:
+            cfg = yaml.safe_load(f) or {}
+    except (FileNotFoundError, OSError):
+        return counts, min_sep
+    bcfg = ((cfg.get("competition") or {}).get("balloons")) or {}
+    for colour, n in (bcfg.get("counts") or {}).items():
+        if colour in counts:
+            counts[colour] = int(n)
+    if bcfg.get("min_separation") is not None:
+        min_sep = float(bcfg["min_separation"])
+    return counts, min_sep
 
-    NOTE: heights are fixed by colour (rule); only XY randomizes. Colours here follow the same
-    small mix as the fixed layout — tune counts/keep-out zones when the real rules are settled.
-    """
-    layout = [BALLOON_LAYOUT[0]]  # yellow, ~1.5 m in front of start (fixed by rule)
-    colours = ["red", "blue", "yellow", "red"]
-    x_lo, x_hi = POOL_CENTER_X - POOL_LEN_X / 2 + 0.5, POOL_CENTER_X + POOL_LEN_X / 2 - 0.5
-    z_lo, z_hi = -POOL_LEN_Z / 2 + 0.5, POOL_LEN_Z / 2 - 0.5
-    for i in range(n_random):
-        c = colours[i % len(colours)]
-        x = float(rng.uniform(max(x_lo, 1.0), x_hi))  # keep clear of the start pose
+
+def _poisson_sample(rng, placed, min_sep, bounds, max_tries=256):
+    """Rejection (Poisson-disk) sample of ONE XY at least ``min_sep`` from every point in
+    ``placed`` (list of (x, z)), within ``bounds`` = (x_lo, x_hi, z_lo, z_hi). If no candidate
+    clears the separation within ``max_tries``, return the best (farthest-from-neighbours)
+    candidate so the exact count is still honoured (spacing best-effort). Seeded via ``rng``."""
+    x_lo, x_hi, z_lo, z_hi = bounds
+    best, best_d = None, -1.0
+    for _ in range(max_tries):
+        x = float(rng.uniform(x_lo, x_hi))
         z = float(rng.uniform(z_lo, z_hi))
-        layout.append((f"balloon_{c}_{i}", c, x, z))
+        if not placed:
+            return x, z
+        d = min(math.hypot(x - px, z - pz) for px, pz in placed)
+        if d >= min_sep:
+            return x, z
+        if d > best_d:
+            best, best_d = (x, z), d
+    return best
+
+
+def sample_layout(rng, counts=None, min_separation=None, config_path=_DEFAULT_CONFIG):
+    """Per-episode field sampler: scatter the configured per-colour balloon COUNTS at random XY
+    within the pool footprint with roughly EVEN spacing. Returns a BALLOON_LAYOUT-shaped list of
+    ``(name, colour, x, z)`` tuples (heights come from BALLOON_SPECS per colour).
+
+    Spacing: rejection / Poisson-disk sampling enforces a minimum centre-to-centre separation
+    (``min_separation``) between every pair of balloons, so the field is spread out rather than
+    clustered (matching the fairly even spacing seen in the competition videos).
+
+    Balloon 0 is ALWAYS the deterministic tall YELLOW at the start position
+    (``balloon_yellow_start``, ~x=1.5) so the fixed near target is always present; it counts as one
+    of the yellows. Heights are fixed by colour (rule); only XY randomizes. Seeded via ``rng`` ->
+    reproducible.
+
+    ``counts`` / ``min_separation`` default to the ``competition.balloons`` block in
+    ``configs/umiusi.yaml`` (or the module defaults if absent) and may be overridden by callers.
+    """
+    if counts is None or min_separation is None:
+        cfg_counts, cfg_sep = load_field_config(config_path)
+        counts = cfg_counts if counts is None else dict(counts)
+        min_separation = cfg_sep if min_separation is None else float(min_separation)
+
+    # Balloon 0: the deterministic tall YELLOW at the start position (fixed near target, by rule).
+    start = BALLOON_LAYOUT[0]                          # (name, "yellow", x, z)
+    layout = [start]
+    placed = [(start[2], start[3])]                    # XY of everything placed so far
+
+    # The RANDOM balloons to scatter = the configured counts, with the fixed start yellow counting
+    # as one of the yellows (so ``counts`` is the TOTAL per-colour field size).
+    to_place = (["red"] * counts.get("red", 0)
+                + ["yellow"] * max(0, counts.get("yellow", 0) - 1)
+                + ["blue"] * counts.get("blue", 0))
+
+    # Sampling window: inside the pool footprint (0.5 m margin) and clear of the start pose (x>=1.0).
+    bounds = (
+        max(POOL_CENTER_X - POOL_LEN_X / 2 + 0.5, 1.0),
+        POOL_CENTER_X + POOL_LEN_X / 2 - 0.5,
+        -POOL_LEN_Z / 2 + 0.5,
+        POOL_LEN_Z / 2 - 0.5,
+    )
+
+    per_colour = {"red": 0, "yellow": 0, "blue": 0}
+    for colour in to_place:
+        x, z = _poisson_sample(rng, placed, min_separation, bounds)
+        placed.append((x, z))
+        per_colour[colour] += 1
+        layout.append((f"balloon_{colour}_{per_colour[colour]}", colour, x, z))
     return layout
+
+
+def entanglement(robot_pos, balloons, popped=None):
+    """Names of the UN-POPPED balloons whose tether the robot is currently ENTANGLED in.
+
+    Model: each balloon is tethered by a vertical wire from a floor anchor at its XY up to the
+    balloon. The robot ENTANGLES a balloon when it UNDER-PASSES it — the robot's HORIZONTAL
+    position is within ``TETHER_RADIUS`` of the balloon's horizontal position (i.e. it is up
+    against the wire) AND the robot is BELOW the balloon (passing under it along the wire). Popped
+    balloons (wire removed) never entangle.
+
+    Frame note: CAD frame with +Y UP, so the HORIZONTAL plane is (x, z) and the VERTICAL axis is y.
+
+    ``robot_pos`` : (x, y, z) robot body position, world frame.
+    ``balloons``  : a ``balloon_table()`` list; each item has 'name' and 'pos' = [x, y(height), z].
+    ``popped``    : iterable of popped balloon names to exclude (their wire is gone), or None.
+
+    Returns the list of offending balloon names; ``len(...)`` is how many tethers are snagged.
+    """
+    popped = set(popped or ())
+    rx, ry, rz = float(robot_pos[0]), float(robot_pos[1]), float(robot_pos[2])
+    snagged = []
+    for b in balloons:
+        if b["name"] in popped:
+            continue
+        bx, by, bz = float(b["pos"][0]), float(b["pos"][1]), float(b["pos"][2])
+        if math.hypot(rx - bx, rz - bz) <= TETHER_RADIUS and ry < by:
+            snagged.append(b["name"])
+    return snagged

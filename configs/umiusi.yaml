@@ -86,3 +86,22 @@ thrusters:
     - {id: 2, pivot: [-0.397223, 0.09815, -0.187224], thrust_axis: [ 0.7081, 0.0, -0.7061]}
     - {id: 3, pivot: [-0.022777, 0.09815,  0.187224], thrust_axis: [-0.7081, 0.0,  0.7061]}
     - {id: 4, pivot: [-0.397223, 0.09815,  0.187224], thrust_axis: [-0.7081, 0.0, -0.7061]}
+
+# --- competition field (balloon-popping scenario) ---------------------------------------------
+# Per-episode balloon field for the competition_balloon scenario
+# (src/umiusi_sim/description/scenarios/competition_balloon.py -> sample_layout). Edit these to
+# retune the field WITHOUT touching code. Heights and points per colour are fixed by rule and live
+# in BALLOON_SPECS (red @0.5 m +30, blue @0.7 m -10 decoy, yellow @1.5 m +10).
+competition:
+  balloons:
+    # PLACEHOLDER per-colour counts (TOTAL field size per colour). The exact rulebook
+    # red/yellow/blue RATIO is TBD / user-tunable: competition videos suggest ~6-8 reds with
+    # yellows and blues a comparable spread. The deterministic tall yellow "start" balloon (fixed
+    # near target, always balloon 0) COUNTS AS ONE of the yellows.
+    counts:
+      red: 7        # PLACEHOLDER — ~6-8 reds seen in videos; rulebook ratio TBD
+      yellow: 7     # PLACEHOLDER — includes the fixed start yellow
+      blue: 5       # PLACEHOLDER — decoy (negative points)
+    # Minimum centre-to-centre XY separation between balloons [m], enforced by the Poisson-disk /
+    # rejection sampler so the field stays evenly spread (not clustered). Tunable.
+    min_separation: 0.6
