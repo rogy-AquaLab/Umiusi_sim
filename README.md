@@ -60,7 +60,7 @@ mujoco_ws/                # workspace container (NOT version-controlled)
           description/        #     umiusi.xml (MJCF) + appearance.py + scenarios/ (composed MjSpec worlds)
         src/umiusi_rl/        #   PACKAGE: RL. extra [rl] (implies [sim] — imports umiusi_sim.simulator)
           envs/umiusi_pose_env.py #  UmiusiPoseEnv: attitude / depth / pose / attitude_velocity
-          train.py  eval.py   #     PPO default (--algo sac/td3); models/ is gitignored
+          train.py  eval.py   #     PPO default (--algo sac/td3)
         pyproject.toml       #   deps numpy+pyyaml; extras [sim]=mujoco, [rl]=gymnasium/sb3/tensorboard/torch
     configs/                # umiusi.yaml (physics) + train_ppo.yaml (env/reward/algo) — at repo root
     tools/                  # cross-cutting CLI glue over BOTH wheels (repo root, NOT in any wheel) —
@@ -74,8 +74,6 @@ mujoco_ws/                # workspace container (NOT version-controlled)
                             #   detector) — so eval / drive / autonomy run out of the box
     media/                  # rendered placement screenshots
     pyproject.toml  uv.lock # uv workspace root (virtual, not published) + CPU-torch pin; `uv sync` = full dev
-    # local-only (gitignored / outside the repo): models/ (trained policies), umiusi_model/ (CAD provenance),
-    # and the ~/mujoco_ws/ai/ working docs (project_spec, architecture, backlog) kept beside the repo.
   ros2_ws/                 # separate ROS 2 workspace: umiusi_sim_bridge (IPC relay) + umiusi_autonomy (deploy nodes)
 ```
 
@@ -296,8 +294,8 @@ tracking camera that follows the vehicle (attitude/attitude_velocity tasks don't
 so it holds its commanded attitude while drifting — expected, sensor-limited behavior).
 
 Reward weights, ranges, tolerances, and PPO hyperparameters live in
-[`configs/train_ppo.yaml`](configs/train_ppo.yaml); checkpoints, tb logs, and the final policy go to the
-gitignored `models/<run-name>/`.
+[`configs/train_ppo.yaml`](configs/train_ppo.yaml); checkpoints, tb logs, and the final policy go to
+`models/<run-name>/` (a local run-output directory).
 
 **Sensor note:** underwater there is no GPS, so horizontal position (X, Z) is only observable in `full`.
 A 9-DOF AHRS (BNO055) gives absolute orientation incl. magnetometer heading (cheap → attitude tasks are
@@ -391,10 +389,5 @@ measured mass/inertia**, not the coarse shapes.
 **Assumptions to verify against hardware** (see the notes in `configs/umiusi.yaml`): servo rotation axis = +Y, thrust
 direction = each thruster's local +X, mounting neutral angles, and the id↔`lf/lb/rb/rf` mapping.
 
----
-
-## Notes for regenerating the model from CAD
-
-The measured data is in `umiusi_model/` (Fusion 360 export: `STL/` + `description/` mass & placement notes). The raw
-`base_link.stl` has ~1.08M triangles (over MuJoCo's 200k limit), so the model uses primitives instead of the mesh.
-`tools/decimate_mesh.py` can produce a low-poly STL if you later want a mesh visual.
+The MJCF hull uses **primitives** (not a CAD mesh) for speed, but the **dynamics use the measured
+mass/inertia**, so fidelity is in the numbers, not the shapes.
