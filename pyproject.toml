@@ -1,61 +1,48 @@
 # umiusi_sim — MuJoCo simulation + RL + perception for the UMIUSI azimuth-thruster underwater robot.
 #
-# ONE distribution ("umiusi_sim"), ONE git repo, THREE import-packages under src/ — a deliberate
-# monorepo (see ai/project_spec.yaml). Each package's HEAVY deps are gated behind an extra, and the
-# shared base carries only numpy + pyyaml, so you install just what you run:
-#   umiusi_sim         — CORE simulator + hydrodynamics + robot description (MJCF).  extra: [sim] (mujoco)
-#                        NB: umiusi_sim.control (feed-forward allocation) is pure numpy — NO mujoco —
-#                        so the deploy path can use it without installing the simulator.
-#   umiusi_perception  — learned detector + tracker + underwater restoration + dataset-gen +
-#                        the balloon-popping autonomy FSM.  extra: [perception] (torch, NO mujoco)
-#   umiusi_rl          — Gymnasium env + PPO/SAC/TD3 training + evaluation.  extra: [rl] (implies [sim])
+# ONE git repo (this remote), a uv WORKSPACE with TWO independently-installable wheels under packages/,
+# so the code that lands on each deployment target is exactly what that target runs — nothing more:
 #
-# Install matrix (see README "Setup" for the full table):
-#   uv sync --extra dev          # EVERYTHING for local dev (sim + perception + rl + tooling)  ← daily driver
-#   uv sync --extra sim          # core simulator only (mujoco/numpy, no torch)
-#   pip install '.[perception]'  # DEPLOY on the robot/Pi: detector + FSM + control, mujoco-FREE
-#   pip install '.[rl]'          # training box: simulator + RL
-# Plain-pip fallback everywhere:  python -m venv .venv && . .venv/bin/activate && pip install -e '.[dev]'
-# CPU-only torch is pinned via the PyTorch CPU index below (this host has no CUDA GPU).
+#   packages/perception  -> distribution "umiusi_perception"  = the ON-ROBOT wheel.
+#       learned detector + tracker + underwater restoration + balloon-popping autonomy FSM +
+#       feed-forward thruster allocation (umiusi_perception.control, pure numpy). Deps: numpy + torch +
+#       scipy + opencv. NO mujoco, NO gymnasium/sb3, and NO simulator/training SOURCE. This is the
+#       whole point of the split: `pip install ./packages/perception` puts execution-only code on the Pi.
+#
+#   packages/sim         -> distribution "umiusi_sim"          = the DEV / TRAIN wheel (never on the robot).
+#       umiusi_sim (simulator + hydrodynamics + MJCF, extra [sim]=mujoco) and umiusi_rl (Gymnasium env +
+#       PPO/SAC/TD3 training, extra [rl] implies [sim]). Emits models (.zip/.pt/.onnx) that perception loads.
+#
+# The two wheels are INDEPENDENT (neither package imports the other); the cross-cutting glue lives in
+# tools/ at the repo root and runs in the full workspace env. See ai/architecture.md §2 + docs/architecture.md.
+#
+# Install matrix (see README "Setup"):
+#   uv sync                         # FULL local dev: both members editable + mujoco + rl + tooling  ← daily driver
+#   uv sync --extra learn           #   + detector-training toolchain (ultralytics/onnx)
+#   uv sync --extra viz             #   + decoupled ROS viewer (roslibpy)
+#   pip install ./packages/perception   # DEPLOY on the robot/Pi: detector + FSM + control, sim/rl-FREE
+#   pip install './packages/sim[rl]'     # training box: simulator + RL (no perception needed)
+# This root is a uv "virtual" project (package=false): it is NOT built or published — it only aggregates
+# the workspace for `uv sync`. The distributable wheels are the two members. CPU-only torch is pinned below.
 
 [project]
-name = "umiusi_sim"
-version = "0.1.0"
-description = "MuJoCo simulation + RL + perception for the UMIUSI azimuth-thruster underwater robot"
-license = { text = "MIT" }
+name = "umiusi-workspace"
+version = "0"
+description = "Dev aggregator for the umiusi_sim workspace (not published; the wheels are packages/*)"
 requires-python = ">=3.10"
-# Shared BASE (always installed): only the tiny, torch/mujoco-free deps used across all three
-# packages — numpy (control math, arrays) + pyyaml (config). mujoco lives in the [sim] extra so the
-# deploy install ([perception]) stays mujoco-free; torch lives in [perception]/[rl].
+# Bare `uv sync` = the complete dev/sim environment: both members (editable) with mujoco + RL, plus the
+# video/mesh/lint tooling used by tools/. learn/viz are heavier/niche -> opt-in extras below.
 dependencies = [
-    "numpy>=1.24",
-    "pyyaml>=6.0",
+    "umiusi_sim[sim,rl]",
+    "umiusi_perception",
+    "imageio[ffmpeg]>=2.31",
+    "fast-simplification",
+    "ruff>=0.5",
 ]
 
 [project.optional-dependencies]
-# umiusi_sim CORE simulator runtime: MuJoCo. Kept OUT of the base so [perception] deploys don't drag
-# it onto the Pi (aarch64 MuJoCo is a separate lift — see ai/backlog.md item 7).
-sim = ["mujoco>=3.2"]
-# umiusi_perception: learned detector (torch) + classical CV (scipy connected-components + opencv).
-# Deliberately does NOT pull mujoco — this is the on-robot deploy install.
-perception = ["torch>=2.2", "scipy>=1.10", "opencv-python-headless>=4.8"]
-# umiusi_rl: Gymnasium env + SB3 training/eval + curves. Imports umiusi_sim.simulator, so it needs
-# the [sim] extra too (self-reference resolved by pip/uv).
-rl = ["umiusi_sim[sim]", "gymnasium>=0.29", "stable-baselines3>=2.3", "torch>=2.2", "tensorboard>=2.15"]
-# Full local-dev environment: all three packages + the video/snapshot/mesh/lint tooling. `uv sync
-# --extra dev` (or `pip install -e '.[dev]'`) is the one-command bootstrap for working on the repo.
-dev = ["umiusi_sim[sim,perception,rl]", "imageio[ffmpeg]>=2.31", "fast-simplification", "ruff>=0.5"]
-# Decoupled ROS viewer (tools/ros_view.py): attaches to a running ROS-driven sim over rosbridge
-# (ws://localhost:9090) and renders it live. roslibpy is pure-Python (no ROS install needed), so
-# it installs into this uv venv; the sim publishes /umiusi_sim/qpos which the viewer replays.
-viz = ["roslibpy>=1.5"]
-# Learned balloon detector (phase 5c "path B"): tiny-CNN / YOLOv8n / Hough+verifier candidates,
-# benchmarked and exported to ONNX (int8) for the Raspberry Pi 4 target.
-#   ultralytics  — YOLOv8n reference architecture (candidate b) + its ONNX export
-#   torchvision  — pulled by ultralytics; pinned to the CPU wheel like torch (see sources below)
-#   onnx/onnxruntime — the realistic edge runtime we time under (int8 quantized, single-thread)
-#   thop         — FLOP counting for the projection to Pi 4
-#   albumentations — heavy augmentation (colour jitter, blur, underwater colour-cast) to stretch 40 imgs
+# Learned balloon detector training (phase 5c "path B"): tiny-CNN / YOLOv8n / Hough+verifier candidates,
+# benchmarked and exported to ONNX (int8) for the Raspberry Pi 4. Dev/train machine only.
 learn = [
     "ultralytics>=8.2",
     "torchvision>=0.17",
@@ -65,30 +52,31 @@ learn = [
     "thop>=0.1.1",
     "albumentations>=1.4",
 ]
+# Decoupled ROS viewer (tools/ros_view.py): attaches to a running ROS-driven sim over rosbridge
+# (ws://localhost:9090) and renders it live. roslibpy is pure-Python (no ROS install needed).
+viz = ["roslibpy>=1.5"]
 
-[build-system]
-requires = ["setuptools>=61"]
-build-backend = "setuptools.build_meta"
+# --- uv workspace --------------------------------------------------------------
+[tool.uv]
+# Virtual root: aggregate the workspace for `uv sync`, but do not build/install this root itself.
+package = false
 
-# --- Package discovery (src-layout: three top-level packages) -----------------
-[tool.setuptools.packages.find]
-where = ["src"]
+[tool.uv.workspace]
+members = ["packages/*"]
 
-# Ship the MJCF robot description with the umiusi_sim package (for non-editable installs).
-[tool.setuptools.package-data]
-"umiusi_sim" = ["description/*.xml"]
+[tool.uv.sources]
+umiusi_sim = { workspace = true }
+umiusi_perception = { workspace = true }
+torch = { index = "pytorch-cpu" }
+torchvision = { index = "pytorch-cpu" }
 
-# --- uv: CPU-only torch --------------------------------------------------------
-# This host has no CUDA GPU (MuJoCo sim is CPU-bound, the policy MLP is tiny). Pin torch to
-# the PyTorch CPU wheel so `uv sync` pulls the small CPU build instead of the CUDA build.
+# CPU-only torch: this host has no CUDA GPU (MuJoCo sim is CPU-bound, the policy MLP is tiny). Pin torch
+# to the PyTorch CPU wheel so `uv sync` pulls the small CPU build. (On the aarch64 Pi, `pip install
+# ./packages/perception` uses the default index / piwheels instead — this pin is a dev-host convenience.)
 [[tool.uv.index]]
 name = "pytorch-cpu"
 url = "https://download.pytorch.org/whl/cpu"
 explicit = true
-
-[tool.uv.sources]
-torch = { index = "pytorch-cpu" }
-torchvision = { index = "pytorch-cpu" }
 
 [tool.ruff]
 line-length = 119

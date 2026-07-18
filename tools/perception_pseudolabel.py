@@ -7,7 +7,7 @@ labelling from scratch; the detector's mistakes (extra/missing/mis-coloured boxe
 not drawn.
 
 Usage:
-    uv run --extra learn --extra perception python -m tools.perception_pseudolabel \
+    uv run --extra learn python -m tools.perception_pseudolabel \
         --img-dir ai/balloon/raw/realsense --out ai/balloon/raw/pseudo_realsense.json \
         --preview-dir ai/balloon/raw/preview_realsense
 """

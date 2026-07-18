@@ -1,0 +1,42 @@
+# umiusi_sim — the DEV / TRAIN wheel (part of the umiusi_sim workspace). NEVER installed on the robot.
+#
+# Ships two import-packages:
+#   umiusi_sim  — MuJoCo simulator + analytical hydrodynamics + robot description (MJCF).  extra [sim]=mujoco
+#   umiusi_rl   — Gymnasium env + PPO/SAC/TD3 training + evaluation.                        extra [rl] (implies [sim])
+#
+# It imports NOTHING from umiusi_perception — the two wheels are independent. The perception+sim glue
+# (tools/autonomy_run.py, competition_run.py) lives at the repo root and runs in the full `uv sync` env.
+#
+# Training box that only runs `python -m umiusi_rl.train`:  pip install './packages/sim[rl]'
+# (perception is NOT needed there). Full dev with the autonomy tools: `uv sync` at the repo root.
+
+[project]
+name = "umiusi_sim"
+version = "0.1.0"
+description = "MuJoCo simulation + RL training for the UMIUSI azimuth-thruster underwater robot"
+license = { text = "MIT" }
+requires-python = ">=3.10"
+dependencies = [
+    "numpy>=1.24",
+    "pyyaml>=6.0",
+]
+
+[project.optional-dependencies]
+# umiusi_sim CORE simulator runtime: MuJoCo. Kept OUT of the base so it is never pulled by accident onto a
+# perception-only target (aarch64 MuJoCo is a separate lift — see ai/backlog.md item 7).
+sim = ["mujoco>=3.2"]
+# umiusi_rl: Gymnasium env + SB3 training/eval + curves. Imports umiusi_sim.simulator, so it needs [sim] too
+# (self-reference resolved by pip/uv).
+rl = ["umiusi_sim[sim]", "gymnasium>=0.29", "stable-baselines3>=2.3", "torch>=2.2", "tensorboard>=2.15"]
+
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+# src-layout: finds both umiusi_sim and umiusi_rl top-level packages under this member's src/.
+[tool.setuptools.packages.find]
+where = ["src"]
+
+# Ship the MJCF robot description with the umiusi_sim package (for non-editable installs).
+[tool.setuptools.package-data]
+"umiusi_sim" = ["description/*.xml"]

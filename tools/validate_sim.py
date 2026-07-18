@@ -233,7 +233,7 @@ def check_ff_allocation(sim, rep):
     heave command rises straight up WITHOUT spinning (guards the f4v allocation symmetry), and a
     pure surge command moves horizontally. This catches sign/row regressions in the 8x6 allocation
     matrix that the force-level checks above would miss (e.g. an f_iv V_z that breaks heave)."""
-    from umiusi_sim.control import feedforward_allocation
+    from umiusi_perception.control import feedforward_allocation
 
     def run(ori, vel, steps=150):
         sim.reset(pos=(0.0, 0.0, 0.0))

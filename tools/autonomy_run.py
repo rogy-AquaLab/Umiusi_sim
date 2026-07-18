@@ -17,7 +17,7 @@ Pipeline, per control step:
      geometry — the "did it physically pop" check, exactly as in competition_run).
 
 Usage (headless render needs an offscreen GL backend, e.g. EGL):
-    MUJOCO_GL=egl uv run --extra perception python -m tools.autonomy_run --headless \
+    MUJOCO_GL=egl uv run python -m tools.autonomy_run --headless \
         --seed 1 --steps 900 --out /home/satoi/mujoco_ws/ai_out
 """
 
@@ -34,7 +34,7 @@ from PIL import Image, ImageDraw
 from umiusi_perception.autonomy import BalloonBehavior
 from umiusi_perception.learned_detector import load_learned_detector
 from umiusi_perception.tracker import sanitise_near_colours
-from umiusi_sim.control import feedforward_allocation
+from umiusi_perception.control import feedforward_allocation
 from umiusi_sim.description import appearance as ra
 from umiusi_sim.description.scenarios import competition_balloon as scn
 from umiusi_sim.rendering import underwater_sim as us

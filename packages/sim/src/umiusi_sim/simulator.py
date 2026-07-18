@@ -20,8 +20,8 @@ import yaml
 from umiusi_sim.physics import hydrodynamics as hydro
 from umiusi_sim.physics import thruster as thr
 
-_PKG = Path(__file__).resolve().parent            # src/umiusi_sim
-_ROOT = _PKG.parents[1]                            # repo root (src/..)
+_PKG = Path(__file__).resolve().parent            # packages/sim/src/umiusi_sim
+_ROOT = _PKG.parents[3]                            # repo root (packages/sim/src/..)
 _DEFAULT_MODEL = _PKG / "description" / "umiusi.xml"
 _DEFAULT_CONFIG = _ROOT / "configs" / "umiusi.yaml"
 

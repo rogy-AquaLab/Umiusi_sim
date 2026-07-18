@@ -2,7 +2,7 @@
 
 The ROS 2 bridge (``umiusi_sim_bridge``, C++) is a thin relay: it marshals one control
 cycle's command to this server and reads back the state. All physics — buoyancy, drag,
-LIFT, CoP moment, thrust — lives in ``UmiusiSimulator`` (``src/umiusi_sim``) and is reused
+LIFT, CoP moment, thrust — lives in ``UmiusiSimulator`` (``packages/sim/src/umiusi_sim``) and is reused
 here verbatim, so there is exactly one place fidelity is authored.
 
 Transport
@@ -303,7 +303,7 @@ def _selftest(sock_path: str) -> int:
     # (2) Reconnect (proves clean disconnect handling) + forward command -> cruise.
     client = SimClient(sock_path)
     # Forward surge via the feed-forward allocation (servo ~0, all ESC forward).
-    from umiusi_sim.control import feedforward_allocation
+    from umiusi_perception.control import feedforward_allocation
     act = feedforward_allocation([0, 0, 0], [1, 0, 0])
     servo_deg = list(np.degrees(act[:4] * server.sim.servo_range_rad))
     esc = list(act[4:8])

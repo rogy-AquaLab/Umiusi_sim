@@ -1,0 +1,37 @@
+# umiusi_perception — the ON-ROBOT execution wheel (part of the umiusi_sim workspace).
+#
+# Detector inference + tracker + underwater colour restoration + the balloon-popping autonomy FSM
+# (umiusi_perception.autonomy) + feed-forward thruster allocation (umiusi_perception.control, pure numpy).
+# This is the ONLY package installed on the robot/Pi:  pip install ./packages/perception
+#
+# It imports NOTHING from umiusi_sim / umiusi_rl, so no simulator, no training code, and no mujoco land on
+# the robot. Detector/FSM behaviour is therefore bit-identical between sim (tools/autonomy_run.py) and the
+# ROS deploy nodes (ros2_ws/src/umiusi_autonomy), which both import this same package.
+#
+# torch/scipy/opencv are BASE deps here (not extras): the robot installs this package specifically to run
+# perception, which inherently needs them. Heavy imports stay deferred to first-frame at the call sites so
+# `colcon build` / `--help` don't load torch.
+#
+# FUTURE (reserved, not implemented): umiusi_perception.policy — load an EXPORTED RL policy (onnx/torchscript)
+# for on-robot inference. Training stays in umiusi_rl (dev); the robot only ever loads artifacts. See
+# ai/architecture.md. When added, onnxruntime moves into deps here.
+
+[project]
+name = "umiusi_perception"
+version = "0.1.0"
+description = "On-robot execution library for UMIUSI: learned detector + autonomy FSM + thruster allocation"
+license = { text = "MIT" }
+requires-python = ">=3.10"
+dependencies = [
+    "numpy>=1.24",
+    "torch>=2.2",
+    "scipy>=1.10",
+    "opencv-python-headless>=4.8",
+]
+
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[tool.setuptools.packages.find]
+where = ["src"]

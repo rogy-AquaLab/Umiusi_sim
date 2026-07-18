@@ -15,7 +15,7 @@ one library reused in both worlds.**
 
 ## Single source of physics
 
-There must be **exactly one** physics implementation: `src/umiusi_sim/simulator.py` +
+There must be **exactly one** physics implementation: `packages/sim/src/umiusi_sim/simulator.py` +
 `physics/` (analytical hydro) + the MJCF. Two copies drift — the earlier C++ hydro port already
 lagged (no lift/CoP). **The sim only ever runs in dev/test, never on the real robot** (the robot is
 real hardware), so the C++ port's only justification — "Pi parity" — does not apply. Therefore:
@@ -68,21 +68,29 @@ cycle's command/state to/from the Python sim:
 
 ## Perception + navigator = one library, two front-ends
 
-`umiusi_perception` (detector) and `umiusi_perception.autonomy` (the balloon FSM) are **plain Python
-library code with no ROS and no sim dependency** — they take detections / state and return commands.
+`umiusi_perception` (detector), `umiusi_perception.autonomy` (the balloon FSM), and
+`umiusi_perception.control` (feed-forward thruster allocation, pure numpy) are **plain Python library
+code with no ROS and no sim dependency** — they take detections / state and return commands / actions.
+They are the repo's **on-robot wheel** (`packages/perception`): `pip install ./packages/perception`
+brings *only* these — no simulator, no training code, no mujoco. (Packaging detail: this is one of the
+two wheels in the uv workspace; see the repo README and `ai/architecture.md` §2.)
 
 - **Sim front-end**: `tools/autonomy_run.py` feeds them the degraded sim camera + drives the Python sim.
 - **Robot front-end**: thin `rclpy` nodes — `perception_node` (camera topic → detector → detections)
-  and `navigator_node` (detections + IMU → FSM → `/cmd/target`) — wrap the **same** functions.
+  and `navigator_node` (detections + IMU → FSM → allocation → `/cmd/direct`) — wrap the **same** functions.
 
-So the detector and the navigator are written **once**, verified in sim, and deployed on the robot
-unchanged. Inference on the Pi uses the ONNX/int8 export for fps (~12–30 fps @320, benched).
+So the detector, navigator, and allocation are written **once**, verified in sim, and deployed on the
+robot unchanged. Inference on the Pi uses the ONNX/int8 export for fps (~12–30 fps @320, benched).
 
 ## Learning stays in Python
 
 RL (`umiusi_rl`, PPO on the Python sim) and detector training (`tools/perception_train`) run
 **offline in Python** and emit models. The robot and the ROS bridge only ever **load** those models
 (`examples/cruise_policy/`, `examples/balloon_detector/`) — they never train. No learning on the robot.
+`umiusi_rl` (sb3/gymnasium) is therefore part of the **dev/train wheel** and never installed on the
+robot. When an RL policy runs on hardware (future — competition autonomy is feed-forward only today), it
+follows the detector pattern: train + **export** (onnx/torchscript) in `umiusi_rl`, then a thin
+`umiusi_perception.policy` loader (onnxruntime, reserved) runs it on the robot — no sb3/gymnasium/sim.
 
 ## Consequences / decisions
 

@@ -24,7 +24,7 @@ from stable_baselines3.common.vec_env import DummyVecEnv, SubprocVecEnv, VecNorm
 
 from umiusi_rl.envs.umiusi_pose_env import _DEFAULT_OBS, UmiusiPoseEnv, load_config
 
-_ROOT = Path(__file__).resolve().parents[2]        # repo root (src/umiusi_rl/..)
+_ROOT = Path(__file__).resolve().parents[4]        # repo root (packages/sim/src/umiusi_rl/..)
 ALGOS = {"ppo": PPO, "sac": SAC, "td3": TD3}
 
 

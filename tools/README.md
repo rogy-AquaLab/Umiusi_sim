@@ -1,63 +1,68 @@
 # tools/ — repo-level CLI entry points
 
-These scripts are the **operational + dev entry points** over the three packages (`umiusi_sim`,
-`umiusi_perception`, `umiusi_rl`). They are **part of the repo, not the wheel** — they are *not*
-installed by `pip install umiusi_sim`; you run them from a checkout against the installed packages.
-That is deliberate: the packages are the reusable library; `tools/` is how *this project* drives them.
+These scripts are the **operational + dev entry points** and the **cross-cutting glue** over the repo's
+two wheels (`umiusi_perception`, `umiusi_sim`+`umiusi_rl`). They are **part of the repo, not any wheel** —
+they are *not* installed by `pip install`; you run them from a checkout against the installed packages.
+That is deliberate: the wheels are the reusable libraries; `tools/` is how *this project* drives them, and
+several tools (e.g. `autonomy_run`) legitimately import from **both** wheels — which is exactly why they
+live at the repo root rather than inside either wheel.
 
 ## How to run
-From the repo root (`~/mujoco_ws/umiusi_sim`), as a module so `tools.*` and the `src/` packages resolve:
+From the repo root (`~/mujoco_ws/umiusi_sim`), as a module so `tools.*` and the workspace packages resolve:
 ```bash
 uv run python -m tools.<name> [args]      # e.g. uv run python -m tools.validate_sim
 ```
-`uv sync --extra dev` covers every tool below **except** the two `[learn]` and two `[viz]` ones
-(add `--extra learn` / `--extra viz` when you need those). If you `source .venv/bin/activate`, drop
-the `uv run` prefix.
+A plain **`uv sync`** installs the full workspace (both wheels + mujoco + rl + imageio/mesh/lint tooling),
+which covers every tool below **except** the `learn` and `viz` ones — add `uv sync --extra learn` /
+`--extra viz` for those. If you `source .venv/bin/activate`, drop the `uv run` prefix.
+
+The **needs** column names the capability a tool exercises (which wheel / optional extra); all of it is
+present after `uv sync` except where `--extra learn` / `--extra viz` is called out.
 
 ## Catalogue
 
-### Simulator / ops — needs `[sim]` (mujoco)
-| tool | what it does | extra |
+### Simulator / ops
+| tool | what it does | needs |
 |---|---|---|
-| `validate_sim` | headless physics/interface self-check (the sim's test) | `[sim]` |
-| `drive` | scripted/interactive drive; can load an RL policy | `[rl]` |
-| `snapshot` | render a single framed screenshot | `[dev]` (imageio) |
-| `camera_demo` | onboard-camera preview (what the detector sees) | `[dev]` |
-| `scenario_demo` | render the composed MjSpec worlds | `[dev]` |
-| `competition_run` | run + record the competition scenario | `[dev]` |
-| `analyze_steady` | steady-state / trim analysis of a policy | `[rl]` |
-| `sim_server` | IPC sim backend for the ROS bridge (`ros2_ws/umiusi_sim_bridge`) | `[sim]` |
+| `validate_sim` | headless physics/interface self-check (the sim's test) | sim |
+| `drive` | scripted/interactive drive; can load an RL policy | sim + rl |
+| `snapshot` | render a single framed screenshot | sim (imageio) |
+| `camera_demo` | onboard-camera preview (what the detector sees) | sim |
+| `scenario_demo` | render the composed MjSpec worlds | sim |
+| `competition_run` | run + record the competition scenario (FF driver, no RL) | sim + perception |
+| `analyze_steady` | steady-state / trim analysis of a policy | sim + rl |
+| `sim_server` | IPC sim backend for the ROS bridge (`ros2_ws/umiusi_sim_bridge`) | sim + perception |
 
-### Perception — needs `[perception]` (torch)
-| tool | what it does | extra |
+### Perception
+| tool | what it does | needs |
 |---|---|---|
-| `perception_demo` | run the detector on rendered onboard frames | `[dev]` |
-| `perception_eval` | IoU/PR eval of the classical detector (shim → `umiusi_perception.eval`) | `[perception]` |
-| `perception_eval_learned` | same harness for the learned detector | `[perception]` |
-| `perception_pseudolabel` | pseudo-label unlabelled frames for training | `[perception]` |
-| `underwater_correct` | underwater colour-restoration demo | `[perception]` |
-| `gen_sim_dataset` | synthesize a labelled balloon dataset from the sim | `[dev]` (sim+perception+imageio) |
-| `perception_train` | train the learned TinyBalloonNet detector | `[perception] [learn]` |
-| `perception_bench` | benchmark + ONNX/int8 export (Pi 4 projection) | `[perception] [learn]` |
+| `perception_demo` | run the detector on rendered onboard frames | sim + perception |
+| `perception_eval` | IoU/PR eval of the classical detector (shim → `umiusi_perception.eval`) | perception |
+| `perception_eval_learned` | same harness for the learned detector | perception |
+| `perception_pseudolabel` | pseudo-label unlabelled frames for training | perception |
+| `underwater_correct` | underwater colour-restoration demo | perception |
+| `gen_sim_dataset` | synthesize a labelled balloon dataset from the sim | sim + perception |
+| `perception_train` | train the learned TinyBalloonNet detector | perception + `--extra learn` |
+| `perception_bench` | benchmark + ONNX/int8 export (Pi 4 projection) | perception + `--extra learn` |
 
-### Autonomy (perception-in-loop, no RL) — needs `[sim] [perception]`
-| tool | what it does | extra |
+### Autonomy (perception-in-loop, no RL)
+| tool | what it does | needs |
 |---|---|---|
-| `autonomy_run` | full balloon-pop run: detector → `BalloonBehavior` FSM → thrusters (headless mp4 / live) | `[dev]` |
+| `autonomy_run` | full balloon-pop run: detector → `BalloonBehavior` FSM → thrusters (headless mp4 / live) | sim + perception |
 
-### ROS bridge (rosbridge / roslibpy — no rclpy) — needs `[viz]`
-| tool | what it does | extra |
+### ROS bridge (rosbridge / roslibpy — no rclpy)
+| tool | what it does | needs |
 |---|---|---|
-| `ros_view` | attach to a ROS-driven sim over `ws://localhost:9090` and render it live | `[sim] [viz]` |
-| `ros_policy` | run an RL policy and publish `/cmd/direct/...` over rosbridge | `[rl] [viz]` |
+| `ros_view` | attach to a ROS-driven sim over `ws://localhost:9090` and render it live | sim + `--extra viz` |
+| `ros_policy` | run an RL policy and publish `/cmd/direct/...` over rosbridge | rl + `--extra viz` |
 
 ### Dev tooling
-| tool | what it does | extra |
+| tool | what it does | needs |
 |---|---|---|
-| `decimate_mesh` | decimate CAD meshes (fast-simplification) for the MJCF | `[dev]` |
+| `decimate_mesh` | decimate CAD meshes (fast-simplification) for the MJCF | (base) |
 
 ## Not to be confused with the ROS **deploy** nodes
 `tools/autonomy_run.py` and `tools/ros_policy.py` drive the sim from Python. The **on-robot** ROS 2
 nodes live separately in `../ros2_ws/src/umiusi_autonomy/` (`perception_node` + `navigator_node`);
-they import the **same** `umiusi_perception` + `umiusi_sim.control` code, installed via the
-mujoco-free `[perception]` extra. See that package's README.
+they import the **same** `umiusi_perception` code (detector + FSM + `umiusi_perception.control`
+allocation), installed from the sim/rl/mujoco-free `packages/perception` wheel. See that package's README.

@@ -43,48 +43,57 @@ repository; this README plus code comments are the in-repo reference.
 
 ```
 mujoco_ws/                # workspace container (NOT version-controlled)
-  umiusi_sim/             # ← THIS git repo (monorepo: THREE installable packages under src/)
-    src/                    # ONE distribution ("umiusi_sim"), THREE import-packages, each extra-gated:
-      umiusi_sim/           # PACKAGE 1 (CORE): simulator. deps: numpy + pyyaml, + mujoco via extra [sim]
-        simulator.py        #   UmiusiSimulator: reset() / step(action) / render_camera()  (needs [sim])
-        control.py          #   feed-forward allocation (AttitudeController port) — PURE numpy, no mujoco
-        physics/            #   analytical hydrodynamics + thruster model
-        rendering/          #   underwater_sim.py — onboard-camera degradation forward model (what it sees)
-        description/        #   robot description: umiusi.xml (MJCF) + appearance.py (MjSpec appearance)
-          scenarios/        #     composed worlds (MjSpec) — competition_balloon.py (pool+balloons+pin)
-      umiusi_perception/   # PACKAGE 2: detection + autonomy. extra=[perception] (torch, NO mujoco).
-        balloon_detector.py #   Standalone: imports NEITHER umiusi_sim nor umiusi_rl → this is the deploy lib.
-        underwater.py       #   classical HSV / learned_detector.py (TinyBalloonNet) / tracker.py / underwater
-        autonomy/behavior.py #   restoration / eval.py (IoU harness) / BalloonBehavior search→approach→ram FSM
-      umiusi_rl/           # PACKAGE 3: RL experiments. extra=[rl] (implies [sim] — imports umiusi_sim.simulator)
-        envs/umiusi_pose_env.py #   UmiusiPoseEnv: attitude / depth / pose / attitude_velocity
-        train.py  eval.py   #   PPO default (--algo sac/td3); models/ is gitignored
-    configs/                # umiusi.yaml (physics) + train_ppo.yaml (env/reward/algo)
-    tools/                  # repo-level CLI entry points over the packages (NOT shipped in the wheel) —
+  umiusi_sim/             # ← THIS git repo. uv WORKSPACE: TWO installable wheels under packages/
+    packages/
+      perception/         # ── wheel "umiusi_perception" = the ON-ROBOT execution library ──
+        src/umiusi_perception/
+          balloon_detector.py #   learned/HSV/Hough detectors + tracker.py + underwater.py restoration
+          learned_detector.py #   TinyBalloonNet · eval.py (IoU harness)
+          autonomy/behavior.py #   BalloonBehavior search→approach→align→ram→confirm FSM
+          control.py          #   feed-forward thruster allocation (AttitudeController port) — PURE numpy
+        pyproject.toml       #   deps: numpy + torch + scipy + opencv.  NO mujoco / sb3 / gymnasium / sim.
+      sim/                # ── wheel "umiusi_sim" = the DEV / TRAIN library (never on the robot) ──
+        src/umiusi_sim/       #   PACKAGE: simulator. deps numpy+pyyaml, + mujoco via extra [sim]
+          simulator.py        #     UmiusiSimulator: reset() / step(action) / render_camera()
+          physics/            #     analytical hydrodynamics + thruster model
+          rendering/          #     underwater_sim.py — onboard-camera degradation forward model
+          description/        #     umiusi.xml (MJCF) + appearance.py + scenarios/ (composed MjSpec worlds)
+        src/umiusi_rl/        #   PACKAGE: RL. extra [rl] (implies [sim] — imports umiusi_sim.simulator)
+          envs/umiusi_pose_env.py #  UmiusiPoseEnv: attitude / depth / pose / attitude_velocity
+          train.py  eval.py   #     PPO default (--algo sac/td3); models/ is gitignored
+        pyproject.toml       #   deps numpy+pyyaml; extras [sim]=mujoco, [rl]=gymnasium/sb3/tensorboard/torch
+    configs/                # umiusi.yaml (physics) + train_ppo.yaml (env/reward/algo) — at repo root
+    tools/                  # cross-cutting CLI glue over BOTH wheels (repo root, NOT in any wheel) —
                             # run as `uv run python -m tools.<name>`. Catalogued in tools/README.md:
                             #   sim: validate_sim, drive, snapshot, camera_demo, scenario_demo, competition_run
                             #   perception: perception_demo/train/eval/eval_learned/bench/pseudolabel, gen_sim_dataset
                             #   autonomy: autonomy_run (perception-in-loop balloon-pop, no RL)
                             #   ROS (rosbridge): ros_view (viewer), ros_policy (RL -> cmd/direct); sim_server (IPC backend)
-    tools/README.md         # ← catalogue: what each tool does + which extra it needs + how to run
+    tools/README.md         # ← catalogue: what each tool does + which wheel/extra it needs + how to run
     examples/               # shipped example models — cruise_policy/ (RL) + balloon_detector/ (learned
                             #   detector) — so eval / drive / autonomy run out of the box
     media/                  # rendered placement screenshots
-    pyproject.toml  uv.lock # uv-managed deps (CPU torch pinned); reproducible via `uv sync --extra dev`
+    pyproject.toml  uv.lock # uv workspace root (virtual, not published) + CPU-torch pin; `uv sync` = full dev
     # local-only (gitignored / outside the repo): models/ (trained policies), umiusi_model/ (CAD provenance),
     # and the ~/mujoco_ws/ai/ working docs (project_spec, architecture, backlog) kept beside the repo.
   ros2_ws/                 # separate ROS 2 workspace: umiusi_sim_bridge (IPC relay) + umiusi_autonomy (deploy nodes)
 ```
 
-**Why one repo, three packages (deliberate monorepo).** The three co-evolve and share one config /
-robot description, so they live in one git repo and ship as one pip distribution — but their heavy
-deps are split behind extras so you install only what you run. The dependency graph is one-directional
-and shallow: `umiusi_rl` imports `umiusi_sim`; `umiusi_perception` imports **neither** (it is the
-self-contained deploy library); the core `umiusi_sim` imports neither sibling. mujoco sits in the
-`[sim]` extra — **not** the base — so the on-robot deploy install (`[perception]`) never pulls it
-(`umiusi_sim.control`, the one core module the deploy path uses, is pure numpy). If a second consumer
-ever appears, any package can be promoted to its own distribution/repo via a normal `pip install`
-dependency with no churn to the import paths — but there is no reason to pay that cost today.
+**Why one repo, two wheels (deliberate monorepo).** The code co-evolves and shares one config / robot
+description, so it lives in one git repo — but it splits into **two independently-installable wheels along
+the two deployment targets**, so the code that lands on each target is exactly what that target runs:
+
+- `umiusi_perception` — the **on-robot** wheel: detector + tracker + autonomy FSM + thruster allocation
+  (`umiusi_perception.control`, pure numpy). It imports **neither** sibling, so `pip install
+  ./packages/perception` puts execution-only code on the Pi — **no simulator, no training source, no
+  mujoco**. This is the whole point of the split (an aggregated single-wheel install would copy the sim +
+  training source onto the robot even when their heavy deps are extra-gated).
+- `umiusi_sim` — the **dev/train** wheel: `umiusi_sim` (simulator, `[sim]`=mujoco) + `umiusi_rl` (training,
+  `[rl]`). It also imports nothing from perception; the two wheels are independent siblings, glued only by
+  `tools/` at the repo root running in the full `uv sync` env.
+
+Detector + FSM behaviour is therefore **bit-identical** in sim (`tools/autonomy_run.py`) and on the robot
+(`ros2_ws/src/umiusi_autonomy`), because both import the same `umiusi_perception` wheel.
 
 ---
 
@@ -92,20 +101,21 @@ dependency with no churn to the import paths — but there is no reason to pay t
 
 WSL Ubuntu 24.04, Python ≥3.10, CPU-only. ROS 2 is **not** needed for the simulation/RL.
 
-Everything ships as **one distribution** (`umiusi_sim`) whose heavy deps are split behind **extras**,
-so you install only what you run. Pick the row that matches your machine:
+The repo is a **uv workspace** of **two wheels** (`packages/perception`, `packages/sim`); you install
+the one your machine needs. Pick the row that matches your target:
 
 | I want to… | Install | Pulls | Notes |
 |---|---|---|---|
-| **work on the repo** (daily driver) | `uv sync --extra dev` | mujoco + torch + gym/SB3 + tooling | sim + perception + rl, all three |
-| run the **core simulator** only | `uv sync --extra sim` | mujoco (no torch) | fastest; sim + `tools/validate_sim`, `drive`, … |
-| **train / eval RL** | `pip install '.[rl]'` | mujoco + torch + gym/SB3 | implies `[sim]` |
-| **deploy on the robot / Pi** | `pip install '.[perception]'` | torch + scipy + opencv | **mujoco-FREE** — the detector + FSM + `umiusi_sim.control` only |
-| add ONNX/YOLO export, ROS viewer | append `--extra learn` / `--extra viz` | ultralytics/onnx… / roslibpy | on top of any row above |
+| **work on the repo** (daily driver) | `uv sync` | mujoco + torch + gym/SB3 + tooling | both wheels editable — sim + perception + rl |
+| **deploy on the robot / Pi** | `pip install ./packages/perception` | torch + scipy + opencv | **sim/rl/mujoco-FREE** — detector + FSM + `umiusi_perception.control` only |
+| **train / eval RL** (train box) | `pip install './packages/sim[rl]'` | mujoco + torch + gym/SB3 | implies `[sim]`; perception not needed |
+| run the **core simulator** only | `pip install './packages/sim[sim]'` | mujoco (no torch) | sim + `tools/validate_sim`, `drive`, … |
+| add ONNX/YOLO export, ROS viewer | append `uv sync --extra learn` / `--extra viz` | ultralytics/onnx… / roslibpy | on top of `uv sync` |
 
-The **deploy row is the point of the split**: the on-robot install never drags MuJoCo onto aarch64,
-because `umiusi_sim.control` (the one core module the deploy nodes touch) is pure numpy and mujoco
-lives in the `[sim]` extra. See `ros2_ws/src/umiusi_autonomy/README.md`.
+The **deploy row is the point of the split**: `./packages/perception` is a wheel that contains *only*
+execution code — no simulator or training source lands on the robot at all, and it never drags MuJoCo
+onto aarch64 (the allocation the deploy nodes use, `umiusi_perception.control`, is pure numpy). See
+`ros2_ws/src/umiusi_autonomy/README.md`.
 
 ```bash
 # 1. system deps for the SIMULATOR (MuJoCo GUI + video encoding) — NOT needed on the deploy target
@@ -117,20 +127,21 @@ torch pinned, so no CUDA download):
 ```bash
 curl -LsSf https://astral.sh/uv/install.sh | sh      # install uv once
 cd ~/mujoco_ws/umiusi_sim
-uv sync --extra dev                        # ← the one-command bootstrap: sim + perception + rl + tooling
-# lighter: `uv sync --extra sim` (core sim only) · heavier: add `--extra learn --extra viz`
+uv sync                                    # ← the one-command bootstrap: BOTH wheels + mujoco + rl + tooling
+# heavier: add `--extra learn` (detector training) and/or `--extra viz` (ROS viewer)
 ```
-> **Note:** bare `uv sync` (no extra) now installs only the numpy/pyyaml base — it will *prune* mujoco
-> and torch from an existing `.venv`. Use `--extra dev` (or at least `--extra sim`) for a working sim.
+> **Note:** bare `uv sync` installs the *full* dev workspace (both members editable). The workspace root
+> is a virtual project (`package = false`) — it is not built or published; the distributables are the two
+> `packages/*` wheels.
 
-Run any command with `uv run` (uses the managed `.venv`); the `dev` env already has every extra, so no
-per-command `--extra` is needed once you've synced it.
+Run any command with `uv run` (uses the managed `.venv`); the synced env already has every runtime dep,
+so no per-command `--extra` is needed.
 
 **Fallback — plain venv + pip** (no uv, e.g. on the robot):
 ```bash
 cd ~/mujoco_ws/umiusi_sim                   # or wherever the checkout lives
 python -m venv .venv && . .venv/bin/activate
-pip install -e '.[dev]'                      # full dev; or '.[perception]' for a mujoco-free deploy
+pip install ./packages/perception          # mujoco-free deploy; or './packages/sim[rl]' for a train box
 ```
 
 All commands below assume the repo root (`~/mujoco_ws/umiusi_sim`); drop the `uv run` prefix if you
@@ -201,12 +212,12 @@ MUJOCO_GL=egl python -m tools.camera_demo [out] # capture a front_cam frame (def
 
 **Competition simulation** (balloon-popping, no RL) — a composed world (3.3 m pool + tethered balloons
 **red @0.5 m +30 / yellow @1.5 m +10 / blue @0.7 m −10 decoy** + a pin), driven by the analytical
-feed-forward controller (`umiusi_sim.control`, a port of the real AttitudeController allocation):
+feed-forward controller (`umiusi_perception.control`, a port of the real AttitudeController allocation):
 ```bash
 MUJOCO_GL=egl python -m tools.scenario_demo                 # render the world (front/down cams)
 MUJOCO_GL=egl python -m tools.competition_run --seconds 40  # drive, pop, score, write an mp4 (--record <p> --seed <n>)
 python -m tools.competition_run --render                    # or watch it live (GUI, no MUJOCO_GL)
-python -m umiusi_sim.control                                # feed-forward allocation self-test
+python -m umiusi_perception.control                         # feed-forward allocation self-test
 ```
 It seeks the nearest positive-value balloon (avoids targeting blue), detects pops geometrically (pin tip
 vs balloon), and prints a pop timeline + final score (typically 80). The world is composed with
@@ -224,9 +235,9 @@ reachable non-blue** track (maximise throughput / clear the field near-to-far, w
 under-passing un-popped balloons — the wire-entanglement lever), and pops are confirmed from the
 camera alone (balloons vanish when popped):
 ```bash
-MUJOCO_GL=egl uv run --extra perception python -m tools.autonomy_run --headless --seed 1  # short self-test (mp4)
-MUJOCO_GL=egl uv run --extra perception python -m tools.autonomy_run --full-run           # record the FULL competition to mp4
-DISPLAY=:0    uv run --extra perception python -m tools.autonomy_run --render              # watch live (passive viewer)
+MUJOCO_GL=egl uv run python -m tools.autonomy_run --headless --seed 1  # short self-test (mp4)
+MUJOCO_GL=egl uv run python -m tools.autonomy_run --full-run           # record the FULL competition to mp4
+DISPLAY=:0    uv run python -m tools.autonomy_run --render              # watch live (passive viewer)
 ```
 The learned detector ships in [`examples/balloon_detector/`](examples/balloon_detector/) (the default
 `--model`), so this runs right after cloning; pass `--model` to use your own trained checkpoint.
@@ -322,7 +333,7 @@ end-to-end (`tools/autonomy_run`, no RL).
   choice isn't fixed yet, so that training is on hold. (The env already supports a 3-D velocity command
   via `vel_cmd_horizontal: false`.)
 - **Perception.** On the **sim** scene, classical colour detection is done (`tools.perception_demo`,
-  `umiusi_perception`, `uv sync --extra perception`: colour + bearing + range, ~100%). On **real
+  `umiusi_perception`, installed by `uv sync`: colour + bearing + range, ~100%). On **real
   underwater images** classical CV hits a recall wall (red attenuates to near-invisible, blue ≈ pool
   water); colour + a Hough-circle shape pass cut the false-positive flood but can't recover red. A
   **learned tiny-CNN detector** (`umiusi_perception.learned_detector`, `tools.perception_train` /
@@ -371,7 +382,7 @@ optional off-diagonal damping off), added mass (off by default), thrust map, ser
 measured hull mass/CoM/inertia. The drag coefficients are still `PLACEHOLDER`; `displaced_volume` and the thrust map
 are first estimates pending hardware confirmation. `validate_sim -v` prints calibration numbers for these.
 
-The robot geometry lives in [`src/umiusi_sim/description/umiusi.xml`](src/umiusi_sim/description/umiusi.xml). It is intentionally coarse
+The robot geometry lives in [`packages/sim/src/umiusi_sim/description/umiusi.xml`](packages/sim/src/umiusi_sim/description/umiusi.xml). It is intentionally coarse
 (octagonal-prism hull + T-shaped azimuth thrusters + two onboard cameras) for speed; **dynamics use the
 measured mass/inertia**, not the coarse shapes.
 

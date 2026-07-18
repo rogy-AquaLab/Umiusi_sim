@@ -1,7 +1,7 @@
 # UMIUSI simulator — physics (hydrodynamics + thruster propulsion)
 
 How the analytical model computes the **hydrodynamic forces** (buoyancy + drag) and the **thruster
-propulsion**, as implemented in `src/umiusi_sim/`. The analytical model is the *reference* physics
+propulsion**, as implemented in `packages/sim/src/umiusi_sim/`. The analytical model is the *reference* physics
 (explicit, readable, tunable); MuJoCo integrates the resulting forces. Parameters live in
 `configs/umiusi.yaml`; the force code is `simulator.py::_apply_external_forces` with the per-effect
 functions in `physics/hydrodynamics.py` and `physics/thruster.py`.

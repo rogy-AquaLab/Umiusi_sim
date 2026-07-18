@@ -19,6 +19,13 @@ resolution-markers = [
     "python_full_version < '3.11' and sys_platform == 'darwin'",
 ]
 
+[manifest]
+members = [
+    "umiusi-perception",
+    "umiusi-sim",
+    "umiusi-workspace",
+]
+
 [[package]]
 name = "absl-py"
 version = "2.4.0"
@@ -3428,9 +3435,33 @@ wheels = [
 ]
 
 [[package]]
+name = "umiusi-perception"
+version = "0.1.0"
+source = { editable = "packages/perception" }
+dependencies = [
+    { name = "numpy", version = "2.2.6", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.11'" },
+    { name = "numpy", version = "2.4.6", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version == '3.11.*'" },
+    { name = "numpy", version = "2.5.0", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.12'" },
+    { name = "opencv-python-headless" },
+    { name = "scipy", version = "1.15.3", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.11'" },
+    { name = "scipy", version = "1.17.1", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version == '3.11.*'" },
+    { name = "scipy", version = "1.18.0", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.12'" },
+    { name = "torch", version = "2.12.1", source = { registry = "https://download.pytorch.org/whl/cpu" }, marker = "sys_platform == 'darwin'" },
+    { name = "torch", version = "2.12.1+cpu", source = { registry = "https://download.pytorch.org/whl/cpu" }, marker = "sys_platform != 'darwin'" },
+]
+
+[package.metadata]
+requires-dist = [
+    { name = "numpy", specifier = ">=1.24" },
+    { name = "opencv-python-headless", specifier = ">=4.8" },
+    { name = "scipy", specifier = ">=1.10" },
+    { name = "torch", specifier = ">=2.2", index = "https://download.pytorch.org/whl/cpu" },
+]
+
+[[package]]
 name = "umiusi-sim"
 version = "0.1.0"
-source = { editable = "." }
+source = { editable = "packages/sim" }
 dependencies = [
     { name = "numpy", version = "2.2.6", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.11'" },
     { name = "numpy", version = "2.4.6", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version == '3.11.*'" },
@@ -3439,40 +3470,6 @@ dependencies = [
 ]
 
 [package.optional-dependencies]
-dev = [
-    { name = "fast-simplification" },
-    { name = "gymnasium" },
-    { name = "imageio", extra = ["ffmpeg"] },
-    { name = "mujoco" },
-    { name = "opencv-python-headless" },
-    { name = "ruff" },
-    { name = "scipy", version = "1.15.3", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.11'" },
-    { name = "scipy", version = "1.17.1", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version == '3.11.*'" },
-    { name = "scipy", version = "1.18.0", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.12'" },
-    { name = "stable-baselines3" },
-    { name = "tensorboard" },
-    { name = "torch", version = "2.12.1", source = { registry = "https://download.pytorch.org/whl/cpu" }, marker = "sys_platform == 'darwin'" },
-    { name = "torch", version = "2.12.1+cpu", source = { registry = "https://download.pytorch.org/whl/cpu" }, marker = "sys_platform != 'darwin'" },
-]
-learn = [
-    { name = "albumentations" },
-    { name = "onnx" },
-    { name = "onnxruntime", version = "1.24.3", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.11'" },
-    { name = "onnxruntime", version = "1.27.0", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.11'" },
-    { name = "onnxscript" },
-    { name = "thop" },
-    { name = "torchvision", version = "0.27.1", source = { registry = "https://download.pytorch.org/whl/cpu" }, marker = "sys_platform == 'darwin'" },
-    { name = "torchvision", version = "0.27.1+cpu", source = { registry = "https://download.pytorch.org/whl/cpu" }, marker = "sys_platform != 'darwin'" },
-    { name = "ultralytics" },
-]
-perception = [
-    { name = "opencv-python-headless" },
-    { name = "scipy", version = "1.15.3", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.11'" },
-    { name = "scipy", version = "1.17.1", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version == '3.11.*'" },
-    { name = "scipy", version = "1.18.0", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.12'" },
-    { name = "torch", version = "2.12.1", source = { registry = "https://download.pytorch.org/whl/cpu" }, marker = "sys_platform == 'darwin'" },
-    { name = "torch", version = "2.12.1+cpu", source = { registry = "https://download.pytorch.org/whl/cpu" }, marker = "sys_platform != 'darwin'" },
-]
 rl = [
     { name = "gymnasium" },
     { name = "mujoco" },
@@ -3484,6 +3481,44 @@ rl = [
 sim = [
     { name = "mujoco" },
 ]
+
+[package.metadata]
+requires-dist = [
+    { name = "gymnasium", marker = "extra == 'rl'", specifier = ">=0.29" },
+    { name = "mujoco", marker = "extra == 'sim'", specifier = ">=3.2" },
+    { name = "numpy", specifier = ">=1.24" },
+    { name = "pyyaml", specifier = ">=6.0" },
+    { name = "stable-baselines3", marker = "extra == 'rl'", specifier = ">=2.3" },
+    { name = "tensorboard", marker = "extra == 'rl'", specifier = ">=2.15" },
+    { name = "torch", marker = "extra == 'rl'", specifier = ">=2.2", index = "https://download.pytorch.org/whl/cpu" },
+    { name = "umiusi-sim", extras = ["sim"], marker = "extra == 'rl'", editable = "packages/sim" },
+]
+provides-extras = ["sim", "rl"]
+
+[[package]]
+name = "umiusi-workspace"
+version = "0"
+source = { virtual = "." }
+dependencies = [
+    { name = "fast-simplification" },
+    { name = "imageio", extra = ["ffmpeg"] },
+    { name = "ruff" },
+    { name = "umiusi-perception" },
+    { name = "umiusi-sim", extra = ["rl", "sim"] },
+]
+
+[package.optional-dependencies]
+learn = [
+    { name = "albumentations" },
+    { name = "onnx" },
+    { name = "onnxruntime", version = "1.24.3", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version < '3.11'" },
+    { name = "onnxruntime", version = "1.27.0", source = { registry = "https://pypi.org/simple" }, marker = "python_full_version >= '3.11'" },
+    { name = "onnxscript" },
+    { name = "thop" },
+    { name = "torchvision", version = "0.27.1", source = { registry = "https://download.pytorch.org/whl/cpu" }, marker = "sys_platform == 'darwin'" },
+    { name = "torchvision", version = "0.27.1+cpu", source = { registry = "https://download.pytorch.org/whl/cpu" }, marker = "sys_platform != 'darwin'" },
+    { name = "ultralytics" },
+]
 viz = [
     { name = "roslibpy" },
 ]
@@ -3491,30 +3526,20 @@ viz = [
 [package.metadata]
 requires-dist = [
     { name = "albumentations", marker = "extra == 'learn'", specifier = ">=1.4" },
-    { name = "fast-simplification", marker = "extra == 'dev'" },
-    { name = "gymnasium", marker = "extra == 'rl'", specifier = ">=0.29" },
-    { name = "imageio", extras = ["ffmpeg"], marker = "extra == 'dev'", specifier = ">=2.31" },
-    { name = "mujoco", marker = "extra == 'sim'", specifier = ">=3.2" },
-    { name = "numpy", specifier = ">=1.24" },
+    { name = "fast-simplification" },
+    { name = "imageio", extras = ["ffmpeg"], specifier = ">=2.31" },
     { name = "onnx", marker = "extra == 'learn'", specifier = ">=1.15" },
     { name = "onnxruntime", marker = "extra == 'learn'", specifier = ">=1.17" },
     { name = "onnxscript", marker = "extra == 'learn'", specifier = ">=0.1" },
-    { name = "opencv-python-headless", marker = "extra == 'perception'", specifier = ">=4.8" },
-    { name = "pyyaml", specifier = ">=6.0" },
     { name = "roslibpy", marker = "extra == 'viz'", specifier = ">=1.5" },
-    { name = "ruff", marker = "extra == 'dev'", specifier = ">=0.5" },
-    { name = "scipy", marker = "extra == 'perception'", specifier = ">=1.10" },
-    { name = "stable-baselines3", marker = "extra == 'rl'", specifier = ">=2.3" },
-    { name = "tensorboard", marker = "extra == 'rl'", specifier = ">=2.15" },
+    { name = "ruff", specifier = ">=0.5" },
     { name = "thop", marker = "extra == 'learn'", specifier = ">=0.1.1" },
-    { name = "torch", marker = "extra == 'perception'", specifier = ">=2.2", index = "https://download.pytorch.org/whl/cpu" },
-    { name = "torch", marker = "extra == 'rl'", specifier = ">=2.2", index = "https://download.pytorch.org/whl/cpu" },
     { name = "torchvision", marker = "extra == 'learn'", specifier = ">=0.17", index = "https://download.pytorch.org/whl/cpu" },
     { name = "ultralytics", marker = "extra == 'learn'", specifier = ">=8.2" },
-    { name = "umiusi-sim", extras = ["sim"], marker = "extra == 'rl'" },
-    { name = "umiusi-sim", extras = ["sim", "perception", "rl"], marker = "extra == 'dev'" },
+    { name = "umiusi-perception", editable = "packages/perception" },
+    { name = "umiusi-sim", extras = ["sim", "rl"], editable = "packages/sim" },
 ]
-provides-extras = ["sim", "perception", "rl", "dev", "viz", "learn"]
+provides-extras = ["learn", "viz"]
 
 [[package]]
 name = "urllib3"

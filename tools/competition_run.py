@@ -2,7 +2,7 @@
 
 Composes the competition world (base robot + pool + tethered balloons + popping pin), then
 drives the vehicle with a ground-truth greedy seek + the analytical feed-forward controller
-(``umiusi_sim.control.feedforward_allocation``) — NO reinforcement learning. Each control step
+(``umiusi_perception.control.feedforward_allocation``) — NO reinforcement learning. Each control step
 it aims at the nearest un-popped positive-scoring balloon, yaws to face it, surges forward and
 heaves to the right depth, and scores geometric pin-tip pops.
 
@@ -22,14 +22,14 @@ from pathlib import Path
 import mujoco
 import numpy as np
 
-from umiusi_sim.control import feedforward_allocation
+from umiusi_perception.control import feedforward_allocation
 from umiusi_sim.description.scenarios import competition_balloon as scn
 from umiusi_sim.simulator import UmiusiSimulator
 
 _TMP = Path(tempfile.gettempdir()) / "umiusi_sim"  # portable temp dir for the composed MJCF + default mp4
 START = (0.0, 1.0, 0.0)  # ~1 m off the pool floor, on the +X approach axis (scenario assumption)
 
-# --- driver gains (feed-forward command convention; see umiusi_sim/control.py docstring) ------
+# --- driver gains (feed-forward command convention; see umiusi_perception/control.py docstring) ------
 # Command axes map to sim motion as: Vx -> body -X (surge), Vz -> body +Y (heave), Phi_z -> yaw.
 SPEED_CAP = 0.35        # max surge/heave command magnitude (~"modest speed", per the brief)
 KP_HEAVE = 1.5          # vertical P gain: Vz command per metre of depth error

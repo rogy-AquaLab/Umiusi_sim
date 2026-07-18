@@ -44,7 +44,7 @@ from gymnasium import spaces
 
 from umiusi_sim.simulator import UmiusiSimulator
 
-_ROOT = Path(__file__).resolve().parents[3]        # repo root (src/umiusi_rl/envs/..)
+_ROOT = Path(__file__).resolve().parents[5]        # repo root (packages/sim/src/umiusi_rl/envs/..)
 
 ACT_DIM = 8
 PROPRIO_DIM = 16  # servo(4) + thrust(4) + prev_action(8), always present

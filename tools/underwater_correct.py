@@ -1,6 +1,6 @@
 """Batch underwater colour-correction of a folder of frames (for labelling / detector preprocessing).
 
-    uv run --extra dev --extra perception python -m tools.underwater_correct \
+    uv run python -m tools.underwater_correct \
         --in ../ai/balloon/raw/youtube --out ../ai/balloon/raw/youtube_cc
 """
 from __future__ import annotations

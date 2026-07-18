@@ -16,7 +16,7 @@ the same 3 categories as the real ai/balloon set: balloon_red=1, balloon_blue=2,
 + ``<out>/preview/frame_XXXX.jpg`` (first few frames, GT boxes drawn) for a human eyeball check.
 
 Usage (headless):
-    MUJOCO_GL=egl uv run --extra perception python -m tools.gen_sim_dataset \
+    MUJOCO_GL=egl uv run python -m tools.gen_sim_dataset \
         --n 12 --out /tmp/umiusi_sim/simds --seed 0
 """
 from __future__ import annotations
