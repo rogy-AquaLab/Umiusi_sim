@@ -39,7 +39,7 @@ maps to +Y (up); a target ABOVE the optic axis (el>0) commands heave up.
 from __future__ import annotations
 
 import math
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 
 from umiusi_perception.tracker import ASSOC_BEARING, Tracker, plausible_detections
 
@@ -214,6 +214,11 @@ class BalloonBehavior:
     frame_w: int = 320
     fovy_deg: float = 60.0
     dt: float = 0.02
+    # PIN-AWARE aiming: the calibrated body-frame offset (dx, dy, dz) = pin_tip - camera. When set, every
+    # detection's bearing is re-expressed FROM THE PIN before tracking/control, so the FSM drives the PIN
+    # (not the camera optic axis) onto the balloon — decoupling where the pin is mounted (choose it for
+    # camera FOV) from how it is aimed. None = legacy camera-centring (unchanged behaviour).
+    pin_offset: tuple | None = None
     state: str = "SEARCH"
     trk: _Track = field(default_factory=_Track)
     tracker: Tracker = field(default_factory=Tracker)  # the ONE multi-frame tracker
@@ -411,6 +416,10 @@ class BalloonBehavior:
         ``fresh`` is True on a fresh perception frame and False when the caller is re-driving on the
         HELD detections between detector ticks — confirmation votes advance only on fresh frames."""
         dt = self.dt if dt is None else dt
+        # PIN-AWARE aiming (optional): re-express each detection's bearing FROM THE PIN before anything
+        # else, so tracking + every control decision drives the PIN onto the balloon (see pin_offset).
+        if self.pin_offset is not None:
+            detections = [_pin_relative(d, self.pin_offset) for d in detections]
         # RANGE GATE + SIZE-CONSISTENCY FILTER: drop far detections (mostly false positives +
         # unreachable) AND boxes whose shape/size is implausible for a balloon at their range, up
         # front, so the tracker (and every downstream decision) only sees reachable, plausible boxes.
@@ -635,6 +644,26 @@ class BalloonBehavior:
             self._swept = 0.0
             self._translating = TRANSLATE_STEPS
         return {"surge": 0.0, "heave": heave, "yaw": yaw}, self._info(blue)
+
+
+def _pin_relative(det, offset):
+    """A copy of ``det`` with its bearing re-expressed FROM THE PIN. Reconstruct the balloon's 3-D
+    position from the camera bearing (az, el) + range, subtract the body-frame ``offset`` = pin_tip -
+    camera (camera axes: x forward, y up, z right), and re-bear. The bbox/range are unchanged (apparent
+    SIZE is viewpoint-independent to first order; only the DIRECTION shifts). Infinite range -> no-op.
+
+    NOTE: the parallax reconstruction AMPLIFIES bearing noise at close range, so pin-aware aiming needs
+    an accurate detector bearing (<=~2 deg); fading the correction near contact was measured to re-open
+    the under-pass, so it is intentionally NOT done. Gate pin-aware on the detector's bearing accuracy."""
+    az, el = det.bearing
+    r = det.range_m
+    if not math.isfinite(r):
+        return det
+    ce = math.cos(el)
+    x = r * ce * math.cos(az) - offset[0]
+    y = r * math.sin(el) - offset[1]
+    z = r * ce * math.sin(az) - offset[2]
+    return replace(det, bearing=(math.atan2(z, x), math.atan2(y, math.hypot(x, z))))
 
 
 def _clip(x, lo, hi):
