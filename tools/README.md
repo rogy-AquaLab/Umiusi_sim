@@ -49,6 +49,8 @@ present after `uv sync` except where `--extra learn` / `--extra viz` is called o
 | tool | what it does | needs |
 |---|---|---|
 | `autonomy_run` | full balloon-pop run: detector → `BalloonBehavior` FSM → thrusters (headless mp4 / live) | sim + perception |
+| `competition_eval` | headless full-FIELD success/time metric: runs the FSM over the sampled field (GT/degraded detections) until all positives pop or timeout; reports **success rate + time-to-clear** over many episodes. Supports the pin study + perception model. For a rendered single run use `autonomy_run`. | sim + perception |
+| `ram_eval` | control-isolated RAM failure-mode diagnostics: drives the real FSM with **ground-truth** detections over many DR single-balloon trials and classifies why each ram fails (incl. wire-touch as a failure). A **perception model** (`--perception-hz` detector rate + `--dropout`/`--bearing-noise-deg`/`--range-noise`/`--fp-rate`) sweeps how much detector quality/rate the ram needs, and a **pin study** (`--pin-tip`/`--pin-base` mount + `--pin-aware` geometry-solving aim) tunes the popping-pin. No GL/camera. | sim + perception |
 
 ### ROS bridge (rosbridge / roslibpy — no rclpy)
 | tool | what it does | needs |

@@ -132,10 +132,12 @@ def _add_geom(body, **kw):
     return g
 
 
-def build_spec(layout=BALLOON_LAYOUT):
+def build_spec(layout=BALLOON_LAYOUT, pin_base=PIN_BASE, pin_tip=PIN_TIP):
     """Load the base robot and compose the competition world; return a ``mujoco.MjSpec``.
 
     ``layout`` is a list of ``(name, colour, x, z)`` tuples (colour keys BALLOON_SPECS).
+    ``pin_base``/``pin_tip`` set the popping-pin mount (body frame; default = module constants); they
+    are exposed so a pin-placement study can sweep the mount without editing this module.
     """
     spec = mujoco.MjSpec.from_file(str(_BASE_MODEL))
     world = spec.worldbody
@@ -199,12 +201,12 @@ def build_spec(layout=BALLOON_LAYOUT):
     base = spec.body("base_link")
     _add_geom(
         base, name="pin", type=mujoco.mjtGeom.mjGEOM_CYLINDER,
-        fromto=[*PIN_BASE, *PIN_TIP], size=[PIN_RADIUS, 0, 0], rgba=[0.85, 0.85, 0.9, 1.0],
+        fromto=[*pin_base, *pin_tip], size=[PIN_RADIUS, 0, 0], rgba=[0.85, 0.85, 0.9, 1.0],
         mass=PIN_MASS,
     )
     s = base.add_site()
     s.name = "pin_tip"
-    s.pos = list(PIN_TIP)
+    s.pos = list(pin_tip)
     s.size = [0.008, 0, 0]
     s.rgba = [1.0, 0.4, 0.0, 1.0]
     return spec
