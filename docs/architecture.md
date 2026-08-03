@@ -1,37 +1,31 @@
-# umiusi_sim — runtime architecture (sim ⇄ real)
+# umiusi_sim — ランタイムアーキテクチャ (シム ⇄ 実機)
 
-How the pieces fit together across **development/simulation** and **real-robot deployment**, and the
-single rule that keeps them from drifting: **physics is authored once (Python); everything else is
-one library reused in both worlds.**
+**開発/シミュレーション**と**実機デプロイ**の両方で各コンポーネントがどのように組み合わさるか、そして両者が乖離しないように保つ唯一のルール: **物理は一度だけ記述する (Python)。それ以外はすべて、両方の世界で再利用される単一のライブラリである。**
 
-## The three concerns
+## 3つの関心事
 
-| concern | what it is | where it lives |
+| 関心事 | 内容 | 所在 |
 |---|---|---|
-| **Physics / sim** | buoyancy · drag · lift · thruster forces · MuJoCo step | **`umiusi_sim` (Python) — the single implementation** |
-| **Perception + navigator** (high level) | camera → learned detector → detections → behaviour FSM → velocity/attitude command | **one Python library** (`umiusi_perception`, incl. `umiusi_perception.autonomy`), reused in sim (`tools/autonomy_run`) **and** on the robot (`ros2_ws/src/umiusi_autonomy`) |
-| **Low-level control** | Gate → Attitude → Thruster (or an RL policy) → per-thruster servo/ESC | ROS 2 `sinsei_umiusi_control` controllers (unchanged) |
-| **Learning** | RL (cruise/attitude) + detector training | **Python, offline** → emits models (`.zip`, `.pt`/`.onnx`) |
+| **物理 / シム** | 浮力 · 抗力 · 揚力 · スラスタ推力 · MuJoCo ステップ | **`umiusi_sim` (Python) — 単一の実装** |
+| **知覚 + ナビゲータ** (高レベル) | カメラ → 学習済み検出器 → 検出結果 → 挙動 FSM → 速度/姿勢コマンド | **単一の Python ライブラリ** (`umiusi_perception`、`umiusi_perception.autonomy` を含む)。シム (`tools/autonomy_run`) **と**実機 (`ros2_ws/src/umiusi_autonomy`) で再利用 |
+| **低レベル制御** | Gate → Attitude → Thruster (または RL ポリシー) → スラスタごとのサーボ/ESC | ROS 2 `sinsei_umiusi_control` コントローラ (変更なし) |
+| **学習** | RL (巡航/姿勢) + 検出器の学習 | **Python、オフライン** → モデルを出力 (`.zip`、`.pt`/`.onnx`) |
 
-## Single source of physics
+## 物理の単一ソース
 
-There must be **exactly one** physics implementation: `packages/sim/src/umiusi_sim/simulator.py` +
-`physics/` (analytical hydro) + the MJCF. Two copies drift — the earlier C++ hydro port already
-lagged (no lift/CoP). **The sim only ever runs in dev/test, never on the real robot** (the robot is
-real hardware), so the C++ port's only justification — "Pi parity" — does not apply. Therefore:
+物理実装は**厳密に1つだけ**でなければならない: `packages/sim/src/umiusi_sim/simulator.py` + `physics/` (解析的な流体) + MJCF。2つのコピーは乖離する — 以前の C++ 流体移植版はすでに遅れていた (揚力/CoP なし)。**シムは開発/テストでのみ実行され、実機では決して実行されない** (実機は実際のハードウェアである) ため、C++ 移植版の唯一の正当化理由 — 「Pi パリティ」 — は当てはまらない。したがって:
 
-- **The ROS bridge does NOT re-implement physics.** It is a *thin relay* to the running Python sim
-  (see "IPC bridge" below). Delete/deprecate the C++ hydro.
-- Fidelity work (lift, CoP moment, calibration) happens in **one place**: the Python sim.
+- **ROS ブリッジは物理を再実装しない。** これは、動作中の Python シムへの*薄いリレー*である (下記「IPC ブリッジ」を参照)。C++ 流体は削除/非推奨とする。
+- 忠実度に関する作業 (揚力、CoP モーメント、キャリブレーション) は**1箇所**で行う: Python シム。
 
-## Runtime configurations
+## ランタイム構成
 
 ```
-(1) DEV — pure Python (fast iteration)
+(1) DEV — 純粋な Python (高速なイテレーション)
     tools/autonomy_run.py :  perception + navigator FSM  ──drive──▶  Python sim (umiusi_sim)
     tools/drive.py / umiusi_rl.eval : RL policy / manual ──────────▶  Python sim
 
-(2) DEV — ROS-in-the-loop (test the REAL control stack against the sim)
+(2) DEV — ROS-in-the-loop (実際の制御スタックをシムに対してテストする)
     sinsei Gate→Attitude→Thruster (ros2_control)
         │ command interfaces (esc duty, servo angle)
         ▼
@@ -46,54 +40,31 @@ real hardware), so the C++ port's only justification — "Pi parity" — does no
     (optional: RL policy node replaces AttitudeController via /cmd/direct/…)
 ```
 
-Sim ↔ real is a **swap of the ros2_control hardware plugin** (IPC-bridge-to-Python ↔ CAN). The
-controllers, launch, parameters, perception_node, and navigator_node are **identical** in (2) and (3).
+シム ↔ 実機は **ros2_control ハードウェアプラグインの入れ替え**である (IPC-ブリッジ-to-Python ↔ CAN)。コントローラ、launch、パラメータ、perception_node、navigator_node は (2) と (3) で**同一**である。
 
-## IPC bridge (config 2) — "just the connective part"
+## IPC ブリッジ (構成 2) — 「接続部分だけ」
 
-The ros2_control hardware component must be C++, but it holds **no physics** — it marshals one
-cycle's command/state to/from the Python sim:
+ros2_control ハードウェアコンポーネントは C++ でなければならないが、**物理は一切持たない** — 1サイクル分のコマンド/状態を Python シムとの間でマーシャリングするだけである:
 
-- **Python sim server** (`umiusi_sim`): wraps `UmiusiSimulator`, listens on a local IPC channel
-  (Unix domain socket / ZMQ). Per request: receive the 8-D command (per-thruster esc duty + servo
-  angle + allowed bits), step the sim one control period, reply with the state (IMU quaternion
-  `[w,x,y,z]`, gyro, accel = specific force, per-thruster servo angle + esc rpm, and qpos for the
-  viewer). The sim — and thus buoyancy/drag/**lift/CoP**/thrust — is the one Python implementation.
-- **C++ relay** (`umiusi_sim_bridge`): the `SystemInterface` connects to the socket in
-  `on_activate`; `write()` sends the command, `read()` receives the state and fills the interface
-  handles (cached, no per-cycle alloc). Same interface names as the CAN hardware, so the six
-  controllers spawn unchanged.
-- 100 Hz is fine over a local socket (sub-ms round-trip); the sim runs on the dev machine (Python
-  available), so there is no embedded-target constraint on it.
+- **Python シムサーバ** (`umiusi_sim`): `UmiusiSimulator` をラップし、ローカルの IPC チャネル (Unix domain socket / ZMQ) で待ち受ける。リクエストごとに、8次元のコマンド (スラスタごとの esc duty + サーボ角度 + 許可ビット) を受信し、シムを1制御周期分ステップさせ、状態 (IMU クォータニオン `[w,x,y,z]`、ジャイロ、加速度 = 比力、スラスタごとのサーボ角度 + esc rpm、およびビューア用の qpos) を返す。シム — すなわち浮力/抗力/**揚力/CoP**/推力 — は単一の Python 実装である。
+- **C++ リレー** (`umiusi_sim_bridge`): `SystemInterface` は `on_activate` でソケットに接続する。`write()` がコマンドを送信し、`read()` が状態を受信してインタフェースハンドルを埋める (キャッシュ済み、サイクルごとのアロケーションなし)。CAN ハードウェアと同じインタフェース名なので、6つのコントローラは変更なしでスポーンする。
+- 100 Hz はローカルソケット上で問題ない (往復時間はサブミリ秒)。シムは開発マシン上で動作する (Python が利用可能) ため、組み込みターゲットの制約は課されない。
 
-## Perception + navigator = one library, two front-ends
+## 知覚 + ナビゲータ = 単一のライブラリ、2つのフロントエンド
 
-`umiusi_perception` (detector), `umiusi_perception.autonomy` (the balloon FSM), and
-`umiusi_perception.control` (feed-forward thruster allocation, pure numpy) are **plain Python library
-code with no ROS and no sim dependency** — they take detections / state and return commands / actions.
-They are the repo's **on-robot wheel** (`packages/perception`): `pip install ./packages/perception`
-brings *only* these — no simulator, no training code, no mujoco. (Packaging detail: this is one of the
-two wheels in the uv workspace; see the repo README and `ai/architecture.md` §2.)
+`umiusi_perception` (検出器)、`umiusi_perception.autonomy` (バルーン FSM)、`umiusi_perception.control` (フィードフォワードのスラスタ配分、純粋な numpy) は、**ROS もシムも依存しないプレーンな Python ライブラリコード**である — 検出結果/状態を受け取り、コマンド/アクションを返す。これらはリポジトリの**実機搭載ホイール** (`packages/perception`) である: `pip install ./packages/perception` はこれら*だけ*を導入する — シミュレータも学習コードも mujoco も含まない。(パッケージングの詳細: これは uv ワークスペース内の2つのホイールのうちの1つである。リポジトリの README と `ai/architecture.md` §2 を参照。)
 
-- **Sim front-end**: `tools/autonomy_run.py` feeds them the degraded sim camera + drives the Python sim.
-- **Robot front-end**: thin `rclpy` nodes — `perception_node` (camera topic → detector → detections)
-  and `navigator_node` (detections + IMU → FSM → allocation → `/cmd/direct`) — wrap the **same** functions.
+- **シムフロントエンド**: `tools/autonomy_run.py` が劣化させたシムカメラをこれらに供給し、Python シムを駆動する。
+- **実機フロントエンド**: 薄い `rclpy` ノード — `perception_node` (カメラトピック → 検出器 → 検出結果) と `navigator_node` (検出結果 + IMU → FSM → 配分 → `/cmd/direct`) — が**同じ**関数をラップする。
 
-So the detector, navigator, and allocation are written **once**, verified in sim, and deployed on the
-robot unchanged. Inference on the Pi uses the ONNX/int8 export for fps (~12–30 fps @320, benched).
+このように、検出器、ナビゲータ、配分は**一度だけ**記述され、シムで検証され、実機に変更なしでデプロイされる。Pi 上での推論は fps のために ONNX/int8 エクスポートを使用する (~12–30 fps @320、ベンチマーク済み)。
 
-## Learning stays in Python
+## 学習は Python にとどまる
 
-RL (`umiusi_rl`, PPO on the Python sim) and detector training (`tools/perception_train`) run
-**offline in Python** and emit models. The robot and the ROS bridge only ever **load** those models
-(`examples/cruise_policy/`, `examples/balloon_detector/`) — they never train. No learning on the robot.
-`umiusi_rl` (sb3/gymnasium) is therefore part of the **dev/train wheel** and never installed on the
-robot. When an RL policy runs on hardware (future — competition autonomy is feed-forward only today), it
-follows the detector pattern: train + **export** (onnx/torchscript) in `umiusi_rl`, then a thin
-`umiusi_perception.policy` loader (onnxruntime, reserved) runs it on the robot — no sb3/gymnasium/sim.
+RL (`umiusi_rl`、Python シム上の PPO) と検出器の学習 (`tools/perception_train`) は **Python でオフラインで**実行され、モデルを出力する。実機と ROS ブリッジは、それらのモデルを**ロード**するだけである (`examples/cruise_policy/`、`examples/balloon_detector/`) — 決して学習しない。実機上での学習はない。したがって `umiusi_rl` (sb3/gymnasium) は**開発/学習ホイール**の一部であり、実機には決してインストールされない。RL ポリシーがハードウェア上で動作する場合 (将来 — 現在の競技オートノミーはフィードフォワードのみ)、それは検出器のパターンに従う: `umiusi_rl` で学習 + **エクスポート** (onnx/torchscript) を行い、その後、薄い `umiusi_perception.policy` ローダ (onnxruntime、予約済み) が実機上でそれを実行する — sb3/gymnasium/シムなし。
 
-## Consequences / decisions
+## 帰結 / 決定事項
 
-- **Do not** port lift/CoP (or any physics) to C++ — the bridge relays to Python instead.
-- Keep `umiusi_perception.autonomy` + `umiusi_perception` free of ROS/sim imports so both front-ends reuse them.
-- The real robot runs three things (perception_node, navigator_node, low-level controllers) — **no sim process**.
+- 揚力/CoP (またはあらゆる物理) を C++ に**移植しない** — 代わりにブリッジが Python にリレーする。
+- 両フロントエンドが再利用できるよう、`umiusi_perception.autonomy` + `umiusi_perception` を ROS/シムの import から解放しておく。
+- 実機は3つのもの (perception_node、navigator_node、低レベルコントローラ) を実行する — **シムプロセスはない**。
