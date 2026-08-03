@@ -34,6 +34,7 @@ from __future__ import annotations
 import argparse
 import json
 import math
+import os
 import pathlib
 import sys
 
@@ -49,7 +50,16 @@ from umiusi_perception.learned_detector import (
     TinyBalloonNet,
 )
 
-DATA_ROOT = pathlib.Path("/home/satoi/mujoco_ws/ai/balloon")
+def _default_data_root() -> pathlib.Path:
+    """Balloon dataset root. Override with $UMIUSI_BALLOON_DATA; otherwise default to the
+    user-provided ``ai/balloon`` folder that sits alongside the repo (../ai/balloon)."""
+    env = os.environ.get("UMIUSI_BALLOON_DATA")
+    if env:
+        return pathlib.Path(env)
+    return pathlib.Path(__file__).resolve().parents[1].parent / "ai" / "balloon"
+
+
+DATA_ROOT = _default_data_root()
 CATMAP = {1: "red", 2: "blue", 3: "yellow"}     # COCO category_id -> colour name
 DEFAULT_OUT = pathlib.Path("models/perception_learned/tiny_balloon.pt")
 

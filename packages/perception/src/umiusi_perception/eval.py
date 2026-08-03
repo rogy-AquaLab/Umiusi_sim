@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import pathlib
 import sys
 import tempfile
@@ -35,7 +36,16 @@ from PIL import Image, ImageDraw
 from umiusi_perception import REAL_THRESHOLDS, SIM_THRESHOLDS, detect_balloons
 from umiusi_perception.hough_detector import detect_combined, detect_hough
 
-DATA_ROOT = pathlib.Path("/home/satoi/mujoco_ws/ai/balloon")
+def _default_data_root() -> pathlib.Path:
+    """Balloon dataset root. Override with $UMIUSI_BALLOON_DATA; otherwise default to the
+    user-provided ``ai/balloon`` folder that sits alongside the repo (../ai/balloon)."""
+    env = os.environ.get("UMIUSI_BALLOON_DATA")
+    if env:
+        return pathlib.Path(env)
+    return pathlib.Path(__file__).resolve().parents[4].parent / "ai" / "balloon"
+
+
+DATA_ROOT = _default_data_root()
 CATMAP = {1: "red", 2: "blue", 3: "yellow"}
 COLOURS = ["red", "yellow", "blue"]
 IOU_TP = 0.3

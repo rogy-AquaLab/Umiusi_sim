@@ -57,7 +57,16 @@ from umiusi_perception.learned_detector import PatchVerifierNet, TinyBalloonNet 
 
 torch.set_num_threads(1)
 
-DATA_ROOT = pathlib.Path("/home/satoi/mujoco_ws/ai/balloon")
+def _default_data_root() -> pathlib.Path:
+    """Balloon dataset root. Override with $UMIUSI_BALLOON_DATA; otherwise default to the
+    user-provided ``ai/balloon`` folder that sits alongside the repo (../ai/balloon)."""
+    env = os.environ.get("UMIUSI_BALLOON_DATA")
+    if env:
+        return pathlib.Path(env)
+    return pathlib.Path(__file__).resolve().parents[1].parent / "ai" / "balloon"
+
+
+DATA_ROOT = _default_data_root()
 SIZES = [160, 256, 320]
 TMP = pathlib.Path(tempfile.gettempdir()) / "umiusi_sim" / "bench_onnx"
 

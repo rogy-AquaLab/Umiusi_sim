@@ -18,7 +18,7 @@ Pipeline, per control step:
 
 Usage (headless render needs an offscreen GL backend, e.g. EGL):
     MUJOCO_GL=egl uv run python -m tools.autonomy_run --headless \
-        --seed 1 --steps 900 --out /home/satoi/mujoco_ws/ai_out
+        --seed 1 --steps 900 --out out/autonomy
 """
 
 from __future__ import annotations
@@ -41,7 +41,10 @@ from umiusi_sim.rendering import underwater_sim as us
 from umiusi_sim.simulator import UmiusiSimulator
 
 _DEFAULT_MODEL = "examples/balloon_detector/model.pt"  # shipped best detector (camp3 mix, colour-invariant)
-_DEFAULT_OUT = Path("/home/satoi/mujoco_ws/ai_out")
+# Output dir for mp4 + log. Override with $UMIUSI_AUTONOMY_OUT; else a repo-relative ``out/autonomy``
+# (mp4/log are gitignored). No hardcoded absolute/user path.
+_DEFAULT_OUT = Path(os.environ.get("UMIUSI_AUTONOMY_OUT")
+                    or Path(__file__).resolve().parents[1] / "out" / "autonomy")
 START = (0.0, 1.0, 0.0)  # ~1 m off the pool floor, on the +X approach axis
 CAM_W, CAM_H = 320, 240
 
