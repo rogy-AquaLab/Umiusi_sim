@@ -73,9 +73,12 @@ def main():
     print(f"obs_dim={env.observation_space.shape}  act_dim={env.action_space.shape}\n")
     print(f"{'軸':>6} {'初期傾き':>8} {'初期誤差':>9} {'最小誤差':>9} {'最終誤差':>9} {'最大誤差':>9} {'|a|max':>7}  判定")
     print("-" * 84)
-    for axis, name in ((( 1,0,0), "X(roll)"), ((0,0,1), "Z(pitch)")):
-        for deg in (10, 20, 30, 45, 60, 90):
-            e, a = rollout(env, model, norm, axis, deg)
+    cases = [((1,0,0), "X(roll)",  (10, 20, 30, 45, 60, 90)),
+             ((0,0,1), "Z(pitch)", (10, 20, 30, 45, 60, 90)),
+             ((0,1,0), "Y(yaw)",   (15, 30, 45, 90, 135, 179))]
+    for axis, name, degs in cases:
+        for deg in degs:
+            e, a = rollout(env, model, norm, axis, deg, steps=600)
             e0, emin, efin, emax = e[0], e.min(), e[-50:].mean(), e.max()
             if efin < e0 * 0.5 and efin < 0.35:
                 verdict = "✅ 復元"
