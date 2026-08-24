@@ -25,7 +25,12 @@ env:
   depth_target_range: 0.50        # target depth sampled in +/- this [m] (attitude_depth)
   vel_cmd_max: 0.40               # max commanded world speed [m/s] (attitude_velocity, feedforward)
   vel_cmd_horizontal: true        # true: horizontal (x-z) cruise cmd; false: 3-D (adds elevation, for depth approach)
+  vel_cmd_elev_deg: 60.0          # 3-D only: max |elevation| of the command [deg]; curriculum ramps 0 -> this
+  vel_cmd_horizontal_prob: 0.35   # 3-D only: floor of pure-horizontal episodes (multimodality guard —
+                                  # the drone-mode vertical basin otherwise swallows horizontal cruise)
   vel_cmd_cone_deg: 180.0         # v_cmd direction within +/- this of +X (0 = fixed +X; curriculum widens it)
+  vel_cmd_zero_prob: 0.15         # P(v_cmd = 0) per episode: explicit hold-station episodes so "don't move"
+                                  # is well inside the training distribution (dry tests / narrow pools, issue #1)
   vel_tol: 0.10                   # velocity match tolerance [m/s] for success
   vel_deadband: 0.05              # no sideways-drift penalty below this [m/s] (kills precision-chasing servo chatter)
   # tolerances / shaping:
@@ -35,15 +40,29 @@ env:
   near_goal_dist: 0.50            # linear velocity penalized only within this distance (pose) [m]
   near_goal_ori: 0.15             # within this ori error [rad] the "settle" penalties kick in
   ori_deadband: 0.05              # no orientation reward gradient within this [rad] (~3deg): settle, don't chatter
+  # Proprioception fed to the policy. "action" = previous action only — the sim2real-safe suite:
+  # the real servos have NO position feedback (the 2026-08-21 bag showed /state angle is a pure
+  # command echo) and rpm telemetry is partly dead, so feeding sim servo/thrust state trains on
+  # signals the robot cannot supply (issue #3, item 4). "full" restores the old 16-D suite.
+  proprio_mode: action
+  # Frame the OBSERVATION 3-vectors (ori_err / gyro / v_cmd ...) are expressed in. "sim" = the
+  # CAD +Y-up training-native frame (default; keeps existing runs valid). "rep103" = x fwd,
+  # y left, z up — the ROS/IMU convention: train with this (or convert an existing policy with
+  # tools/convert_policy_frame.py) so the robot feeds its IMU straight in, no axis shuffling.
+  # The 2026-08-21 pool failure #3 (pitch/yaw swapped in obs) is impossible when both sides
+  # speak rep103. Left at "sim" while av_cal1 (launched from this file) is in flight.
+  obs_frame: sim
 
 reward:
   w_pos: 1.0                      # -w_pos * ||position_error||            (pose)
   w_ori: 1.0                      # -w_ori * orientation_error (rot-vec norm to target)
   w_vel: 0.10                     # -w_vel * ||linear velocity|| near the goal (pose, holding)
-  w_angvel: 0.05                  # -w_angvel * ||angular velocity||  (damp rotation). NOTE: a mild bump to 0.20
-                                  # did NOT reduce the ~0.3 rad/s cruise jitter — it is dwarfed ~30:1 by the
-                                  # w_vel_dir cruise reward, so the policy ignores it. Real wobble reduction
-                                  # needs a strong penalty (~1.5) + action low-pass, trading off cruise agility.
+  w_angvel: 0.60                  # -w_angvel * ||angular velocity||  (damp rotation). Raised 0.05 -> 0.60
+                                  # (2026-08-21): the corrected physics has 1/2..1/10 of the old rotational
+                                  # damping, so the plant no longer damps wobble for free — av_sim2real2 (first
+                                  # run at 0.05) cruised with 0.8 rad/s wobble. Old note (a 0.20 bump did
+                                  # nothing) predates the physics fix; the settle terms still handle the
+                                  # near-goal regime.
   w_depth: 2.0                    # -w_depth * |depth error|              (attitude_depth)
   # --- economy / smoothness (minimize thrust, servo vibration, thrust changes) ---
   # NOTE: kept LIGHT so they don't freeze the servos and break attitude tracking (att_v3 lesson).
@@ -51,7 +70,12 @@ reward:
   w_effort: 0.03                  # -w_effort * ||esc_command||            (thrust magnitude)
   w_servo_rate: 0.35              # -w_servo_rate * ||servo_angle - prev|| (servo vibration; raised from 0.25)
   w_thrust_rate: 0.15             # -w_thrust_rate * ||esc - prev_esc||    (thrust change)
-  w_action_rate: 0.02             # -w_action_rate * ||action - prev_action|| (mild overall smoothness)
+  w_action_rate: 0.10             # -w_action_rate * ||action - prev_action|| (raised from 0.02: the real bag
+                                  # showed +/-1 sign-flapping commands every step; penalize the COMMAND, not
+                                  # only the slew-smoothed servo, so the flapping is visible to learning)
+  w_cmd_gap: 0.10                 # -w_cmd_gap * ||servo_cmd - servo_actual|| [rad]: penalize commands the
+                                  # servo cannot reach (issue #2: 100% duty, on-target 0.1% of the time).
+                                  # With the converging servo model this pushes toward REACHABLE commands.
   # Extra penalties applied ONLY near the target (ori_err < near_goal_ori) to kill steady-state
   # limit cycles / servo chatter without discouraging the initial slew to the target.
   w_settle_servo: 0.80            # -w_settle_servo * ||Δservo|| when near the goal (hold task)
@@ -66,7 +90,9 @@ reward:
   w_depth_bonus: 2.0              # attitude_depth
   depth_scale: 0.25               # m
   w_vel_dir: 10.0                 # + reward speed ALONG the commanded direction, capped at desired (attitude_velocity)
-  w_vel_perp: 4.0                 # - penalize velocity PERPENDICULAR to the command (sideways drift)
+  w_vel_perp: 6.0                 # - penalize velocity PERPENDICULAR to the command (sideways drift; 4 -> 6
+                                  # 2026-08-21: drift 0.24 m/s vs tol 0.10 was the main success blocker, and at
+                                  # v_cmd = 0 this term IS the hold-station stillness penalty)
   goal_bonus: 5.0                 # +goal_bonus per step while within tolerance
   out_of_bounds_penalty: 50.0     # one-time penalty when leaving the workspace (pose)
 
@@ -74,11 +100,23 @@ reward:
 # Applied at each reset as a multiplicative/additive perturbation around the config values.
 domain_rand:
   enabled: false                  # enable at train/eval time with --domain-rand (sim2real robustness)
-  # LIGHT by default: moderate DR (0.10/0.10/0.20) regressed cruise DIRECTION tracking (drift 0.04->0.11,
-  # success 100%->60%). These lighter fracs aim to keep av_curr4-level direction while adding some robustness.
+  # NOTE 2026-08-21: the physics params are now ESTIMATES with known error bars (tools/estimate_hydro):
+  # drag ~±30 %, added mass ~±30 % trans / x2 rot, servo rate 100-500 deg/s plausible. DR should at
+  # least span those bars — the 2026-08-21 real test showed a policy trained without DR on placeholder
+  # physics does not transfer at all, so "lighter DR for sim score" optimizes the wrong metric.
   buoyancy_frac: 0.05             # displaced_volume *= 1 + U(-frac, frac)
-  thrust_frac: 0.05               # thrust_per_cmd  *= 1 + U(-frac, frac)
-  drag_frac: 0.10                 # linear & quadratic drag *= 1 + U(-frac, frac)
+  thrust_frac: 0.15               # thrust_per_cmd  *= 1 + U(-frac, frac) (30 N/unit is UNMEASURED — wide)
+  drag_frac: 0.30                 # linear & quadratic drag *= 1 + U(-frac, frac) (estimate error bar)
+  added_mass_frac: 0.40           # added-mass diag *= 1 + U(-frac, frac, per-axis) (widest error bar)
+  servo_slew_range_deg_s: [100.0, 500.0]  # per-episode servo rate limit U(lo, hi) (real rate unknown;
+                                  # the bag analysis showed any value in this range kills the flapping —
+                                  # randomizing it makes the policy valid whatever the true rate is)
+  servo_tau_frac: 0.5             # servo small-signal tau *= 1 + U(-frac, frac)
+  servo_offset_deg: 3.0           # per-thruster servo neutral offset U(-this, this) [deg] per episode
+  thrust_exp_range: [1.5, 2.8]    # thrust-curve exponent U(lo, hi): low-duty thrust shape is only
+                                  # bag-fitted (exp/max confounded below |u|=0.2) — bench test pins it
+  buoyancy_offset_frac: 0.6       # CoB height *= 1 + U(-frac, frac): bag fit says 5-10 mm (was 50!)
+  thrust_unit_frac: 0.10          # per-thruster thrust gain *= 1 + U(-frac, frac) (unit asymmetry)
   obs_noise: 0.005                # gaussian obs noise std (in obs units; ~0.3deg / 0.005 rad·s⁻¹ sensor noise)
   action_latency_steps: 1         # control->actuation delay [control steps] (~20 ms at 50 Hz)
 

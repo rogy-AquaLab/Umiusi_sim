@@ -127,3 +127,20 @@
 > `python -m umiusi_rl.eval --model models/<run>/final.zip --episodes N`(+ `analyze_steady.py`、`validate_sim.py -v`)。
 
 **デプロイ経路**: `tools/drive.py` はプレーンなシーンでポリシーをキーボード操作する(セルフテストは cmd·計測の方向コサインを報告する)。`tools/ros_policy.py` は ROS2 の `umiusi_sim_bridge` MuJoCo シムを rosbridge 経由で駆動し、ライブの `ImuState` + `ThrusterStateAll` から正確な 25 次元観測を再構成し、4 つの直接オーバーライド `ThrusterOutput` コマンドを発行する。どちらも `UmiusiPoseEnv._get_obs` + VecNormalize 統計を再利用するので、観測レイアウトがずれることはない。
+
+## Observation frame contract (2026-08-21)
+
+2026-08-21 のプール試験で、実機ポリシーが **pitch/yaw の入れ替わった観測**を受けていたことが判明した
+(IMU は z-up、sim は +Y-up。`docs/calibration_plan.md` 参照)。再発防止として frame を明示の契約にした:
+
+- **配備するポリシー成果物は REP-103(x 前 / y 左 / z 上)の body-frame 観測を食う。**
+  実機ノードは IMU の quat/gyro を**軸変換なしで**そのまま入れる(IMU ドライバ側は ROS 標準の
+  REP-103 で publish していることが前提。NED で出る IMU はドライバ設定で直す)。
+- env は `obs_frame: sim | rep103 | ned`(`configs/train_ppo.yaml`)で観測 3-vector の表現 frame を
+  選べる。物理・報酬・成功判定は sim frame のまま。既存 run 互換のため既定は `sim`。
+- **学習済みポリシーは `tools/convert_policy_frame.py` で frame 間を厳密変換できる**(再学習不要。
+  入力層の重み列と VecNormalize 統計の符号付き置換 — 自己テストで行動一致 ~1e-7 を確認して出力)。
+  閉ループ等価性は `tests/test_obs_frame.py` が回帰テストとして担保する。
+
+運用: 学習は `obs_frame: sim` のままでも `rep103` でもよいが、**実機へ渡す final は必ず rep103 版**
+(`--to rep103` で変換、または最初から rep103 で学習)。meta.yaml の `obs_frame:` が成果物の frame を示す。

@@ -19,8 +19,12 @@ sensor set simply leaves part of the task unobservable:
                             command is horizontal by default, or 3-D when vel_cmd_horizontal=false
                             (needed to reach different depths). obs_mode "imu".
 
-Observation = exteroceptive (sensor-suite dependent) ++ proprioception (ALWAYS):
-    proprioception: servo/range (4) + thrust/thrust_per_cmd (4) + previous action (8) = 16
+Observation = exteroceptive (sensor-suite dependent) ++ proprioception (proprio_mode):
+    proprio_mode "full"    servo/range (4) + thrust/thrust_per_cmd (4) + prev action (8) = 16
+    proprio_mode "action"  prev action (8) only — the sim2real-safe suite: the real vehicle
+                           cannot measure servo angle or (reliably) rpm, so nothing else is fed
+                           back (issue #3, item 4). Dims below are for proprio_mode "full";
+                           subtract 8 for "action". attitude_velocity adds v_cmd (3) to either.
 
     obs_mode "full"          pos_err(3) + ori_err(3) + lin_vel(3) + ang_vel(3)      -> 28
     obs_mode "imu"           ori_err(3) + ang_vel(3)                                -> 22
@@ -47,13 +51,30 @@ from umiusi_sim.simulator import UmiusiSimulator
 _ROOT = Path(__file__).resolve().parents[5]        # repo root (packages/sim/src/umiusi_rl/envs/..)
 
 ACT_DIM = 8
-PROPRIO_DIM = 16  # servo(4) + thrust(4) + prev_action(8), always present
+# Proprioception width per proprio_mode (see below): "full" feeds back the sim's servo angle and
+# thrust state; "action" feeds back ONLY the previous action. The real vehicle cannot measure
+# servo angle (RC servos have no position feedback — the bag showed /state angle is an echo of
+# the command) and its rpm telemetry is partly dead, so "action" is the sim2real-safe suite
+# (issue #3, item 4): everything in it exists identically on the robot.
+_PROPRIO_DIM = {"full": 16, "action": 8}
 # Exteroceptive (navigation-sensor) dimensions per observation mode.
 _EXTERO_DIM = {"full": 12, "imu": 6, "imu_depth": 7, "imu_depth_dvl": 10}
 # Default sensor suite per task (overridable with obs_mode / --obs-mode).
 _DEFAULT_OBS = {"pose": "full", "attitude": "imu", "attitude_depth": "imu_depth",
                 "attitude_velocity": "imu"}
 _Y_UP = np.array([0.0, 1.0, 0.0])
+# Observation frame presets: rows = target-frame axes in sim/CAD coordinates. Every 3-vector in
+# the OBSERVATION (ori_err, angular velocity, lin_vel/pos_err, v_cmd) is expressed in this frame;
+# physics, reward and success stay in the sim frame. "rep103" (x fwd, y left, z up — the ROS
+# convention the robot's IMU speaks) is the DEPLOYMENT CONTRACT: a policy trained with it consumes
+# the robot's IMU data with no hand-written axis shuffling (the missing remap scrambled pitch/yaw
+# on the 2026-08-21 pool test — sim2real issue #3). Default "sim" keeps every existing run valid;
+# tools/convert_policy_frame.py converts trained policies between frames exactly.
+_OBS_FRAMES = {
+    "sim": np.eye(3),
+    "rep103": np.array([[1.0, 0.0, 0.0], [0.0, 0.0, -1.0], [0.0, 1.0, 0.0]]),
+    "ned": np.array([[1.0, 0.0, 0.0], [0.0, 0.0, 1.0], [0.0, -1.0, 0.0]]),
+}
 
 
 def load_config(path):
@@ -97,6 +118,18 @@ class UmiusiPoseEnv(gym.Env):
         self.vel_cmd_max = float(e.get("vel_cmd_max", 0.4))  # max commanded speed [m/s] (attitude_velocity)
         self.vel_cmd_horizontal = bool(e.get("vel_cmd_horizontal", True))  # sample v_cmd in the x-z plane
         self.vel_cmd_cone_deg = float(e.get("vel_cmd_cone_deg", 180.0))  # v_cmd dir within +/- this of +X (curriculum)
+        self.vel_cmd_zero_prob = float(e.get("vel_cmd_zero_prob", 0.0))  # P(v_cmd == 0): hold-station episodes
+        # 3-D command shaping (vel_cmd_horizontal: false). The vehicle is effectively MULTIMODAL —
+        # "drone mode" (all thrusters tilted vertical) moves vertically far more easily than the
+        # tangential-thrust horizontal mode, and naive 3-D training collapses into the vertical
+        # basin, catastrophically forgetting horizontal cruise (av_cal2/3_3d lesson). Two guards:
+        #   vel_cmd_elev_deg        max |elevation| of the command [deg] — a CURRICULUM can ramp
+        #                           this from 0 (pure horizontal) upward via set_attr.
+        #   vel_cmd_horizontal_prob per-episode probability of forcing elevation = 0, keeping a
+        #                           FLOOR of pure-horizontal episodes so that skill never leaves
+        #                           the training distribution.
+        self.vel_cmd_elev_deg = float(e.get("vel_cmd_elev_deg", 90.0))
+        self.vel_cmd_horizontal_prob = float(e.get("vel_cmd_horizontal_prob", 0.0))
         self.vel_tol = float(e.get("vel_tol", 0.10))         # velocity match tolerance [m/s]
         self.vel_deadband = float(e.get("vel_deadband", 0.0))  # m/s: no sideways-drift penalty inside this
         self.pos_tol = float(e["pos_tol"])
@@ -105,6 +138,14 @@ class UmiusiPoseEnv(gym.Env):
         self.near_goal_dist = float(e["near_goal_dist"])
         self.near_goal_ori = float(e.get("near_goal_ori", 0.20))  # rad: within this, press to settle
         self.ori_deadband = float(e.get("ori_deadband", 0.0))     # rad: no ori reward gradient inside this
+        self.proprio_mode = e.get("proprio_mode", "full")
+        if self.proprio_mode not in _PROPRIO_DIM:
+            raise ValueError(f"unknown proprio_mode {self.proprio_mode!r}; expected one of {list(_PROPRIO_DIM)}")
+        obs_frame = e.get("obs_frame", "sim")
+        if obs_frame not in _OBS_FRAMES:
+            raise ValueError(f"unknown obs_frame {obs_frame!r}; expected one of {list(_OBS_FRAMES)}")
+        self.obs_frame = obs_frame
+        self._obs_P = _OBS_FRAMES[obs_frame]
         self.rw = cfg["reward"]
         self.dr = cfg.get("domain_rand", {"enabled": False})
         # sim2real: control->actuation delay (steps); only applied when domain_rand is enabled.
@@ -119,10 +160,18 @@ class UmiusiPoseEnv(gym.Env):
             "thrust_per_cmd": self.sim.thrust_per_cmd,
             "drag_lin": self.sim.drag_lin.copy(),
             "drag_quad": self.sim.drag_quad.copy(),
+            "added_mass": self.sim.added_mass_diag.copy(),
+            "servo_slew": self.sim.servo_slew_rad,
+            "servo_tau": self.sim.servo_tau,
+            "thrust_exp": self.sim.thrust_curve_exp,
+            "buoy_offset": self.sim.buoyancy_offset,
         }
+        self._servo_offset = np.zeros(4)   # per-episode servo neutral offset [rad] (DR)
+        self._thrust_gain = np.ones(4)     # per-episode per-thruster thrust asymmetry (DR)
 
         # attitude_velocity adds the feedforward velocity command (3), no measured velocity (no DVL).
-        obs_dim = _EXTERO_DIM[self.obs_mode] + PROPRIO_DIM + (3 if self.task == "attitude_velocity" else 0)
+        obs_dim = (_EXTERO_DIM[self.obs_mode] + _PROPRIO_DIM[self.proprio_mode]
+                   + (3 if self.task == "attitude_velocity" else 0))
         self.action_space = spaces.Box(-1.0, 1.0, shape=(ACT_DIM,), dtype=np.float32)
         self.observation_space = spaces.Box(-np.inf, np.inf, shape=(obs_dim,), dtype=np.float32)
 
@@ -166,12 +215,48 @@ class UmiusiPoseEnv(gym.Env):
             self.sim.thrust_per_cmd = b["thrust_per_cmd"]
             self.sim.drag_lin = b["drag_lin"].copy()
             self.sim.drag_quad = b["drag_quad"].copy()
+            self.sim.added_mass_diag = b["added_mass"].copy()
+            self.sim.servo_slew_rad = b["servo_slew"]
+            self.sim.servo_tau = b["servo_tau"]
+            self.sim.thrust_curve_exp = b["thrust_exp"]
+            self.sim.set_buoyancy_offset(b["buoy_offset"])
+            self._servo_offset = np.zeros(4)
+            self._thrust_gain = np.ones(4)
             return
         u = self.np_random.uniform
         self.sim.volume = b["volume"] * (1.0 + u(-1, 1) * self.dr["buoyancy_frac"])
         self.sim.thrust_per_cmd = b["thrust_per_cmd"] * (1.0 + u(-1, 1) * self.dr["thrust_frac"])
         self.sim.drag_lin = b["drag_lin"] * (1.0 + u(-1, 1) * self.dr["drag_frac"])
         self.sim.drag_quad = b["drag_quad"] * (1.0 + u(-1, 1) * self.dr["drag_frac"])
+        # Added mass is an estimate with a wide error bar (tools/estimate_hydro): randomize it.
+        am_frac = self.dr.get("added_mass_frac", 0.0)
+        if am_frac > 0.0:
+            self.sim.added_mass_diag = b["added_mass"] * (1.0 + u(-1, 1, size=6) * am_frac)
+        # The real servo rate is only estimated (datasheet 300-350 deg/s no-load, derated in
+        # water/under load) and the bag analysis showed the policy behaves well over 100-500 deg/s
+        # WHEN it has learned not to lean on one specific rate (issue #2, proposal C): sample the
+        # slew limit per episode so the policy works for whatever the true rate is.
+        slew_range = self.dr.get("servo_slew_range_deg_s")
+        if slew_range:
+            self.sim.servo_slew_rad = np.radians(u(float(slew_range[0]), float(slew_range[1])))
+        tau_frac = self.dr.get("servo_tau_frac", 0.0)
+        if tau_frac > 0.0 and b["servo_tau"] > 0.0:
+            self.sim.servo_tau = b["servo_tau"] * (1.0 + u(-1, 1) * tau_frac)
+        # Thrust-curve exponent: the low-duty thrust shape is only bag-fitted (exp vs max thrust
+        # confounded below |u| = 0.2), so randomize the exponent over its plausible band.
+        exp_range = self.dr.get("thrust_exp_range")
+        if exp_range:
+            self.sim.thrust_curve_exp = u(float(exp_range[0]), float(exp_range[1]))
+        # CoB height: bag-fitted to ~5-10 mm (was 50); randomize generously until the static-tilt
+        # calibration pins it.
+        bo_frac = self.dr.get("buoyancy_offset_frac", 0.0)
+        if bo_frac > 0.0:
+            self.sim.set_buoyancy_offset(b["buoy_offset"] * (1.0 + u(-1, 1) * bo_frac))
+        # Per-thruster imperfections: servo neutral offset [deg] and thrust-gain asymmetry.
+        off = self.dr.get("servo_offset_deg", 0.0)
+        self._servo_offset = np.radians(u(-off, off, size=4)) if off > 0.0 else np.zeros(4)
+        tuf = self.dr.get("thrust_unit_frac", 0.0)
+        self._thrust_gain = 1.0 + u(-1, 1, size=4) * tuf if tuf > 0.0 else np.ones(4)
 
     def _place_marker(self, state):
         """Move the visual target marker to show the commanded pose (rendering only)."""
@@ -221,23 +306,30 @@ class UmiusiPoseEnv(gym.Env):
         return R, ori_err
 
     def _get_obs(self, state, R, ori_err):
-        w_body = R.T @ state["ang_vel"]  # gyro
+        P = self._obs_P                  # sim body frame -> obs frame (identity for "sim")
+        w_body = P @ (R.T @ state["ang_vel"])  # gyro
+        ori_err = P @ ori_err
         servo_n = state["servo"] / self.sim.servo_range_rad
         thrust_n = state["thrust"] / max(self.sim.thrust_per_cmd, 1e-9)
 
         if self.obs_mode == "full":
-            pos_err_body = R.T @ (self.target_pos - state["pos"])
-            extero = [pos_err_body, ori_err, R.T @ state["lin_vel"], w_body]
+            pos_err_body = P @ (R.T @ (self.target_pos - state["pos"]))
+            extero = [pos_err_body, ori_err, P @ (R.T @ state["lin_vel"]), w_body]
         elif self.obs_mode == "imu":
             extero = [ori_err, w_body]
         elif self.obs_mode == "imu_depth":
             extero = [ori_err, w_body, np.array([self.target_pos[1] - state["pos"][1]])]
         else:  # imu_depth_dvl: adds body-frame velocity (DVL) for drift rejection
-            extero = [ori_err, w_body, np.array([self.target_pos[1] - state["pos"][1]]), R.T @ state["lin_vel"]]
+            extero = [ori_err, w_body, np.array([self.target_pos[1] - state["pos"][1]]),
+                      P @ (R.T @ state["lin_vel"])]
 
         if self.track_velocity:  # feedforward velocity command only (no measured velocity / DVL)
-            extero = extero + [self.v_cmd]
-        obs = np.concatenate(extero + [servo_n, thrust_n, self.prev_action])
+            extero = extero + [P @ self.v_cmd]
+        if self.proprio_mode == "full":
+            proprio = [servo_n, thrust_n, self.prev_action]
+        else:  # "action": only signals that exist identically on the real vehicle
+            proprio = [self.prev_action]
+        obs = np.concatenate(extero + proprio)
         if self.dr.get("enabled", False) and self.dr.get("obs_noise", 0.0) > 0.0:
             obs = obs + self.np_random.normal(0.0, self.dr["obs_noise"], size=obs.shape)
         return obs.astype(np.float32)
@@ -259,11 +351,21 @@ class UmiusiPoseEnv(gym.Env):
             ang = np.radians(self.np_random.uniform(-self.vel_cmd_cone_deg, self.vel_cmd_cone_deg))
             if self.vel_cmd_horizontal:
                 dhat = np.array([np.cos(ang), 0.0, np.sin(ang)])  # horizontal cruise (x-z plane)
-            else:  # 3-D command: also tilt in elevation — needed to reach balloons at different depths
-                elev = np.clip(np.radians(self.np_random.uniform(-self.vel_cmd_cone_deg, self.vel_cmd_cone_deg)),
-                               -np.pi / 2, np.pi / 2)
+            else:  # 3-D command: also tilt in elevation — needed to reach balloons at different depths.
+                # Elevation is sampled SPHERE-UNIFORM within +/- vel_cmd_elev_deg (sin(elev) uniform
+                # in +/- sin(limit)), not uniform in angle: uniform-in-angle piles probability onto
+                # the poles (straight up/down) and the policy loses horizontal cruise.
+                if (self.vel_cmd_horizontal_prob > 0.0
+                        and self.np_random.uniform() < self.vel_cmd_horizontal_prob):
+                    elev = 0.0   # horizontal-episode floor (multimodality guard, see __init__)
+                else:
+                    s_lim = np.sin(np.radians(np.clip(self.vel_cmd_elev_deg, 0.0, 90.0)))
+                    elev = np.arcsin(self.np_random.uniform(-s_lim, s_lim))
                 dhat = np.array([np.cos(elev) * np.cos(ang), np.sin(elev), np.cos(elev) * np.sin(ang)])
-            self.v_cmd = dhat * self.np_random.uniform(0.0, self.vel_cmd_max)
+            speed_cmd = self.np_random.uniform(0.0, self.vel_cmd_max)
+            if self.vel_cmd_zero_prob > 0.0 and self.np_random.uniform() < self.vel_cmd_zero_prob:
+                speed_cmd = 0.0  # explicit hold-station episodes (dry tests / narrow pools)
+            self.v_cmd = dhat * speed_cmd
             Rt = np.zeros(9)
             mujoco.mju_quat2Mat(Rt, self.target_quat)
             self.v_cmd_world = Rt.reshape(3, 3) @ self.v_cmd  # command expressed in world for the reward
@@ -286,7 +388,14 @@ class UmiusiPoseEnv(gym.Env):
             self._act_buf.append(action)
             action = self._act_buf.pop(0)
         self._apply_disturbance()
-        state = self.sim.step(action)
+        # Per-thruster DR imperfections (identity when DR is off): the POLICY's action is what is
+        # observed/penalized; the PLANT receives the perturbed version.
+        plant_action = action
+        if self._servo_offset.any() or not np.all(self._thrust_gain == 1.0):
+            plant_action = action.copy()
+            plant_action[:4] = np.clip(action[:4] + self._servo_offset / self.sim.servo_range_rad, -1.0, 1.0)
+            plant_action[4:] = np.clip(action[4:] * self._thrust_gain, -1.0, 1.0)
+        state = self.sim.step(plant_action)
         self.step_count += 1
         R, ori_err_vec = self._errors(state)
 
@@ -309,6 +418,10 @@ class UmiusiPoseEnv(gym.Env):
         action_rate = float(np.linalg.norm(action - self.prev_action))
         servo_rate = float(np.linalg.norm(state["servo"] - self.prev_servo))       # actual servo motion
         thrust_rate = float(np.linalg.norm(action[4:8] - self.prev_action[4:8]))   # thrust command change
+        # Gap between the commanded and the actual servo angle: nonzero while the servo is still
+        # travelling; a persistently large gap means the policy demands angles the servo can never
+        # reach (the +/-90 flapping pathology of issue #2 — 100 % duty, 0.1 % of time on target).
+        cmd_gap = float(np.linalg.norm(action[:4] * self.sim.servo_range_rad - state["servo"]))
         rw = self.rw
 
         # Penalty terms give a gradient everywhere; dense exp() "closeness" bonuses add a smooth
@@ -319,6 +432,7 @@ class UmiusiPoseEnv(gym.Env):
         reward = -rw["w_effort"] * effort - rw["w_action_rate"] * action_rate
         reward -= rw.get("w_servo_rate", 0.0) * servo_rate      # penalize servo chatter (smooth steering)
         reward -= rw.get("w_thrust_rate", 0.0) * thrust_rate    # penalize thrust command changes
+        reward -= rw.get("w_cmd_gap", 0.0) * cmd_gap            # penalize unreachable servo commands
         # Near the target attitude, damp actuation. HOLD task: press both servo AND thrust to a stop
         # (kills limit cycles). CRUISE task: once the drift is small too (steadily on-course), damp the
         # SERVO (steering) chatter — but NOT the thrust, which may still modulate to hold speed. This is
@@ -382,6 +496,7 @@ class UmiusiPoseEnv(gym.Env):
         info["servo"] = state["servo"].copy()             # actual servo angles (motion diagnostics)
         info["esc_cmd"] = action[4:8].copy()               # raw policy command (thrust use)
         info["esc_applied"] = self.sim.esc_current.copy()  # slew-limited applied esc (true thrust change)
+        info["cmd_gap"] = cmd_gap                          # ||servo command - actual|| [rad] (reachability)
         return self._get_obs(state, R, ori_err_vec), reward, terminated, truncated, info
 
     def _info(self, state, pos_err, ori_err, depth_err, success):
