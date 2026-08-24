@@ -376,9 +376,12 @@ table above.
 
 All physical parameters live in [`configs/umiusi.yaml`](configs/umiusi.yaml): water density / displaced volume /
 buoyancy offset, diagonal linear+quadratic drag, lift + a CoP-offset translation moment (both on by default;
-optional off-diagonal damping off), added mass (off by default), thrust map, servo range/slew, and the
-measured hull mass/CoM/inertia. The drag coefficients are still `PLACEHOLDER`; `displaced_volume` and the thrust map
-are first estimates pending hardware confirmation. `validate_sim -v` prints calibration numbers for these.
+optional off-diagonal damping off), added mass (ON — estimated), thrust map, servo range/slew + a converging
+servo tracking model (`servo_tau_s`), and the measured hull mass/CoM/inertia. Drag and added mass are
+**derived estimates** (CAD silhouette areas x BlueROV2-identified effective coefficients — reproduce with
+`python -m tools.estimate_hydro`); `displaced_volume` and the thrust map are first estimates pending hardware
+confirmation. `validate_sim -v` prints calibration numbers, and [`docs/calibration_plan.md`](docs/calibration_plan.md)
+lists the in-water experiments that replace the estimates with measurements.
 
 The robot geometry lives in [`packages/sim/src/umiusi_sim/description/umiusi.xml`](packages/sim/src/umiusi_sim/description/umiusi.xml). It is intentionally coarse
 (octagonal-prism hull + T-shaped azimuth thrusters + two onboard cameras) for speed; **dynamics use the

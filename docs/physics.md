@@ -59,13 +59,13 @@ W_drag = − ( D_lin · v  +  D_quad · |v| · v )     (body, length-6 [force(3)
 | `D_lin`  (N/(m/s), N·m/(rad/s))   | 15 | 25 | 20 | 3 | 3 | 3 |
 | `D_quad` (N/(m/s)², N·m/(rad/s)²) | 40 | 80 | 60 | 5 | 5 | 5 |
 
-（PLACEHOLDER — 想定される終端速度に対してキャリブレーションすること。）
+（2026-08-21 更新: PLACEHOLDER から **CAD シルエット面積 × BlueROV2 実測 Cd による推定値**へ置換。導出は `python -m tools.estimate_hydro`、誤差帯 ±30 %、実測較正の手順は `docs/calibration_plan.md`。）
 
 **Velocity used (important subtlety):** 線形項は `mj_objectVelocity` による body 原点の速度ではなく、**CoM の並進速度**（`mj_subtreeVel → subtree_linvel`）を使う。body 原点は CoM からオフセットしているため、回転があると大きな `ω × r` 項が注入され、スピンが抗力の*力*へ連成して数値的暴走を引き起こす。角度項は**純モーメント**として適用する。
 
 **Water current / disturbance:** 速度は**水に対する相対速度**として取る。`v_lin_body = Rᵀ (subtree_linvel − current_world)` であり、水流が車体を引きずる（RL では外乱として使用）。レンチは `mj_applyFT` を介して **system CoM** に適用される。
 
-**Added mass:** `physics/hydrodynamics.py::added_mass_wrench_body` は `−M_A · a`（対角）を与えるが、`added_mass.diag` はデフォルトで **0（OFF）** である。明示的積分器の付加質量は数値的な注意を要するため、抗力/浮力がバリデーションされてから有効化すること。
+**Added mass:** `physics/hydrodynamics.py::added_mass_wrench_body` は `−M_A · a`（対角）を与える。2026-08-21 から **有効**（`diag = [2.69, 7.10, 3.16, 0.082, 0.165, 0.122]`、Lamb 楕円体 × ソリディティを BlueROV2 公表値で較正した推定。`tools/estimate_hydro` 参照）。ヒーブ付加質量は機体質量の 57 % あり、0（旧値）では鉛直・ピッチの過渡応答を大きく誤る。1 サブステップ遅れの有限差分加速度による明示的適用だが、validate_sim の open_loop / バンバン指令 30 s で発散しないことを確認済み。
 
 ### 2b. Higher-fidelity hydro: lift, translation-induced moment, cross-coupling
 3 つの config でゲートされる項が、「各軸で速度に対抗する力」を超えて対角の抗力を拡張する。これらの係数は **PLACEHOLDER**（物理的に妥当なもので、tow/PMM 試験に対してキャリブレーションする予定）であり、それぞれ旧モデルを復元するデフォルトを持ち、**lift + CoP オフセットはデフォルトで ENABLED**（控えめ）である。
@@ -95,13 +95,15 @@ F_lift = coef · |v|² · sin(α)·cos(α) · n̂        (body)   coef = ½ρ·C
 
 ```
 servo_target_k = clip(a_servo_k, −1, 1) · servo_range          # servo_range = 90° = 1.5708 rad
-servo_ctrl_k   = slew(servo_ctrl_k → servo_target_k, 250°/s, dt)   # rate-limited azimuth (HS-646WP)
+servo_ctrl_k   = track(servo_ctrl_k → servo_target_k, 250°/s, τ=0.05 s, dt)  # slew + 1次遅れ (HS-646WP)
 esc_current_k  = slew(esc_current_k → clip(a_esc_k,−1,1), 4.0 /s, dt)   # rate-limited ESC command
 thrust_mag_k   = esc_current_k · thrust_per_cmd                 # thrust_per_cmd = 30 N per unit cmd
 ```
 
-- `slew(x→target, rate, dt) = x + clip(target−x, −rate·dt, +rate·dt)` — 1 次のレート制限
-  （実機の `max_duty_step_per_sec` を反映）。`servo_slew = 250 °/s`（水中でデレートされた HS-646WP）、`thrust_slew = 4.0 esc-units/s`。
+- サーボは `track(x→target, rate, τ, dt)`: `rate = clip(err/τ, ±slew)` — 大角度ではレート制限、
+  目標近傍（slew·τ ≈ 12.5°以内）では時定数 τ の 1 次遅れで**指令に収束する**（実 RC サーボの位置制御ループを近似）。
+  旧 pure-slew はフラッピング指令下で永遠に収束せず、「指令が到達不能」という病理を学習から隠していた
+  （issue #2/#3）。`servo_tau_s: 0` で旧モデルに戻る。ESC は従来どおり `slew`（`thrust_slew = 4.0 esc-units/s`）。
 - `servo_ctrl_k` は MJCF のサーボアクチュエータ（`data.ctrl`、ラジアン）に書き込まれる。body がどう回転するかについては MJCF のヒンジ（アーム周り）が権威を持つ。サーボアクチュエータの力はストールトルク（約 0.94〜1.14 N·m）に制限される。
 
 ### Thrust force (`_apply_external_forces`)
@@ -128,7 +130,7 @@ mj_applyFT(F_thr_k, point = site_xpos[t k _thrust], body = thruster_k)
 - **Direction dependence = constant per-axis coefficients** — *抗力*の大きさについて。方向ごとに異なる実効
   `Cd·A` は、body 軸ごとに異なる `D_lin`/`D_quad`（流線型の +X < 横方向の +Y）に織り込まれている。任意の流れ角における投影面積を動的に再計算するわけではない。
 - **Lift shape is a simple ½sin 2α**（明示的なストール/`Cl(α)` 曲線なし）。CoP オフセットは**固定**点（速度・角度に依存しない）。
-- **No added-mass coupling by default**（`added_mass.diag = 0`）。
+- **Added mass は対角のみ**（交差項なし。対角は推定値で有効）。
 - §2b のすべての係数はキャリブレーション（tow/PMM 試験）待ちの **PLACEHOLDER** である。
 
 これは、定点保持 + 低速巡航を行う低速の箱型 ROV には十分であり、§2b の各項が斜め / 横方向の機動に対して 1 次の揚力/並進モーメントの忠実度を追加する。さらなる高度化としては、完全な 6×6 減衰行列と角度分解された `Cl(α)` / 移動する CoP が挙げられる。

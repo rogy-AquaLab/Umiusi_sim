@@ -54,8 +54,14 @@ SERVO_RANGE_DEG = 90.0
 _EPS = 1e-9
 
 
-def feedforward_allocation(target_orientation, target_velocity, servo_range_deg=SERVO_RANGE_DEG):
-    """Feed-forward 6-DOF command -> 8-D sim action ``[servo_1..4, esc_1..4]``.
+def feedforward_allocation(target_orientation, target_velocity, servo_range_deg=SERVO_RANGE_DEG,
+                           thrust_curve_exp=1.0):
+    """Feed-forward 6-DOF command -> 8-D sim action ``[servo x4, esc x4]``.
+
+    The output channel order is the ACTION contract (lf, lb, rb, rf) shared by the simulator
+    (configs/umiusi.yaml ``action_order``) and sinsei_UMIUSI_autonomy's POSITIONS — i.e. units
+    (id1, id2, id4, id3) under the geometric naming. The internal allocation matrix works in
+    unit-id order; the result is permuted before returning.
 
     Parameters
     ----------
@@ -66,6 +72,10 @@ def feedforward_allocation(target_orientation, target_velocity, servo_range_deg=
         see the module docstring for how this maps onto sim axes).
     servo_range_deg : float
         Servo half-range in degrees used to normalise the azimuth angle to ``[-1, 1]``.
+    thrust_curve_exp : float
+        The plant's thrust-curve exponent (configs/umiusi.yaml ``thrust_curve_exp``); the
+        commanded esc is pre-warped by the INVERSE curve ``u = sign(t)|t|^(1/exp)`` so the
+        realised thrust is the linear allocation. 1.0 (old linear plant) = no warp.
 
     Returns
     -------
@@ -101,10 +111,14 @@ def feedforward_allocation(target_orientation, target_velocity, servo_range_deg=
             ang += 2.0 * math.pi
         sign = -1.0 if (math.pi / 2.0 < ang < 3.0 * math.pi / 2.0) else 1.0
         thrust = sign * mag / _R  # /sqrt(2) so |thrust| <= 1 for unit commands
+        if thrust_curve_exp != 1.0:  # invert the plant's propeller-law curve
+            thrust = math.copysign(abs(thrust) ** (1.0 / thrust_curve_exp), thrust)
 
         action[i] = float(np.clip(servo_deg / servo_range_deg, -1.0, 1.0))
         action[4 + i] = float(np.clip(thrust, -1.0, 1.0))
-    return action
+    # unit-id order (1,2,3,4) -> action order (lf, lb, rb, rf) = (id1, id2, id4, id3)
+    perm = [0, 1, 3, 2]
+    return np.concatenate([action[:4][perm], action[4:][perm]])
 
 
 if __name__ == "__main__":

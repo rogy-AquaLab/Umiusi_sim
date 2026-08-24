@@ -4,8 +4,9 @@ Single physics implementation shared by the validation tool, the RL env, and the
 bridge. Exposes a clean reset()/step(action)/get_state() API.
 
 Action (8-D, each in [-1, 1]):
-    [servo_1..4, esc_1..4]
-    servo_k -> target azimuth angle = servo_k * servo_range (rate-limited)
+    [servo x4, esc x4], channel order = config `thrusters.action_order` (default lf, lb, rb, rf —
+    the sinsei_UMIUSI_autonomy POSITIONS contract; names are per-unit `name` fields in the config)
+    servo_k -> target azimuth angle = servo_k * servo_range (servo model: slew + first-order lag)
     esc_k   -> thrust = esc_k * thrust_per_cmd  [N]
 
 Frame: CAD frame, +Y up. Units: SI, radians internally.
@@ -69,17 +70,38 @@ class UmiusiSimulator:
         self.servo_range_rad = np.radians(max(abs(v) for v in t["servo_range_deg"]))
         self.servo_slew_rad = np.radians(t["servo_slew_deg_per_s"])
         self.thrust_slew = float(t.get("thrust_slew_per_s", 1e9))  # esc units/s (mirrors max_duty_step_per_sec)
+        # Servo tracking: rate = clip(err / tau, +/- slew) — slews on large errors, converges as a
+        # first-order lag near the target (tau = 0 -> the old pure-slew model). See configs comment.
+        self.servo_tau = float(t.get("servo_tau_s", 0.0))
         self.thrust_per_cmd = float(t["thrust_per_cmd"])
-        # Per-thruster neutral thrust direction (thruster body frame). The MJCF servo hinge (about
-        # the mounting arm) rotates the body, so this axis, carried by the body, tilts with the servo.
-        self.thrust_axes = np.array([u["thrust_axis"] for u in t["units"]], dtype=float)
+        # Propeller-law thrust curve F = sign(u)|u|^exp * thrust_per_cmd (1.0 = old linear map).
+        # Fitted against the 2026-08-21 pool bag: linear overpredicts low-duty thrust ~10x.
+        self.thrust_curve_exp = float(t.get("thrust_curve_exp", 1.0))
+        # Action channel order (issue #3, item 1): action[k] drives the unit NAMED
+        # action_order[k]. Per-unit names live in the config (geometric: lf/lb/rf/rb); the default
+        # order is the autonomy-side POSITIONS contract. Without names (old config) fall back to
+        # id order, preserving the old behavior.
+        names = {u.get("name", f"unit_{u['id']}"): int(u["id"]) for u in t["units"]}
+        order = t.get("action_order")
+        if order:
+            missing = [n for n in order if n not in names]
+            if missing:
+                raise ValueError(f"action_order names {missing} not among unit names {list(names)}")
+            self.unit_ids = [names[n] for n in order]     # action index k -> config unit id
+        else:
+            self.unit_ids = [int(u["id"]) for u in t["units"]]
+        self.unit_names = order if order else list(names)
+        by_id = {int(u["id"]): u for u in t["units"]}
+        # Per-thruster neutral thrust direction (thruster body frame), in ACTION order. The MJCF
+        # servo hinge (about the mounting arm) rotates the body, so this axis tilts with the servo.
+        self.thrust_axes = np.array([by_id[i]["thrust_axis"] for i in self.unit_ids], dtype=float)
 
-        # Indices
+        # Indices, all in ACTION order (MJCF entities keep the id-based names).
         self.base_id = self.model.body("base_link").id
-        self.thr_ids = [self.model.body(f"thruster_{i}").id for i in (1, 2, 3, 4)]
-        self.site_ids = [self.model.site(f"t{i}_thrust").id for i in (1, 2, 3, 4)]
-        self.act_ids = [self.model.actuator(f"servo_{i}").id for i in (1, 2, 3, 4)]
-        self.servo_qadr = [self.model.jnt_qposadr[self.model.joint(f"servo_{i}").id] for i in (1, 2, 3, 4)]
+        self.thr_ids = [self.model.body(f"thruster_{i}").id for i in self.unit_ids]
+        self.site_ids = [self.model.site(f"t{i}_thrust").id for i in self.unit_ids]
+        self.act_ids = [self.model.actuator(f"servo_{i}").id for i in self.unit_ids]
+        self.servo_qadr = [self.model.jnt_qposadr[self.model.joint(f"servo_{i}").id] for i in self.unit_ids]
 
         # Center of buoyancy: horizontally over the whole-vehicle CoM (base + thrusters),
         # `buoyancy_offset` above it, expressed in the base body frame (rotates with the hull).
@@ -100,6 +122,12 @@ class UmiusiSimulator:
         self._cam_rng = np.random.default_rng(0)
 
         self.reset()
+
+    def set_buoyancy_offset(self, offset):
+        """Move the CoB to `offset` [m] above the system CoM (keeps the horizontal placement).
+        Used by domain randomization and calibration fits; mirrors the __init__ computation."""
+        self.cob_local = self.cob_local + np.array([0.0, float(offset) - self.buoyancy_offset, 0.0])
+        self.buoyancy_offset = float(offset)
 
     # -- lifecycle -------------------------------------------------------------
     def reset(self, pos=(0.0, 0.0, 0.0), quat=(1.0, 0.0, 0.0, 0.0)):
@@ -122,9 +150,11 @@ class UmiusiSimulator:
         servo_target = np.clip(action[:4], -1.0, 1.0) * self.servo_range_rad
         esc_target = np.clip(action[4:8], -1.0, 1.0)
         for _ in range(self.substeps):
-            self.servo_ctrl = thr.slew(self.servo_ctrl, servo_target, self.servo_slew_rad, self.dt)
+            self.servo_ctrl = thr.track(self.servo_ctrl, servo_target, self.servo_slew_rad,
+                                        self.servo_tau, self.dt)
             self.esc_current = thr.slew(self.esc_current, esc_target, self.thrust_slew, self.dt)
-            self.thrust_mag = self.esc_current * self.thrust_per_cmd
+            u = self.esc_current
+            self.thrust_mag = np.sign(u) * np.abs(u) ** self.thrust_curve_exp * self.thrust_per_cmd
             for k, aid in enumerate(self.act_ids):
                 self.data.ctrl[aid] = self.servo_ctrl[k]
             self._apply_external_forces()

@@ -14,6 +14,23 @@ def slew(current, target, max_rate, dt):
     return current + np.clip(target - current, -step, step)
 
 
+def track(current, target, max_rate, tau, dt):
+    """RC-servo tracking: first-order lag saturated by a rate limit.
+
+    rate = clip((target - current) / tau, +/- max_rate): far from the target the servo moves at
+    its slew rate; within max_rate * tau of it, the motion is an exponential convergence with
+    time constant tau — so a CONSTANT command is actually reached (the position control loop a
+    real RC servo runs), unlike pure slew which crawls at full rate forever under a flapping
+    command. tau <= 0 falls back to slew().
+    """
+    if tau <= 0.0:
+        return slew(current, target, max_rate, dt)
+    err = target - current
+    step = np.clip(err / tau, -max_rate, max_rate) * dt
+    # never overshoot the target within one step (guards dt >= tau)
+    return current + np.where(np.abs(step) > np.abs(err), err, step)
+
+
 def thrust_to_world(magnitude, thrust_axis_local, body_xmat):
     """World-frame thrust force vector.
 
