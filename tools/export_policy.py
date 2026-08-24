@@ -20,6 +20,9 @@ from gymnasium import spaces
 AUTONOMY = Path("../ros2_ws/src/sinsei_UMIUSI_autonomy").resolve()
 POL = AUTONOMY / "umiusi_rl_control/models/cruise_policy"
 OUT = POL / "export"
+# 25 = 旧 proprio_mode "full" (imu 6 + v_cmd 3 + servo 4 + thrust 4 + prev_action 8)。
+# proprio_mode "action" で学習したポリシーは 17 (imu 6 + v_cmd 3 + prev_action 8)。
+# final.zip から実次元を読むので、この既定値は fallback にすぎない。
 OBS_DIM, ACT_DIM = 25, 8
 
 def stub():
@@ -32,9 +35,12 @@ def stub():
     return S()
 
 def main():
+    global OBS_DIM
     OUT.mkdir(exist_ok=True)
     model = PPO.load(str(POL / "final.zip"), device="cpu")
     pol = model.policy
+    # 実際の観測次元はモデルが知っている (proprio_mode "action" なら 17)。
+    OBS_DIM = int(np.prod(model.observation_space.shape))
 
     # --- 重み: 素の tensor だけの state_dict にする ---
     sd = {k: v.detach().cpu().clone() for k, v in pol.state_dict().items()}

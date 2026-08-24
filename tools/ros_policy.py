@@ -11,7 +11,8 @@ controller of that running sim:
     * SUBSCRIBE the vehicle state:
         /state/imu_state          (ImuState)        -> current quaternion + body gyro
         /state/thruster_state_all (ThrusterStateAll)-> per-thruster servo angle + applied esc
-    * reconstruct the policy's 25-D observation EXACTLY as UmiusiPoseEnv._get_obs builds it for
+    * reconstruct the policy's observation (25-D proprio "full" / 17-D proprio "action") EXACTLY
+      as UmiusiPoseEnv._get_obs builds it for
       task=attitude_velocity, obs_mode=imu (reusing the env's own helpers so the layout/scaling
       can't silently drift), apply the training-time VecNormalize, run policy.predict().
     * PUBLISH the four direct-override commands:
@@ -55,9 +56,11 @@ QPOS_TYPE = "std_msgs/Float64MultiArray"
 CMD_PREFIX = "/cmd/direct/thruster_controller/output_"
 CMD_TYPE = "sinsei_umiusi_msgs/msg/ThrusterOutput"
 
-# Thruster position <-> policy index. controllers.yaml: lf=id1, lb=id2, rb=id3, rf=id4, i.e.
-# the sim's thruster_{1,2,3,4}. UmiusiSimulator's action is [servo_1..4, esc_1..4], so the
-# ordered positions map straight onto policy indices 0..3.
+# Thruster position <-> policy index. UmiusiSimulator now maps action channels by NAME
+# (configs/umiusi.yaml `action_order`, default lf, lb, rb, rf — this same tuple), so policy
+# index k means the thruster named POSITIONS[k] in BOTH sim and autonomy. NOTE the geometric
+# names in the config label unit id3 = rf and id4 = rb (the old assumed "3=rb 4=rf" had the
+# starboard pair swapped); which CAN id is wired to which corner still needs a hardware check.
 POSITIONS = ("lf", "lb", "rb", "rf")
 
 
@@ -171,7 +174,8 @@ def build_env_and_policy(model_path: Path, config: str | None, algo: str | None)
 
 
 def reconstruct_obs(env, imu: dict, thr: dict, target_quat, v_cmd, prev_action):
-    """Build the exact 25-D observation UmiusiPoseEnv._get_obs produces, from live ROS state.
+    """Build the exact observation UmiusiPoseEnv._get_obs produces, from live ROS state.
+    (With proprio_mode "action" the servo/thrust entries below are simply not emitted.)
 
     Mapping (imu + attitude_velocity, obs = [ori_err(3), ang_vel(3), v_cmd(3), servo(4),
     thrust(4), prev_action(8)]):
