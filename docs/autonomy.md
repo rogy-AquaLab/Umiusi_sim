@@ -5,11 +5,17 @@
 3自由度の `{surge, heave, yaw}` インテントを出力する。これをフィードフォワードの配分器が8次元のスラスタアクションへ変換する。
 
 > **ここに強化学習は存在しない。** 競技の自律制御は今日時点で**フィードフォワード / ルールベースのみ**である
-> (`competition_run.py:5`, `architecture.md:91`)。[`rl.md`](rl.md) にある RL ポリシーは*別個の*
+> (`competition_run.py:5`, [`architecture.md`](architecture.md))。[`rl.md`](rl.md) にある RL ポリシーは*別個の*
 > 低レベルトラック（姿勢 / 巡航）であり、バルーンミッションには接続されていない。
 
 perception と同様に、FSM は ROS 非依存 / sim 非依存の `umiusi_perception` wheel に置かれているため、
 sim (`tools/autonomy_run.py`) 上でもロボット (`navigator_node`) 上でも**ビット単位で同一**である。
+
+**深度モード切替スーパバイザ（RL 側の上位ロジック）について:** 3-D の単一ポリシーが実用にならなかったため
+（[`rl.md`](rl.md) 参照）、深度しきい値で**水平ポリシーと降下ポリシーを切り替えるスーパバイザ**が導入されている。
+これはこの FSM とは別物で、**ロボット側に実装されている**（`sinsei_UMIUSI_autonomy` PR #17）。sim 側の
+リハーサル（しきい値 / ヒステリシス / 切替過渡の測定）は `tools/mode_switch_eval.py` が担う。
+運用上の不変条件: **水平ポリシーに鉛直の `v_cmd` を渡してはならない**（分布外であり、姿勢を崩す）。
 
 ## Where it lives
 
@@ -125,7 +131,7 @@ FSM のカメラのみの pop 確認を可能にする。
 - **フレーム規約** (`:13`): sim 軸 ≠ コントローラ軸 — 経験的に `Vz → +Y (heave up)`,
   `Vx → −X (surge, sign-flipped)`, `Vy → yaw couple`。呼び出し側はインテントを明示的にマッピングする:
   `feedforward_allocation([0,0,yaw], [−surge, 0, heave])` (`autonomy_run.py:255`, `navigator_node.py:143`)。
-  FF フレームの符号整合は追跡中の**ハードウェア立ち上げのフォローアップ**である (README:361)。
+  FF フレームの符号整合は追跡中の**ハードウェア立ち上げのフォローアップ**である (README)。
 
 ---
 
@@ -162,11 +168,11 @@ FSM のカメラのみの pop 確認を可能にする。
 
 | metric | value | source |
 |---|---|---|
-| グラウンドトゥルースドライバ (`competition_run`) の典型的な最終スコア | **~80** | README:221 |
-| 突入/pop の信頼性（現在の律速レバー） | **~15 %** hit-rate | README:360, `ram_eval.py:5` |
-| 検出器の赤 / 青リコール（学習済み、40枚ベースライン） | 0.82 / 0.63 | README:338 |
+| グラウンドトゥルースドライバ (`competition_run`) の典型的な最終スコア | **~80** | README |
+| 突入/pop の信頼性（現在の律速レバー） | **~15 %** hit-rate | README, `ram_eval.py:5` |
+| 検出器の赤 / 青リコール（学習済み、40枚ベースライン） | 0.82 / 0.63 | README |
 
-**Status** (README:36, 354): 競技 sim ✅, perception + FSM ✅（エンドツーエンドで実行可能）; 🟡 sim-to-real
+**Status** (README): 競技 sim ✅, perception + FSM ✅（エンドツーエンドで実行可能）; 🟡 sim-to-real
 チューニング + Pi-4 デプロイは保留中。未解決のレバー: **突入/pop の信頼性 (~15 %)**、sim-to-real の検出器品質、
 FF フレームの符号整合、および Pi 用の aarch64 MuJoCo ビルド。`tools/ram_eval.py` は突入の信頼性を単独で攻略するためのツールである
 （完璧な perception → FSM、失敗の分類）。

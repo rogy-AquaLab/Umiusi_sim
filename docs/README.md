@@ -10,6 +10,7 @@ UMIUSI 水中ロボットシミュレータ + 自律スタックの設計・実�
 | [perception.md](perception.md) | perception (知覚) | 検出器（HSV / Hough / 学習済み `TinyBalloonNet`）、水中復元、トラッカ、学習、ベンチマーク |
 | [rl.md](rl.md) | 本体挙動 RL (本体挙動) | `UmiusiPoseEnv` 上の PPO、観測/行動/報酬、タスク、sim2real DR、モデルファミリ、評価 |
 | [autonomy.md](autonomy.md) | 上位制御 (上位行動制御) | 風船割り FSM `BalloonBehavior`、ターゲット選択、競技シナリオ、フィードフォワード配分、ROS デプロイ |
+| [calibration_plan.md](calibration_plan.md) | sim2real / 較正 | 次回水中実験で取るデータと係数への落とし方、2026-08-21 の bag フィット結果、IMU 軸の確定手順 |
 
 ## 3層の概観
 
@@ -26,4 +27,5 @@ camera ─▶ perception  (学習済み TinyBalloonNet → Detection: 色 + 方�
 
 **Perception + autonomy** は 1 つの ROS-free ホイール（`umiusi_perception`）であり、シム
 （`tools/autonomy_run.py`）と実機（`ros2_ws/src/umiusi_autonomy`）でビット単位で同一である。**RL** は独立した
-低レベルトラックであり、現時点では風船ミッションには組み込まれていない（競技の自律制御はフィードフォワードのみ）。
+低レベルトラックであり、**低レベルの姿勢 / ベクタリング層としてすでに実機で稼働している**（2026-08-21 のプール試験、
+`rl_attitude_node`）。ただし依然として風船ミッションの FSM には組み込まれていない（競技の自律制御はフィードフォワードのみ）。

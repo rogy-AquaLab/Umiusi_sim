@@ -7,7 +7,8 @@ docs/calibration_plan.md — reading mcap needs the ROS python, so export once, 
            them (servo/thrust = the telemetry ECHO, target from the recorded setpoints) and
            score the predicted servo commands against the RECORDED commands. Validates that the
            sim-side understanding of the deployed pipeline is right: on the 2026-08-21
-           servo-debug bag, av_curr4 reproduces the recorded commands with sign agreement 100 %
+           servo-debug bag, av_curr4 — the policy DEPLOYED AT THE TIME, kept here as the
+           historical example — reproduces the recorded commands with sign agreement 100 %
            (|cmd| > 5 deg) and per-channel correlation 0.92-0.94 at 1 tick of publish latency.
 
   physics  Open-loop k-step replay: initialise the sim from each recorded attitude/gyro window,
@@ -24,7 +25,7 @@ NOTE the deployed rl_attitude_node does NOT do this remap — the policy on the 
 pitch/yaw-swapped observations (reported in the sim2real issue).
 
 Usage:
-    python -m tools.bag_replay policy  --npz out/servo_debug.npz --model models/av_curr4
+    python -m tools.bag_replay policy  --npz out/servo_debug.npz --model models/av_curr4  # (historical bundle)
     python -m tools.bag_replay physics --npz out/servo_debug.npz [--thrust-exp 2.0] [--k 25]
 """
 from __future__ import annotations

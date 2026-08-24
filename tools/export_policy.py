@@ -1,7 +1,11 @@
 #!/usr/bin/env python3
-"""cruise_policy を numpy/SB3 非依存の素形式へ書き出し、SB3 と出力一致を検証する。
+"""学習済みポリシー bundle を SB3 非依存の素形式へ書き出し、SB3 と出力一致を検証する。
 
-出力: policy_export/{weights.pt, obs_norm.npz, meta.json}
+書き出し対象は下の `POL` 定数で指すバンドル(使うときに対象バンドルへ向ける)。
+現在の配備バンドルは REP-103 変換済みの av_cal1_best_rep103 / att_cal1_best_rep103 /
+av_sim2real2_rep103 / av_cal5_3d_rep103(降下専用・EXPERIMENTAL)である。
+
+出力: <bundle>/export/{weights.pt, obs_norm.npz, meta.json}
 実機側は torch だけで推論できる(SB3/gymnasium/cloudpickle 不要)。
 """
 from __future__ import annotations
@@ -18,6 +22,7 @@ from gymnasium import spaces
 # 実機側で動く推論実装は sinsei_UMIUSI_autonomy/tools/policy_infer.py に一本化してある
 # (重複を避けるため、ここでは検証時にそこから import する)。
 AUTONOMY = Path("../ros2_ws/src/sinsei_UMIUSI_autonomy").resolve()
+# POL = 書き出す対象バンドル。使用時にこれを対象へ向ける(既定は最初に書き出した cruise_policy のまま)。
 POL = AUTONOMY / "umiusi_rl_control/models/cruise_policy"
 OUT = POL / "export"
 # 25 = 旧 proprio_mode "full" (imu 6 + v_cmd 3 + servo 4 + thrust 4 + prev_action 8)。

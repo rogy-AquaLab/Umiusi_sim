@@ -6,7 +6,7 @@
 - **Frame:** CAD フレーム、**+Y が上**。4 つのスラスタは X–Z 平面上にある。前方は +X。
 - **Body 6-vectors:** `[x, y, z, roll, pitch, yaw] = [linear(3), angular(3)]`、body 軸。
 - **Integration:** 物理タイムステップ `0.002 s`（500 Hz）、制御/コマンドレート `50 Hz`。重力は
-  MuJoCo が body 質量を通じて適用する。ここで解析的に加えるのは**浮力、抗力（およびオプションの付加質量）**のみである。
+  MuJoCo が body 質量を通じて適用する。ここで解析的に加えるのは**浮力、抗力、付加質量（有効）、揚力 + CoP モーメント**である。
 - **Application (important):** すべての外力は `mj_applyFT` を介してその**真の作用点**に適用され（`qfrc_applied` に累積され、各ステップでクリアされる）、base の CoM にまとめて載せることはしない。
   `base_link` の CoM は車体全体の CoM からオフセットしているため、誤った点に合力を適用すると偽のトルクが注入される（さらに、速度依存の抗力については暴走フィードバックとなる）。
 
@@ -32,10 +32,10 @@ F_buoy = − ρ · V · g          (world)     magnitude = ρ·V·|g|
 - `ρ = 1000 kg/m³`（`water.density`）、`V = 0.0126 m³`（`water.displaced_volume`）、`g = [0,−9.81,0]`。
 - `V` は**排除（外殻）体積**であり、中立の 0.01248 m³ より**わずかに大きく**設定して、車体をわずかに正の浮力にする（アイドル時にゆっくり浮上する）。バリデーションで調整する。
 
-**Point of application — center of buoyancy (CoB):** 車体全体の CoM（base + 4 スラスタ）の**水平方向の真上**に置き、その `buoyancy_offset_above_com = 0.05 m` **上**に配置する。base の body フレームで表現されるため、**船体とともに回転する**：
+**Point of application — center of buoyancy (CoB):** 車体全体の CoM（base + 4 スラスタ）の**水平方向の真上**に置き、その `buoyancy_offset_above_com = 0.010 m` **上**に配置する（2026-08-21 の実機 bag 較正で 0.05 m から置換。`docs/calibration_plan.md` 参照）。base の body フレームで表現されるため、**船体とともに回転する**：
 
 ```
-cob_local = (system CoM in base frame) + [0, 0.05, 0]
+cob_local = (system CoM in base frame) + [0, 0.010, 0]
 cob_world = xpos[base] + R · cob_local
 ```
 
@@ -97,13 +97,17 @@ F_lift = coef · |v|² · sin(α)·cos(α) · n̂        (body)   coef = ½ρ·C
 servo_target_k = clip(a_servo_k, −1, 1) · servo_range          # servo_range = 90° = 1.5708 rad
 servo_ctrl_k   = track(servo_ctrl_k → servo_target_k, 250°/s, τ=0.05 s, dt)  # slew + 1次遅れ (HS-646WP)
 esc_current_k  = slew(esc_current_k → clip(a_esc_k,−1,1), 4.0 /s, dt)   # rate-limited ESC command
-thrust_mag_k   = esc_current_k · thrust_per_cmd                 # thrust_per_cmd = 30 N per unit cmd
+thrust_mag_k   = sign(u)·|u|^thrust_curve_exp · thrust_per_cmd   # u = esc_current_k, exp = 2.0, thrust_per_cmd = 30 N
 ```
 
 - サーボは `track(x→target, rate, τ, dt)`: `rate = clip(err/τ, ±slew)` — 大角度ではレート制限、
   目標近傍（slew·τ ≈ 12.5°以内）では時定数 τ の 1 次遅れで**指令に収束する**（実 RC サーボの位置制御ループを近似）。
   旧 pure-slew はフラッピング指令下で永遠に収束せず、「指令が到達不能」という病理を学習から隠していた
   （issue #2/#3）。`servo_tau_s: 0` で旧モデルに戻る。ESC は従来どおり `slew`（`thrust_slew = 4.0 esc-units/s`）。
+- 推力マップは**プロペラ則**である: `F = sign(u)·|u|^thrust_curve_exp · thrust_per_cmd`（`thrust_curve_exp = 2.0`）。
+  2026-08-21 の bag 再生フィットで線形マップから置換した（低 duty の実効推力が線形では過大だった。
+  `thrust_curve_exp: 1.0` で旧来の線形マップに戻る）。bag は |duty| ≤ 0.2 しか含まないため、指数と最大推力
+  `thrust_per_cmd` の分離は秤の実測（`calibration_plan.md` §3）待ちである。
 - `servo_ctrl_k` は MJCF のサーボアクチュエータ（`data.ctrl`、ラジアン）に書き込まれる。body がどう回転するかについては MJCF のヒンジ（アーム周り）が権威を持つ。サーボアクチュエータの力はストールトルク（約 0.94〜1.14 N·m）に制限される。
 
 ### Thrust force (`_apply_external_forces`)
@@ -115,8 +119,9 @@ mj_applyFT(F_thr_k, point = site_xpos[t k _thrust], body = thruster_k)
 ```
 
 - `thrust_axis_local_k` は**中立（servo = 0）の推力方向** = 水平接線方向（アームに垂直）であり、スラスタの body フレームで表される。サーボがスラスタ body を回転させると `R_body_k` がこの軸を傾けるため、同じ格納軸で正しく傾いた推力が生成される。
-- ユニットごとのピボット + 中立軸は `thrusters.units`（id → 名前 `1=lf 2=lb 3=rb 4=rf`）にある。例えばユニット 1 は
-  `thrust_axis ≈ [0.708, 0, 0.706]`。
+- ユニットごとのピボット + 中立軸は `thrusters.units`（id → 名前 `1=lf 2=lb 3=rf 4=rb`、**+Z = 右舷**）にある。例えばユニット 1 は
+  `thrust_axis ≈ [0.708, 0, 0.706]`。これは *geometry* の命名であり、**アクションのチャネル順は別契約**である
+  （`action_order: [lf, lb, rb, rf]` — autonomy 側の POSITIONS と一致させるためのもの）。
 - 正味の効果：サーボが推力を**水平**成分（→ サージ / スウェイ / ヨー）と**垂直**成分（→ ヒーブ / ロール / ピッチ）に分割する。`φ = atan(f_vertical / f_horizontal)` であり、実機の `sinsei_umiusi_control` の FeedForward 配分に一致する。
 
 ### Modeling scope & remaining limitations
@@ -131,7 +136,8 @@ mj_applyFT(F_thr_k, point = site_xpos[t k _thrust], body = thruster_k)
   `Cd·A` は、body 軸ごとに異なる `D_lin`/`D_quad`（流線型の +X < 横方向の +Y）に織り込まれている。任意の流れ角における投影面積を動的に再計算するわけではない。
 - **Lift shape is a simple ½sin 2α**（明示的なストール/`Cl(α)` 曲線なし）。CoP オフセットは**固定**点（速度・角度に依存しない）。
 - **Added mass は対角のみ**（交差項なし。対角は推定値で有効）。
-- §2b のすべての係数はキャリブレーション（tow/PMM 試験）待ちの **PLACEHOLDER** である。
+- §2b のうち **lift `coef` / `cop_offset` / coupling** はキャリブレーション（tow/PMM 試験）待ちの **PLACEHOLDER** である
+  （同じ §2 でも drag 係数と付加質量は `tools/estimate_hydro` 由来の推定値、buoyancy オフセットは実機 bag で較正済み）。
 
 これは、定点保持 + 低速巡航を行う低速の箱型 ROV には十分であり、§2b の各項が斜め / 横方向の機動に対して 1 次の揚力/並進モーメントの忠実度を追加する。さらなる高度化としては、完全な 6×6 減衰行列と角度分解された `Cl(α)` / 移動する CoP が挙げられる。
 
@@ -152,8 +158,8 @@ mj_applyFT(F_thr_k, point = site_xpos[t k _thrust], body = thruster_k)
 2. **buoyancy** `−ρV g` を CoB に（CoM より上 → 復元モーメント）。
 3. **drag** `−(D_lin v + D_quad |v| v)`（+ オプションのクロス連成モーメント）を、水流に対する相対の CoM 速度を使って計算し、並進力は **CoP**（`CoM + R·cop_offset` → 並進モーメント）に、角度減衰は純モーメントとして適用する。
 4. **lift** `coef·|v|²·½sin 2α · n̂` を流れに⟂に、CoM で（軸に沿った流れではゼロ）。
-5. オプションの **added mass**（デフォルト off）+ 外部の **impulse** 外乱を CoM で。
+5. **added mass**（デフォルト **ON**、対角 `[2.69, 7.10, 3.16, 0.082, 0.165, 0.122]` の推定値）+ 外部の **impulse** 外乱を CoM で。
 6. **thrust** `mag · R·axis` を各スラスタ先端サイトで。
 7. MuJoCo が積分する（重力は body 質量経由）、500 Hz。
 
-PLACEHOLDER とマークされたパラメータ（drag 係数、lift `coef`、`cop_offset`、coupling、排除体積、buoyancy オフセット）はバリデーションでキャリブレーションされる予定の初期推定値である。`tools/validate_sim.py` が定性的な不変条件（浮く/水平になる、heave/surge の分離、NaN なし）を守る。
+残る PLACEHOLDER は **lift `coef`、`cop_offset`、coupling、`displaced_volume`、`thrust_per_cmd` の絶対値**である（drag 係数は `tools/estimate_hydro` の推定値、buoyancy オフセットと推力曲線の指数は 2026-08-21 の実機 bag で**較正済み**）。残りは `docs/calibration_plan.md` の水中実験で実測に置き換える。`tools/validate_sim.py` が定性的な不変条件（浮く/水平になる、heave/surge の分離、NaN なし）を守る。

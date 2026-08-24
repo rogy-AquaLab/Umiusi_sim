@@ -2,7 +2,7 @@
 
 **低レベル制御の学習**トラック。自己受容感覚(固有受容) + 姿勢誤差を 8 次元のスラスタ行動に写像する PPO ポリシーを、解析的ハイドロの MuJoCo シム上でオフライン学習する(力モデルは [`physics.md`](physics.md) を参照)。出力されるポリシーは姿勢保持、姿勢+深度、巡航しながらの保持を行う。
 
-> これはバルーンミッションとは**別のトラック**である。コンペティションの [autonomy](autonomy.md) は RL ではなくフィードフォワードである。RL ポリシーをハードウェア上で動かす場合(将来)は、検出器と同じパターンに従う。すなわち Python で学習 + エクスポートし、薄い `umiusi_perception.policy` ランタイム経由でロードする(`architecture.md:86`)。
+> これはバルーンミッションとは**別のトラック**である。コンペティションの [autonomy](autonomy.md) は RL ではなくフィードフォワードである。一方 **RL ポリシーはすでに実機で動いている**(2026-08-21 のプール試験、`rl_attitude_node`)。配備経路は SB3/gymnasium 非依存の**素 torch エクスポート**(`tools/export_policy.py` → 実機側 `policy_infer.py`)であり、実機にコピーした後の一致は `tools/preflight_policy.py` の golden ベクタで検証する(詳細は [`architecture.md`](architecture.md))。
 
 ## 配置場所
 
@@ -17,6 +17,10 @@
 | RL 設定 | `configs/train_ppo.yaml` · シムパラメータ `configs/umiusi.yaml` |
 | 検証ゲート | `tools/validate_sim.py` · 定常状態診断 `tools/analyze_steady.py` |
 | キーボード操作 / ROS 操作 | `tools/drive.py` · `tools/ros_policy.py` |
+| 実機書き出し / frame 変換 | `tools/export_policy.py`(素 torch bundle 書き出し + SB3 と一致検証) · `tools/convert_policy_frame.py`(obs_frame 間の厳密変換、再学習不要) |
+| 配備前検証 | `tools/preflight_policy.py`(golden ベクタの生成 / 検証 + サニティ電池) · `tools/policy_restore_test.py`(傾けた状態からの閉ループ復元性) |
+| ベクタリング采点 / モード切替 | `tools/vectoring_eval.py`(41 セルの方向グリッド采点) · `tools/mode_switch_eval.py`(深度しきい値モード切替のリハーサル) |
+| 実 bag 較正 | `tools/bag_replay.py`(実 bag へのポリシー再生 / 開ループ物理フィット) |
 
 スタック: stable-baselines3 (2.9.0)、gymnasium (1.3.0)、torch 2.12 CPU、mujoco 3.10。**CPU 専用**で、`--n-envs` (`SubprocVecEnv`) でスケールする。
 
@@ -30,7 +34,7 @@
 
 **VecNormalize**(`train.py:119`): `norm_obs=True`、`norm_reward=True`(PPO)、`clip_obs=10.0`。統計は `vecnormalize.pkl` に保存され、評価時に再ロードされて推論が学習と一致するようにする。すべての利用側(`eval.py`, `drive.py`, `ros_policy.py`, `analyze_steady.py`)は `model.predict(deterministic=True)` の前に `clip((o−mean)/√(var+eps), ±10)` を再構成する。
 
-**カリキュラム**(`CurriculumCallback`, `train.py:31`)— `attitude_velocity` のみ。学習の最初の `frac=0.5` にわたって `vel_cmd_cone_deg`、`yaw_target_deg`、`tilt_target_deg` を 0 → 設定目標値へ線形に広げる。まず直進巡航を学習し、その後に一般化する。「何もしない」局所最適を回避するためである。
+**カリキュラム**(`CurriculumCallback`, `train.py:31`)— `attitude_velocity` のみ。学習の最初の `frac=0.5` にわたって `vel_cmd_cone_deg`、`yaw_target_deg`、`tilt_target_deg` を 0 → 設定目標値へ線形に広げる。まず直進巡航を学習し、その後に一般化する。「何もしない」局所最適を回避するためである。3 次元指令を扱う run では `vel_cmd_elev_deg` も同じランプで **0 → 60°** へ広げ、さらに `vel_cmd_horizontal_prob 0.35` で**エピソードの 35 % を純水平指令に固定する**(水平モードが鉛直モードに食われる多峰性への床。`train_ppo.yaml:28`)。
 
 ---
 
@@ -40,25 +44,25 @@
 
 **行動**(`spaces.Box(-1,1,(8,))`): `[servo_1..4, esc_1..4]`。`servo_k·90°` = 目標方位角(スルー 250°/s)、`esc_k·30 N` = 推力(スルー 4.0 units/s)。
 
-**観測** — 常に **16 次元の自己受容感覚(固有受容)** = `servo_n(4) + thrust_n(4) + prev_action(8)`、加えて `obs_mode` による外界受容:
+**観測** — 自己受容感覚(固有受容)は `proprio_mode`(`train_ppo.yaml:47`)で切り替わる。**デフォルトは `action` = `prev_action(8)` のみ**であり、`servo_n`/`thrust_n` は入れない: 実機の `ThrusterStateAll` は指令のエコー(独立した計測ではない)であって、観測に入れると sim にしか存在しない情報を学習してしまうためである(sim2real セーフ)。`proprio_mode: full` は `servo_n(4) + thrust_n(4) + prev_action(8)` = **16 次元**のレガシー設定であり、旧 run の互換のためだけに残っている。加えて `obs_mode` による外界受容:
 
-| obs_mode | extero contents | total |
+| obs_mode | extero contents | total(default `action`) |
 |---|---|---|
-| `imu` | `ori_err(3)` + `w_body(3)` | **22** |
-| `imu_depth` | + `depth_err(1)` | **23** |
-| `imu_depth_dvl` | + `depth_err(1)` + `lin_vel_body(3)` | **26** |
-| `full` | `pos_err(3)` + `ori_err(3)` + `lin_vel(3)` + `w_body(3)` | **28** |
+| `imu` | `ori_err(3)` + `w_body(3)` | **14**(legacy `full`: 22) |
+| `imu_depth` | + `depth_err(1)` | **15**(legacy: 23) |
+| `imu_depth_dvl` | + `depth_err(1)` + `lin_vel_body(3)` | **18**(legacy: 26) |
+| `full` | `pos_err(3)` + `ori_err(3)` + `lin_vel(3)` + `w_body(3)` | **20**(legacy: 28) |
 
-`ori_err` = 回転ベクトル誤差 `mju_subQuat(target, current)`(AHRS/BNO055、磁方位を含む絶対値)、`w_body` = ボディフレームのジャイロ。`attitude_velocity` は **3 次元のフィードフォワード速度*コマンド***(観測であり計測値ではない)を付加し → `imu` は **25 次元**になる。水平 X,Z は `full` でのみ観測可能(水中では GPS なし)。
+`ori_err` = 回転ベクトル誤差 `mju_subQuat(target, current)`(AHRS/BNO055、磁方位を含む絶対値)、`w_body` = ボディフレームのジャイロ。`attitude_velocity` は **3 次元のフィードフォワード速度*コマンド***(観測であり計測値ではない)を付加し → `imu` は **17 次元**(legacy: 25)になる。水平 X,Z は `full` でのみ観測可能(水中では GPS なし)。
 
 **タスク**(`--task`)、それぞれ現実的なセンサ構成に対応(報酬/成功は常に*真の*状態を使う。限定的な観測はタスクの一部を観測不能にするだけである):
 
 | task | goal | default obs | note |
 |---|---|---|---|
-| `attitude` | ランダムな目標向きを追従 | `imu` | 水平・深度がドリフト(観測されない) |
-| `attitude_depth` | 向き + ランダムな深度 | `imu_depth` | 水平がドリフト |
-| `attitude_velocity` | 向きを保持 + 指令された**方向**に巡航 | `imu` (25-D) | 方向のみ(DVL なしでは速度が観測不能) |
-| `pose` | go-to-pose: ランダムな位置、直立 | `full` | 位置基準が必要 |
+| `attitude` | ランダムな目標向きを追従 | `imu` (14-D) | 水平・深度がドリフト(観測されない) |
+| `attitude_depth` | 向き + ランダムな深度 | `imu_depth` (15-D) | 水平がドリフト |
+| `attitude_velocity` | 向きを保持 + 指令された**方向**に巡航 | `imu` (17-D) | 方向のみ(DVL なしでは速度が観測不能) |
+| `pose` | go-to-pose: ランダムな位置、直立 | `full` (20-D) | 位置基準が必要 |
 
 **エピソード**: ホライズン **600 制御ステップ = 12 s**、開始位置は ±0.10 m のジッタ付き。`pose` のみ早期に終了する(範囲外 `|pos|>[2.0,1.5,2.0]`)。姿勢タスクは車体をドリフトさせ、ホライズンで打ち切る。
 
@@ -78,12 +82,12 @@
 
 力(ステップごと、`mj_applyFT` により真の作用点で。詳細は [`physics.md`](physics.md)):
 
-1. **浮力** `−ρVg`、システム CoM より 0.05 m 上の CoB に作用 → 受動的な**復元モーメント**。
+1. **浮力** `−ρVg`、システム CoM より 0.01 m 上の CoB に作用 → 受動的な**復元モーメント**(2026-08-21 の bag 較正で 0.05 → 0.010 m)。
 2. **抗力** 対角の線形+二次、ボディフレーム、**水流に対する** CoM 速度に作用。並進力は**center-of-pressure**オフセットに適用 → Munk 的な並進モーメント。
 3. **揚力** 斜め流れに⟂(`coef 12.0`、迎角、有効。純粋なサージ/ヒーブ/スウェイではゼロ)。
-4. **スラスタ** 各先端でサーボ回転した軸に沿った力。サーボが推力を水平↔垂直に傾ける。
-5. **サーボ/ESC スルー** 一次のレート制限(250°/s、4.0 units/s)。
-6. デフォルトでオフ: 付加質量、非対角カップリング。
+4. **スラスタ** 各先端でサーボ回転した軸に沿った力。サーボが推力を水平↔垂直に傾ける。推力はプロペラ則 `F = sign(u)·|u|^2 · 30 N`(`thrust_curve_exp 2.0`、bag 較正)。
+5. **サーボ/ESC** サーボは `track()` = レート制限(250°/s)+ 時定数 τ で**指令に収束する**モデル、ESC は従来どおりレート制限(4.0 units/s)。
+6. **付加質量** 有効(対角 `[2.69, 7.10, 3.16, 0.082, 0.165, 0.122]`、`tools/estimate_hydro` の推定)。デフォルトでオフなのは非対角カップリングのみ。
 
 `tools/validate_sim.py` は定性的な不変条件(浮遊/自己水平化、6 軸すべてで抗力が速度に対抗、ヒーブ/サージのデカップリング、有界な開ループ、NaN なし)をゲートし、較正値(終端垂直速度、中立体積、DR 帯域)を出力する。
 
@@ -102,11 +106,34 @@
 
 すべて PPO、seed 0、`obs_mode imu`、設定 `train_ppo.yaml`、VecNormalize 有効。`meta.yaml` は設定/フラグのみを保存する(メトリクスは焼き込まれない)。2 つのファミリ:
 
-**`att_v*` — タスク `attitude`**(姿勢保持、AHRS のみ、22 次元)。タイムステップは反復を通じて増加した(300k → `att_v6` 1.0M、`att_v2` 1.5M)。これは**サーボチャタリング / 定常状態振動**の低減努力を追跡している(`tools/analyze_steady.py` で診断。設定の「att_v3 の教訓」= economy ペナルティを軽く保つ)。
+**`att_v*` — タスク `attitude`**(姿勢保持、AHRS のみ。旧 run は 22 次元、較正後の `att_cal*` は **14 次元**)。タイムステップは反復を通じて増加した(300k → `att_v6` 1.0M、`att_v2` 1.5M)。これは**サーボチャタリング / 定常状態振動**の低減努力を追跡している(`tools/analyze_steady.py` で診断。設定の「att_v3 の教訓」= economy ペナルティを軽く保つ)。
 
-**`av_* ` — タスク `attitude_velocity`**(保持 + 方向巡航、25 次元)。固定 +X ベースライン(`av_fix`、cone=0)から、徐々に長くなるカリキュラム実行(`av_curr4` **2.5M**、`av_long2` **6M**)を経て進展し、加えて外乱/DR を追加した **sim2real** 実行: `av_dist`(水流)、`av_robust`(水流+DR)、`av_sim2real` / `av_lightdr`(DR)。**`examples/cruise_policy/` は `av_curr4` のコピー**であり、出荷されるデモポリシーである。
+**`av_* ` — タスク `attitude_velocity`**(保持 + 方向巡航。旧 run は 25 次元、較正後の `av_cal*` は **17 次元**)。固定 +X ベースライン(`av_fix`、cone=0)から、徐々に長くなるカリキュラム実行(`av_curr4` **2.5M**、`av_long2` **6M**)を経て進展し、加えて外乱/DR を追加した **sim2real** 実行: `av_dist`(水流)、`av_robust`(水流+DR)、`av_sim2real` / `av_lightdr`(DR)。較正済み物理での再学習が `av_cal*` 系列である。**`examples/cruise_policy/` は `av_curr4` のコピー**であり、**較正前(旧物理・sim frame・レガシー 25 次元 proprio)のデモ用**である — 配備成果物ではない。
 
 `ppo_v1` = 最初期のベースライン(300k、デフォルト `pose`)。
+
+### 配備バンドル(実機に渡す成果物)
+
+配備するのは **REP-103 frame へ変換済み + `golden.npz` 同梱**のバンドルだけである(変換 = `tools/convert_policy_frame.py`、golden 生成/検証 = `tools/preflight_policy.py`):
+
+| bundle | obs | 役割 |
+|---|---|---|
+| `av_cal1_best_rep103` | 17-D | **主系**。姿勢保持 + 水平方向巡航 |
+| `att_cal1_best_rep103` | 14-D | 姿勢保持のみのフォールバック(速度指令なし) |
+| `av_sim2real2_rep103` | 17-D | plan B(別 DR 設定での代替) |
+| `av_cal5_3d_rep103` | 17-D | 3-D 指令。**降下専用 / EXPERIMENTAL**(export meta の `vertical_ok` で明示) |
+
+**3-D 単一ポリシーの結論: 現時点では実用にならない。** 最良の `av_cal5_3d` でも `tools/vectoring_eval.py` の
+**41 セル中 29 セルで不合格**(斜め方向が不安定、上昇は受動浮力より遅い)。したがって配備側の答えは
+**ロボット側での深度しきい値によるモード切替**(`sinsei_UMIUSI_autonomy` PR #17)であり、sim 側のリハーサルは
+`tools/mode_switch_eval.py` が担う。
+
+### 運用プロトコル
+
+- **`max_duty` は 0.2 → 0.4**。0.2 は初回の安全確認用の絞りであり、通常運用は 0.4。
+- **深度 / 鉛直モードは 0.4 必須**(0.2 では推力がプロペラ則で 1/4 になり降下できない)。
+- **水平ポリシーに鉛直 `v_cmd` を渡してはならない**(分布外)。実機ノード側は export meta の
+  `vertical_ok` インタロックでこれを強制する。
 
 ---
 
@@ -118,7 +145,9 @@
 
 | metric | value | source |
 |---|---|---|
-| 巡航ポリシー(av_curr4, 2.5M)の巡航タスク成功 | **~100 %**(一部サーボ動作あり) | `examples/README.md:5` |
+| 主系巡航ポリシー `av_cal1_best`(較正済み物理、スイープ) | hold 28.7 % · wobble 0.55 rad/s · drift 0.13 m/s · 最終ステップ成功 62 % | `tools/vectoring_eval` / eval スイープ |
+| 姿勢フォールバック `att_cal1_best` | hold **99.5 %** · ori 3.1° · wobble 0.05 rad/s | eval スイープ |
+| ベクタリング合格ゲート | 全セルで dir_err ≤ 30° かつ `v_along` ≥ 0.05 m/s(duty ≤ 0.4) | `tools/vectoring_eval.py:9` |
 | 中程度 DR の悪化 | drift 0.04 → 0.11 m/s, success 100 % → 60 % | `train_ppo.yaml:76` |
 | 定常巡航の角ジッタ | **~0.3 rad/s**(削減には `w_angvel≈1.5` + 行動ローパスが必要) | `train_ppo.yaml:43` |
 | 成功許容値 | ori 0.20 rad · pos 0.15 m · depth 0.10 m · vel 0.10 m/s | `train_ppo.yaml:29` |
@@ -126,7 +155,7 @@
 > 上記を超える実測の成功/ドリフト/ふらつきの数値はリポジトリにコミットされていない。学習済みの `meta.yaml` ファイルは設定のみを保持する。生成するには:
 > `python -m umiusi_rl.eval --model models/<run>/final.zip --episodes N`(+ `analyze_steady.py`、`validate_sim.py -v`)。
 
-**デプロイ経路**: `tools/drive.py` はプレーンなシーンでポリシーをキーボード操作する(セルフテストは cmd·計測の方向コサインを報告する)。`tools/ros_policy.py` は ROS2 の `umiusi_sim_bridge` MuJoCo シムを rosbridge 経由で駆動し、ライブの `ImuState` + `ThrusterStateAll` から正確な 25 次元観測を再構成し、4 つの直接オーバーライド `ThrusterOutput` コマンドを発行する。どちらも `UmiusiPoseEnv._get_obs` + VecNormalize 統計を再利用するので、観測レイアウトがずれることはない。
+**デプロイ経路**: `tools/drive.py` はプレーンなシーンでポリシーをキーボード操作する(セルフテストは cmd·計測の方向コサインを報告する)。`tools/ros_policy.py` は ROS2 の `umiusi_sim_bridge` MuJoCo シムを rosbridge 経由で駆動し、ライブの `ImuState` **だけ**から 17 次元観測を再構成して(proprio が `prev_action` のみになったため `ThrusterStateAll` は観測入力ではなくなった)、4 つの直接オーバーライド `ThrusterOutput` コマンドを発行する。どちらも `UmiusiPoseEnv._get_obs` + VecNormalize 統計を再利用するので、観測レイアウトがずれることはない。
 
 ## Observation frame contract (2026-08-21)
 

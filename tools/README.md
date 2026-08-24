@@ -52,6 +52,23 @@ present after `uv sync` except where `--extra learn` / `--extra viz` is called o
 | `competition_eval` | headless full-FIELD success/time metric: runs the FSM over the sampled field (GT/degraded detections) until all positives pop or timeout; reports **success rate + time-to-clear** over many episodes. Supports the pin study + perception model. For a rendered single run use `autonomy_run`. | sim + perception |
 | `ram_eval` | control-isolated RAM failure-mode diagnostics: drives the real FSM with **ground-truth** detections over many DR single-balloon trials and classifies why each ram fails (incl. wire-touch as a failure). A **perception model** (`--perception-hz` detector rate + `--dropout`/`--bearing-noise-deg`/`--range-noise`/`--fp-rate`) sweeps how much detector quality/rate the ram needs, and a **pin study** (`--pin-tip`/`--pin-base` mount + `--pin-aware` geometry-solving aim) tunes the popping-pin. No GL/camera. | sim + perception |
 
+### Calibration / sim fidelity
+| tool | 用途 | needs |
+|---|---|---|
+| `bag_replay` | 実機 bag(npz 化)への**開ループ / ポリシー再生**とパラメータフィット(浮力オフセット・推力曲線はこれで較正した) | sim + rl |
+| `estimate_hydro` | CAD シルエット × BlueROV2 実測係数から **drag / added mass を推定**(再現可能な導出) | sim |
+| `gen_dynamics_dataset` | world model / 残差流体モデル用の (state, action) → next state **データセット生成** | sim |
+
+### Policy deployment / evaluation
+| tool | 用途 | needs |
+|---|---|---|
+| `export_policy` | ポリシーを SB3 非依存の**素 torch bundle** へ書き出し、SB3 と出力一致を検証 | sim + rl |
+| `convert_policy_frame` | 学習済みポリシーの **`obs_frame` を厳密変換**(sim ⇄ rep103 ⇄ ned、再学習不要) | sim + rl |
+| `preflight_policy` | 配備前検証: **golden ベクタの生成 / 検証**(実機ロード後にビット一致を証明)+ サニティ電池 | sim + rl |
+| `policy_restore_test` | 傾けた状態から回した閉ループでの**復元性 / 発散有無**の検証 | sim + rl |
+| `vectoring_eval` | 速度指令ポリシーの受け入れ試験: **41 セル**の方向グリッド采点(dir_err / v_along) | sim + rl |
+| `mode_switch_eval` | 深度しきい値による**水平 ⇄ 鉛直モード切替のリハーサル**(実機スーパバイザ設計の閉ループ検証) | sim + rl |
+
 ### ROS bridge (rosbridge / roslibpy — no rclpy)
 | tool | what it does | needs |
 |---|---|---|

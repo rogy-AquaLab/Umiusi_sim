@@ -36,6 +36,7 @@ repository; this README plus code comments are the in-repo reference.
 | 5a | Competition sim: balloon world + cameras + analytical FF driver, runnable & scoring (no RL) | ✅ done |
 | 5b | Perception (learned detector + underwater synth-data pipeline + eval) + behavior FSM (perception-in-loop autonomy) | ✅ done (runnable end-to-end); 🟡 sim-to-real tuning + Pi 4 deploy pending |
 | 4 | `ros2_ws/` — ROS 2 bridge: custom MuJoCo `ros2_control` hardware plugin; the real controllers + an RL policy drive the sim | ✅ done (in the sibling `ros2_ws/`) |
+| 6 | Sim-to-real deployment: bag-calibrated physics, REP-103 policy bundles + golden verification, RL running on the robot | ✅ first pool test 2026-08-21 (`rl_attitude_node`); 🟡 next: in-water calibration campaign → narrow DR → retrain |
 
 ---
 
@@ -68,6 +69,9 @@ mujoco_ws/                # workspace container (NOT version-controlled)
                             #   sim: validate_sim, drive, snapshot, camera_demo, scenario_demo, competition_run
                             #   perception: perception_demo/train/eval/eval_learned/bench/pseudolabel, gen_sim_dataset
                             #   autonomy: autonomy_run (perception-in-loop balloon-pop, no RL)
+                            #   calibration: bag_replay, estimate_hydro, gen_dynamics_dataset
+                            #   policy deploy/eval: export_policy, convert_policy_frame, preflight_policy,
+                            #                       vectoring_eval, mode_switch_eval
                             #   ROS (rosbridge): ros_view (viewer), ros_policy (RL -> cmd/direct); sim_server (IPC backend)
     tools/README.md         # ← catalogue: what each tool does + which wheel/extra it needs + how to run
     examples/               # shipped example models — cruise_policy/ (RL) + balloon_detector/ (learned
@@ -194,6 +198,9 @@ python -m tools.drive --model examples/cruise_policy/final.zip --headless 150   
 ```
 A pretrained cruise policy ships in [`examples/`](examples/) so `drive` / `eval` work right after cloning
 (no training needed). Press **Space** to stop the cruise command and just watch it hold in place.
+`examples/cruise_policy` is a **pre-calibration demo artifact** (a copy of `av_curr4`: pre-bag-calibration
+physics, sim-frame observations, legacy 25-D proprio) — it is there so the tools run out of the box, and
+is **not** a deployment artifact; what goes on the robot are the REP-103 bundles (see the RL section).
 
 To watch a *specific* automated run live instead, pass `--render` to it (`eval --render`,
 `competition_run --render`); training is headless (watch curves in tensorboard, then `eval --render`).
@@ -297,6 +304,17 @@ Reward weights, ranges, tolerances, and PPO hyperparameters live in
 [`configs/train_ppo.yaml`](configs/train_ppo.yaml); checkpoints, tb logs, and the final policy go to
 `models/<run-name>/` (a local run-output directory).
 
+**Observation contract (what the robot actually consumes).** Proprioception defaults to
+`proprio_mode: action` — only `prev_action` (8), *not* the servo/thrust telemetry, because on the robot
+that telemetry is a command echo rather than an independent measurement. So the deployed observation is
+**17-D** for `attitude_velocity` (`ori_err` 3 + gyro 3 + `v_cmd` 3 + `prev_action` 8) and **14-D** for
+`attitude` (`proprio_mode: full` = the legacy 16-D proprio, kept only for old runs). Orthogonally,
+`obs_frame` selects how the 3-vectors are expressed — `sim` (CAD, +Y up), **`rep103`** (x fwd / y left /
+z up, **the deployment contract**), or `ned`. Train in any frame, then hand the robot a rep103 bundle:
+`tools/convert_policy_frame.py` converts a trained policy exactly (no retraining — a signed permutation
+of the input weights + VecNormalize stats), and `tools/preflight_policy.py` generates/verifies
+`golden.npz` so a loaded-on-the-robot policy is provably the one the sim validated.
+
 **Sensor note:** underwater there is no GPS, so horizontal position (X, Z) is only observable in `full`.
 A 9-DOF AHRS (BNO055) gives absolute orientation incl. magnetometer heading (cheap → attitude tasks are
 well-posed); a pressure sensor gives depth; a DVL gives body velocity (drift/current rejection without an
@@ -326,10 +344,15 @@ end-to-end (`tools/autonomy_run`, no RL).
   `navigator_node` wrap `umiusi_perception` so the same detector + FSM run on the robot. See
   [`ros2_ws/src/umiusi_sim_bridge/README.md`](../ros2_ws/src/umiusi_sim_bridge/README.md) and the
   `umiusi_autonomy` README. Remaining: aarch64 MuJoCo for the Pi; FF-frame sign reconcile.
-- **3-D depth-holding locomotion.** The trained low-level cruise is orientation + *horizontal* direction
-  only. The final drivetrain wants orientation + depth-hold + horizontal cruise, but the depth-sensor
-  choice isn't fixed yet, so that training is on hold. (The env already supports a 3-D velocity command
-  via `vel_cmd_horizontal: false`.)
+- **3-D depth-holding locomotion — a single 3-D policy is not practical yet.** The env supports a full
+  3-D velocity command (`vel_cmd_horizontal: false`, with an elevation curriculum + a horizontal-episode
+  floor), and the family was trained out to `av_cal5_3d` — but the best 3-D policy still **fails 29 of
+  the 41 vectoring cells** (`tools/vectoring_eval`): oblique directions are unreliable and commanded
+  ascent is *slower* than the passive buoyant drift. The multimodality (vertical "drone mode" is far
+  easier than tangential cruise) keeps collapsing one mode. The deployment answer is therefore
+  **depth-threshold mode switching on the robot** — a supervisor picks the horizontal policy or the
+  vertical one from the pressure sensor (`sinsei_UMIUSI_autonomy` PR #17), rehearsed closed-loop in sim
+  by `tools/mode_switch_eval.py`. `av_cal5_3d_rep103` ships as a **descent-only, EXPERIMENTAL** bundle.
 - **Perception.** On the **sim** scene, classical colour detection is done (`tools.perception_demo`,
   `umiusi_perception`, installed by `uv sync`: colour + bearing + range, ~100%). On **real
   underwater images** classical CV hits a recall wall (red attenuates to near-invisible, blue ≈ pool
@@ -366,9 +389,12 @@ end-to-end (`tools/autonomy_run`, no RL).
 - **Sim-to-real + Pi 4 deploy.** Domain-randomization hooks exist; on-hardware tuning is future.
 
 **Planned order:** perception + behavior FSM (phase 5b) is runnable end-to-end; next is sim-to-real
-detector tuning + the final int8 export / Pi 4 benchmark → depth-sensor decision + 3-D depth-hold
-locomotion → on-hardware sim-to-real (aarch64 MuJoCo). ROS 2 bridge (phase 4) is done. See the Status
-table above.
+detector tuning + the final int8 export / Pi 4 benchmark → the **in-water calibration campaign**
+([`docs/calibration_plan.md`](docs/calibration_plan.md): thrust-map scale, buoyancy/restoring, drag,
+added mass) → **narrow the domain randomization** to the measured error bars → **retrain** the deployed
+policies on the tightened physics, running the `max_duty` 0.2 → 0.4 protocol (0.4 is required for the
+depth/vertical mode) → on-hardware sim-to-real (aarch64 MuJoCo). ROS 2 bridge (phase 4) is done. See the
+Status table above.
 
 ---
 
@@ -390,7 +416,11 @@ measured mass/inertia**, not the coarse shapes.
 **Coordinate frame:** the CAD frame with **+Y up** (the 4 thrusters lie in the X-Z plane). Gravity is `(0, -9.81, 0)`.
 
 **Assumptions to verify against hardware** (see the notes in `configs/umiusi.yaml`): servo rotation axis = +Y, thrust
-direction = each thruster's local +X, mounting neutral angles, and the id↔`lf/lb/rb/rf` mapping.
+direction = each thruster's local +X, and the mounting neutral angles. The id mapping itself is now settled:
+the sim's *geometry* naming is `id1=lf, id2=lb, id3=rf, id4=rb` (+Z = starboard), while the **action channel
+order is the separate `action_order: [lf, lb, rb, rf]` name contract** (matching the autonomy `POSITIONS`).
+What remains is confirming the physical wiring — which unit actually spins per channel (`sinsei_UMIUSI_autonomy`
+issue #18, experiment 1; `docs/calibration_plan.md` §1).
 
 The MJCF hull uses **primitives** (not a CAD mesh) for speed, but the **dynamics use the measured
 mass/inertia**, so fidelity is in the numbers, not the shapes.

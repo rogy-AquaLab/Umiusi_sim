@@ -8,8 +8,8 @@
 |---|---|---|
 | **物理 / シム** | 浮力 · 抗力 · 揚力 · スラスタ推力 · MuJoCo ステップ | **`umiusi_sim` (Python) — 単一の実装** |
 | **知覚 + ナビゲータ** (高レベル) | カメラ → 学習済み検出器 → 検出結果 → 挙動 FSM → 速度/姿勢コマンド | **単一の Python ライブラリ** (`umiusi_perception`、`umiusi_perception.autonomy` を含む)。シム (`tools/autonomy_run`) **と**実機 (`ros2_ws/src/umiusi_autonomy`) で再利用 |
-| **低レベル制御** | Gate → Attitude → Thruster (または RL ポリシー) → スラスタごとのサーボ/ESC | ROS 2 `sinsei_umiusi_control` コントローラ (変更なし) |
-| **学習** | RL (巡航/姿勢) + 検出器の学習 | **Python、オフライン** → モデルを出力 (`.zip`、`.pt`/`.onnx`) |
+| **低レベル制御** | Gate → Attitude → Thruster (または RL ポリシー — **実機で稼働中**) → スラスタごとのサーボ/ESC | ROS 2 `sinsei_umiusi_control` コントローラ (変更なし) + `rl_attitude_node` |
+| **学習** | RL (巡航/姿勢) + 検出器の学習 | **Python、オフライン** → モデルを出力 (RL は**素 torch bundle**、検出器は `.pt`/`.onnx`) |
 
 ## 物理の単一ソース
 
@@ -37,7 +37,11 @@
     [camera] ─▶ perception_node (loads examples/balloon_detector) ─▶ /detections
     /detections + /state/imu ─▶ navigator_node (umiusi_perception.autonomy FSM) ─▶ /cmd/target (or /cmd/direct)
     /cmd/target ─▶ sinsei Gate→Attitude→Thruster ─▶ CAN plugin ─▶ real thrusters
-    (optional: RL policy node replaces AttitudeController via /cmd/direct/…)
+
+    低レベル姿勢/ベクタリングの実配備経路 (2026-08-21 のプール試験以降、稼働中):
+    /state/imu ─▶ rl_attitude_node (素 torch bundle を policy_infer で推論) ─▶ /cmd/direct/… ─▶ CAN
+      ▲ 深度しきい値のモード切替スーパバイザ (水平ポリシー ⇄ 降下ポリシー; 圧力センサ) が
+        どの bundle を回すか / 指令をどう整形するかを決める
 ```
 
 シム ↔ 実機は **ros2_control ハードウェアプラグインの入れ替え**である (IPC-ブリッジ-to-Python ↔ CAN)。コントローラ、launch、パラメータ、perception_node、navigator_node は (2) と (3) で**同一**である。
@@ -61,10 +65,11 @@ ros2_control ハードウェアコンポーネントは C++ でなければな�
 
 ## 学習は Python にとどまる
 
-RL (`umiusi_rl`、Python シム上の PPO) と検出器の学習 (`tools/perception_train`) は **Python でオフラインで**実行され、モデルを出力する。実機と ROS ブリッジは、それらのモデルを**ロード**するだけである (`examples/cruise_policy/`、`examples/balloon_detector/`) — 決して学習しない。実機上での学習はない。したがって `umiusi_rl` (sb3/gymnasium) は**開発/学習ホイール**の一部であり、実機には決してインストールされない。RL ポリシーがハードウェア上で動作する場合 (将来 — 現在の競技オートノミーはフィードフォワードのみ)、それは検出器のパターンに従う: `umiusi_rl` で学習 + **エクスポート** (onnx/torchscript) を行い、その後、薄い `umiusi_perception.policy` ローダ (onnxruntime、予約済み) が実機上でそれを実行する — sb3/gymnasium/シムなし。
+RL (`umiusi_rl`、Python シム上の PPO) と検出器の学習 (`tools/perception_train`) は **Python でオフラインで**実行され、モデルを出力する。実機と ROS ブリッジは、それらのモデルを**ロード**するだけである (`examples/cruise_policy/`、`examples/balloon_detector/`) — 決して学習しない。実機上での学習はない。したがって `umiusi_rl` (sb3/gymnasium) は**開発/学習ホイール**の一部であり、実機には決してインストールされない。**RL ポリシーはすでにハードウェア上で動いている** (2026-08-21 のプール試験、`rl_attitude_node`。競技オートノミーの方は依然フィードフォワードのみ)。ただし実装は当初構想していた `umiusi_perception.policy` + onnxruntime ローダ**ではない** (作られなかった)。実際の経路は **素 torch エクスポート**である: `tools/export_policy.py` が SB3 の重み + VecNormalize 統計を `weights.pt` / `obs_norm.npz` / `meta.json` の bundle へ書き出し、実機側は `policy_infer.py` (torch + numpy のみ) で推論する — sb3/gymnasium/cloudpickle/シムなし。コピー後の同一性は `tools/preflight_policy.py` が生成した `golden.npz` を実機で再生して検証する。
 
 ## 帰結 / 決定事項
 
 - 揚力/CoP (またはあらゆる物理) を C++ に**移植しない** — 代わりにブリッジが Python にリレーする。
 - 両フロントエンドが再利用できるよう、`umiusi_perception.autonomy` + `umiusi_perception` を ROS/シムの import から解放しておく。
 - 実機は3つのもの (perception_node、navigator_node、低レベルコントローラ) を実行する — **シムプロセスはない**。
+- 配備するポリシーは **REP-103 (x 前 / y 左 / z 上) の body-frame 観測**を食う (`obs_frame` 契約)。実機側で手書きの軸入れ替えは**しない** — frame 変換はオフラインで `tools/convert_policy_frame.py` が厳密に行い、`golden.npz` の検証がその契約ごと固定する ([`rl.md`](rl.md) 参照)。

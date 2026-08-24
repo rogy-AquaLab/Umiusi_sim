@@ -1,5 +1,7 @@
 #!/usr/bin/env python3
-"""cruise_policy の復元性・発散有無を閉ループで検証する。
+"""ポリシー bundle の復元性・発散有無を閉ループで検証する。
+
+対象は下の `POL` 定数で指すバンドル(使うときに対象バンドルへ向ける)。
 
 機体を実際に傾けた状態から開始し、目標を水平に固定してポリシーを回す。
 姿勢誤差 |ori_err| が減衰すれば「戻す方向」、増大し続ければ「発散」。
@@ -16,6 +18,7 @@ from umiusi_rl.envs.umiusi_pose_env import UmiusiPoseEnv, load_config  # noqa: E
 from stable_baselines3 import PPO                                       # noqa: E402
 from stable_baselines3.common.vec_env import DummyVecEnv, VecNormalize  # noqa: E402
 
+# POL = 検証する対象バンドル。使用時にこれを対象へ向ける。
 POL = (ROOT / "../ros2_ws/src/sinsei_UMIUSI_autonomy/umiusi_rl_control/models/cruise_policy").resolve()
 
 def axis_quat(axis, deg):
