@@ -37,6 +37,11 @@ def main():
     ap.add_argument("--legacy-hydro", action="store_true",
                     help="disable the higher-fidelity hydro (lift + CoP offset + coupling) so the sim uses "
                          "the old diagonal-drag model — for A/B testing a policy against the new physics")
+    ap.add_argument("--max-duty", type=float, default=None,
+                    help="pin the plant's esc cap for this eval (default: configs value). Use to "
+                         "check a cap-conditioned (observe_max_duty) policy ACTUALLY adapts: run "
+                         "at 0.2 / 0.25 / 0.4 and compare — identical behaviour means the cap "
+                         "input was never learned")
     ap.add_argument("--render", action="store_true", help="watch in the MuJoCo GUI viewer")
     ap.add_argument("--record", default=None,
                     help="write an mp4 of the rollout (headless; run with MUJOCO_GL=egl)")
@@ -65,7 +70,15 @@ def main():
     # Domain randomization is OFF at eval by default (measure clean performance); --domain-rand tests
     # robustness to model mismatch (randomized buoyancy/thrust/drag + obs noise + action latency).
     cfg.setdefault("domain_rand", {})["enabled"] = bool(args.domain_rand)
+    if args.max_duty is not None:
+        cfg.setdefault("sim_config", "configs/umiusi.yaml")
+        # per-episode DR must not overwrite the pinned cap
+        cfg.setdefault("domain_rand", {}).pop("max_duty_range", None)
     env = UmiusiPoseEnv(cfg, render_mode="human" if args.render else None)
+    if args.max_duty is not None:
+        env.sim.max_duty = float(args.max_duty)
+        env._base["max_duty"] = float(args.max_duty)
+        print(f"[eval] esc cap pinned: max_duty = {args.max_duty}")
     if args.legacy_hydro:  # revert to the old diagonal-drag model (no lift / CoP moment / coupling)
         env.sim.lift_coef = 0.0
         env.sim.cop_offset[:] = 0.0
