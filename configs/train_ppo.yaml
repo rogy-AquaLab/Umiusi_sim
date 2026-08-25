@@ -83,11 +83,15 @@ reward:
   w_effort: 1.0                   # -w_effort * sum(|esc_i|^effort_exp)  (electrical power, see below)
   effort_exp: 3.0                 # power ~ u^3 (propeller law): penalize the real cost (heat /
                                   # battery), not duty count. 0 restores the legacy ||esc||_2 norm
-  w_null: 1.0                     # -w_null * |null-mode amplitude| / cap-force: the (+ - + -)
+  w_null: 5.0                     # -w_null * |null-mode amplitude| / cap-force: the (+ - + -)
                                   # diagonal esc mode makes NO net force and NO moment — pure waste
                                   # the magnitude-only effort term cannot see (41.2 % of vertical
                                   # power in the 8/25 run). Named and penalized directly.
                                   # accept: null share 41 % -> <= 5 %, roll authority 19 % -> >= 50 %
+                                  # 1.0 -> 5.0 (av_cap1 の教訓): 巡航時は鉛直パワー自体が小さく
+                                  # |m_null|/f_cap ~ 0.2 -> 罰 0.2/step ではタスク項 (~2-4/step) に
+                                  # 埋もれ、3M 継続でも null 比 21.8% -> 21.6% と donor の配分癖を
+                                  # 崩せなかった。5.0 で ~1/step に引き上げる
   econ_ramp_frac: 0.3             # ramp w_effort + w_null 0 -> full over this fraction of training
   w_servo_rate: 0.35              # -w_servo_rate * ||servo_angle - prev|| (servo vibration; raised from 0.25)
   w_thrust_rate: 0.15             # -w_thrust_rate * ||esc - prev_esc||    (thrust change)
