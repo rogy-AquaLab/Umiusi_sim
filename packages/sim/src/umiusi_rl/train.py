@@ -165,6 +165,19 @@ def main():
     args = ap.parse_args()
 
     cfg = load_config(args.config)
+    if args.init_from:
+        # Inherit the donor's task / sensor-suite contract (CLI flags still override below): the
+        # transferred weights only make sense on the obs layout they were trained with (plus any
+        # NEW dims appended last, e.g. observe_max_duty — warm_start zero-pads those).
+        donor_meta = Path(args.init_from)
+        donor_meta = (donor_meta if donor_meta.suffix != ".zip" else donor_meta.parent) / "meta.yaml"
+        if donor_meta.exists():
+            dm = yaml.safe_load(donor_meta.read_text())
+            for k in ("task", "obs_mode", "proprio_mode", "obs_frame"):
+                if dm.get(k) is not None:
+                    cfg["env"][k] = dm[k]
+            print(f"[train] init-from contract: " +
+                  " ".join(f"{k}={cfg['env'].get(k)}" for k in ("task", "obs_mode", "proprio_mode", "obs_frame")))
     if args.task:
         cfg["env"]["task"] = args.task
     task = cfg["env"].get("task", "pose")
@@ -215,7 +228,11 @@ def main():
     callbacks = [ckpt]
 
     # Curriculum (attitude_velocity): start fixed +X / level, widen to the config cone + yaw range.
-    cfrac = args.curriculum_frac if args.curriculum_frac is not None else (0.5 if task == "attitude_velocity" else 0.0)
+    # A warm-started run inherits a policy that already masters the full ranges — re-narrowing them
+    # would waste steps and shift the data distribution, so the task curriculum defaults OFF there
+    # (the econ ramp below still applies; --curriculum-frac overrides).
+    cfrac = args.curriculum_frac if args.curriculum_frac is not None else (
+        0.0 if args.init_from else (0.5 if task == "attitude_velocity" else 0.0))
     if task == "attitude_velocity" and cfrac > 0:
         cone_max = float(cfg["env"].get("vel_cmd_cone_deg", 180.0))
         yaw_max = float(cfg["env"].get("yaw_target_deg", 180.0))
