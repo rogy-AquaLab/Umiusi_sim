@@ -14,6 +14,7 @@ import sys
 from pathlib import Path
 import numpy as np
 import torch
+import yaml
 from stable_baselines3 import PPO
 from stable_baselines3.common.vec_env import DummyVecEnv, VecNormalize
 import gymnasium as gym
@@ -29,6 +30,38 @@ OUT = POL / "export"
 # proprio_mode "action" で学習したポリシーは 17 (imu 6 + v_cmd 3 + prev_action 8)。
 # final.zip から実次元を読むので、この既定値は fallback にすぎない。
 OBS_DIM, ACT_DIM = 25, 8
+
+def obs_fields(bundle_dir, obs_dim):
+    """[[name, width], ...] describing the OBSERVATION LAYOUT, derived from the bundle's training
+    meta.yaml (task / obs_mode / proprio_mode / observe_max_duty) — mirrors UmiusiPoseEnv._get_obs.
+    The deploy node (rl_attitude_node) cross-checks this against its own assembly order by NAME and
+    WIDTH and refuses to start on a mismatch — the only guard against a silent field reorder, which
+    golden vectors cannot catch (they replay pre-built obs, they don't test the assembly).
+    Returns None (and warns) if the widths don't add up to the model's obs dim — never write a
+    wrong table."""
+    meta_p = Path(bundle_dir) / "meta.yaml"
+    m = yaml.safe_load(meta_p.read_text()) if meta_p.exists() else {}
+    obs_mode = m.get("obs_mode", "imu")
+    fields = [["ori_err", 3], ["gyro", 3]]
+    if obs_mode == "imu_depth":
+        fields.append(["depth_err", 1])
+    elif obs_mode == "imu_depth_dvl":
+        fields += [["depth_err", 1], ["lin_vel", 3]]
+    elif obs_mode == "full":
+        fields = [["pos_err", 3], ["ori_err", 3], ["lin_vel", 3], ["gyro", 3]]
+    if m.get("task") == "attitude_velocity":
+        fields.append(["v_cmd", 3])
+    if m.get("proprio_mode", "action") == "full":
+        fields += [["servo", 4], ["thrust", 4]]
+    fields.append(["prev_action", 8])
+    if m.get("observe_max_duty"):
+        fields.append(["max_duty", 1])
+    if sum(w for _, w in fields) != obs_dim:
+        print(f"⚠ obs_fields の合計 {sum(w for _, w in fields)} != obs_dim {obs_dim} — "
+              f"meta.yaml が不完全 (task/obs_mode/proprio_mode を確認)。obs_fields は書き出さない")
+        return None
+    return fields
+
 
 def stub():
     class S(gym.Env):
@@ -67,6 +100,9 @@ def main():
     meta = {"obs_dim": OBS_DIM, "act_dim": ACT_DIM,
             "net_arch": model.policy.net_arch if hasattr(model.policy, "net_arch") else None,
             "layers": arch}
+    fields = obs_fields(POL, OBS_DIM)
+    if fields is not None:
+        meta["obs_fields"] = fields
     (OUT / "meta.json").write_text(json.dumps(meta, indent=2, default=str))
     print("書き出し先:", OUT)
     for k, v in sd.items():
