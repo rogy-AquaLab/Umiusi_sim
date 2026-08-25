@@ -62,14 +62,18 @@ def _load_sb3(model_dir):
 
 
 def _battery(dim):
-    """Canonical + random observations for a 17-D (imu+vel, action-proprio) or 14-D bundle.
-    Layout: [ori_err(3), gyro(3), (v_cmd(3) if 17-D), prev_action(8)]."""
-    has_v = dim in (17, 25)
-    def obs(ori=(0, 0, 0), gyro=(0, 0, 0), v=(0, 0, 0), prev=None):
+    """Canonical + random observations for a 17/18-D (imu+vel, action-proprio) or 14-D bundle.
+    Layout: [ori_err(3), gyro(3), (v_cmd(3) if 17/18-D), prev_action(8), (max_duty(1) if 18-D)].
+    18-D = the Phase2 cap-observed contract (Umiusi_sim#3): max_duty is a RAW scalar, LAST."""
+    has_v = dim in (17, 18, 25)
+    has_cap = dim == 18
+    def obs(ori=(0, 0, 0), gyro=(0, 0, 0), v=(0, 0, 0), prev=None, cap=0.25):
         parts = [np.asarray(ori, float), np.asarray(gyro, float)]
         if has_v:
             parts.append(np.asarray(v, float))
         parts.append(np.zeros(8) if prev is None else np.asarray(prev, float))
+        if has_cap:
+            parts.append(np.asarray([cap], float))
         o = np.concatenate(parts)
         assert len(o) == dim, (len(o), dim)
         return o
@@ -83,9 +87,13 @@ def _battery(dim):
     if has_v:
         named["cruise_cmd"] = obs(v=(0.4, 0, 0))
         named["hold_cmd"] = obs(v=(0, 0, 0))
+    if has_cap:  # pin the cap-conditional behaviour across the deploy range
+        named["cruise_cap_0.2"] = obs(v=(0.4, 0, 0), cap=0.2)
+        named["cruise_cap_0.4"] = obs(v=(0.4, 0, 0), cap=0.4)
     rng = np.random.default_rng(42)
     rand = np.stack([obs(ori=rng.normal(0, 0.3, 3), gyro=rng.normal(0, 0.3, 3),
-                         v=rng.uniform(-0.4, 0.4, 3), prev=rng.uniform(-1, 1, 8))
+                         v=rng.uniform(-0.4, 0.4, 3), prev=rng.uniform(-1, 1, 8),
+                         cap=rng.uniform(0.2, 0.4))
                      for _ in range(64)])
     return named, rand
 
