@@ -77,6 +77,29 @@ class EconRampCallback(BaseCallback):
         return True
 
 
+class CapRangeCurriculumCallback(BaseCallback):
+    """Widen the DR esc-cap range from [hi, hi] down to [lo, hi] over the first `frac` of training.
+
+    At the low cap (0.2 -> 4.8 N total thrust) cruise is barely discoverable from scratch — the
+    av_cap3/4 runs learned clean allocation but never formed the cruise skill (along 0.016/0.006
+    m/s). Let the skill FORM at the easy cap first; the cap is observed (observe_max_duty), so the
+    policy can then specialize downward instead of averaging over caps it cannot cruise at."""
+
+    def __init__(self, total, base_dr, lo, hi, frac):
+        super().__init__()
+        self.total, self.base_dr, self.lo, self.hi, self.frac = total, base_dr, lo, hi, frac
+        self._last_pct = -1
+
+    def _on_step(self):
+        p = min(1.0, self.num_timesteps / max(self.frac * self.total, 1.0))
+        pct = int(p * 100)
+        if pct != self._last_pct:
+            self._last_pct = pct
+            lo_now = self.hi - p * (self.hi - self.lo)
+            self.training_env.set_attr("dr", {**self.base_dr, "max_duty_range": [lo_now, self.hi]})
+        return True
+
+
 def warm_start(model, init_path, venv):
     """Copy policy/value weights (and optimizer-free state) from a previous run into `model`.
 
@@ -158,6 +181,10 @@ def main():
                          "observe_max_duty) and loads + FREEZES its VecNormalize stats")
     ap.add_argument("--learning-rate", type=float, default=None,
                     help="override ppo.learning_rate (use a reduced LR when continuing a run)")
+    ap.add_argument("--cap-curriculum-frac", type=float, default=0.0,
+                    help="ramp domain_rand.max_duty_range from [hi,hi] down to [lo,hi] over this "
+                         "fraction of training (needs --domain-rand + max_duty_range): let cruise "
+                         "form at the easy cap before exposing the barely-propelled low caps")
     ap.add_argument("--n-envs", type=int, default=None, help="override number of parallel envs")
     ap.add_argument("--seed", type=int, default=None)
     ap.add_argument("--run-name", default=None)
@@ -248,6 +275,16 @@ def main():
                                             elev_max=elev_max))
         print(f"[train] curriculum: cone/yaw/tilt/elev 0 -> {cone_max:.0f}/{yaw_max:.0f}/{tilt_max:.0f}"
               f"/{elev_max:.0f} over {cfrac * 100:.0f}% of steps")
+
+    # Cap curriculum: start every episode at the easy cap (hi), widen down to [lo, hi].
+    md_range = cfg.get("domain_rand", {}).get("max_duty_range")
+    if args.cap_curriculum_frac > 0.0 and cfg.get("domain_rand", {}).get("enabled") and md_range:
+        lo, hi = float(md_range[0]), float(md_range[1])
+        venv.set_attr("dr", {**cfg["domain_rand"], "max_duty_range": [hi, hi]})
+        callbacks.append(CapRangeCurriculumCallback(total_timesteps, cfg["domain_rand"], lo, hi,
+                                                    args.cap_curriculum_frac))
+        print(f"[train] cap curriculum: max_duty_range [{hi},{hi}] -> [{lo},{hi}] "
+              f"over {args.cap_curriculum_frac * 100:.0f}% of steps")
 
     # Economy-penalty curriculum: ramp w_effort + w_null in 0 -> full over econ_ramp_frac of steps.
     econ_frac = float(cfg["reward"].get("econ_ramp_frac", 0.0))
