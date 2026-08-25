@@ -42,6 +42,10 @@ FRAMES = {
 # Observation layouts: list of (block_size, is_vector3) in order. v_cmd counts as a 3-vector.
 LAYOUTS = {
     17: [(3, True), (3, True), (3, True), (8, False)],                    # imu+vel, proprio action
+    18: [(3, True), (3, True), (3, True), (8, False), (1, False)],        # 17 + max_duty (scalar,
+    #                                                                       frame-invariant, LAST —
+    #                                                                       the Phase2 cap-observed
+    #                                                                       contract, Umiusi_sim#3)
     25: [(3, True), (3, True), (3, True), (4, False), (4, False), (8, False)],  # proprio full
     22: [(3, True), (3, True), (4, False), (4, False), (8, False)],       # attitude, proprio full
     14: [(3, True), (3, True), (8, False)],                               # attitude, proprio action
