@@ -83,6 +83,13 @@ SEARCH_SURGE = 0.30       # forward speed while translating to a fresh spot betw
 SCAN_HEAVE = 0.15         # heave amplitude while sweeping (scan the different balloon heights)
 SCAN_RATE = 1.5           # rad/s of the height-scan oscillation
 TRANSLATE_STEPS = 50      # steps (~1 s @50 Hz) to translate before the next sweep
+# ヨーレート計測が死んだときの探索フォールバック (autonomy#19-3)。一周の判定は
+# `_swept += |yaw_rate|·dt` の積分なので、IMU が止まる (実機 8/25: autonomy 区間だけで
+# 15.4 s + 11.1 s の欠落) と積分が進まず、**無限にその場旋回する**。実機のスイープは
+# 実測 ~0.56 rad/s -> 一周 ~11 s なので、その ~3 倍を経過してもまだ回っているのは
+# 計測が死んでいるとみなし、一周完了と同じ扱いで translate へ抜ける (探索は劣化するが
+# 前へ進む)。sim の一周も同オーダー。時間基準なので制御レートに依存しない。
+SWEEP_TIMEOUT_S = 30.0    # s; an in-place sweep taking this long = yaw feedback is dead -> move on
 # --- closeness by BBOX (more reliable than the noisy range estimate) --------------------------
 ALIGN_BBOX = 0.18         # bbox height / frame >= this -> close: start the slow centred ALIGN
 RAM_COMMIT_BBOX = 0.26    # ...and >= this AND centred (and settled) -> commit to the RAM
@@ -227,6 +234,7 @@ class BalloonBehavior:
     fails: dict = field(default_factory=dict)   # per-colour persistent miss count (give-up memory)
     # search / sweep
     _swept: float = 0.0
+    _sweep_time: float = 0.0        # elapsed s in the current in-place sweep (IMU-outage fallback)
     _sweep_dir: float = 1.0
     _scan_phase: float = 0.0
     _translating: int = 0
@@ -379,6 +387,7 @@ class BalloonBehavior:
     def _start_sweep(self):
         """(Re)start an in-place sweep, biased toward where the target was last seen."""
         self._swept = 0.0
+        self._sweep_time = 0.0
         self._scan_phase = 0.0
         self._translating = 0
         self._sweep_dir = 1.0 if self.trk.az >= 0 else -1.0
@@ -635,13 +644,17 @@ class BalloonBehavior:
             return ({"surge": surge, "heave": 0.0, "yaw": 0.4 * avoid_yaw + wire_yaw},
                     self._info(blue))
         self._swept += abs(yaw_rate) * dt
+        self._sweep_time += dt
         self._scan_phase += SCAN_RATE * dt
         heave = SCAN_HEAVE * math.sin(self._scan_phase)  # scan the different balloon heights
         yaw = self._sweep_dir * SEARCH_YAW + 0.4 * avoid_yaw
-        if self._swept >= 2.0 * math.pi:  # a full sweep found nothing -> go somewhere new
+        # 2つ目の条件が IMU 断フォールバック: 積分が一周に届かないまま SWEEP_TIMEOUT_S 経った
+        # ら、ヨーレート計測が死んでいるとみなして一周完了と同じ扱いで抜ける (定数の注記参照)。
+        if self._swept >= 2.0 * math.pi or self._sweep_time >= SWEEP_TIMEOUT_S:
             self._sweep_cycles += 1
             self._sweep_dir *= -1.0       # alternate direction (cover new ground)
             self._swept = 0.0
+            self._sweep_time = 0.0
             self._translating = TRANSLATE_STEPS
         return {"surge": 0.0, "heave": heave, "yaw": yaw}, self._info(blue)
 
