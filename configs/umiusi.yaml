@@ -106,6 +106,14 @@ thrusters:
   # The bag only covers |u| <= 0.2, so exp vs max is confounded: bench-calibrate (plan 3).
   thrust_per_cmd: 30.0         # N at FULL command (|u| = 1)
   thrust_curve_exp: 2.0        # propeller-law exponent (1.0 recovers the old linear map)
+  # ESC duty cap |u| <= max_duty, applied in the PLANT before the slew. This is the deploy-path
+  # clamp (navigator/rl_attitude max_duty) made part of the training plant: the 8/25 underwater
+  # run showed a capless-trained policy demands |esc| median 0.63 against the robot's cap ->
+  # 96 % of samples saturated (bang-bang, no proportional control). 0.25 matches the deploy
+  # default (roll-capsize margin 1.1x; the capsize threshold is duty 0.235 — Umiusi_sim#3).
+  # Training additionally randomizes this over domain_rand.max_duty_range so one policy stays
+  # valid when the operator raises the cap in the field.
+  max_duty: 0.25
   # Per-unit: pivot = measured servo joint (base_link frame; from CAD placement.txt), and
   # thrust_axis = the NEUTRAL (servo=0) thrust direction = horizontal tangential (perp to the arm),
   # expressed in the thruster body frame (= base frame at servo=0). The MJCF hinge axis (= arm) is

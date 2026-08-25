@@ -51,9 +51,13 @@ def main():
 
     cfg = load_config(config)
     # match the task + sensor suite + curriculum condition the policy was trained with
-    for k in ("task", "obs_mode", "vel_cmd_cone_deg", "yaw_target_deg", "tilt_target_deg"):
+    for k in ("task", "obs_mode", "proprio_mode", "obs_frame",
+              "vel_cmd_cone_deg", "yaw_target_deg", "tilt_target_deg"):
         if meta.get(k) is not None:
             cfg["env"][k] = meta[k]
+    if meta:  # obs-contract key: absent in old runs = trained WITHOUT the cap dim — never let the
+        # (newer) config file grow the obs vector under an old policy
+        cfg["env"]["observe_max_duty"] = bool(meta.get("observe_max_duty", False))
     if meta.get("disturbance") and not args.no_disturb:  # evaluate under the same disturbances it trained with
         cfg.setdefault("disturbance", {})["enabled"] = True
     elif args.no_disturb:  # isolate the policy's own steadiness (no current/impulses)
@@ -96,6 +100,7 @@ def main():
     returns, pos_errs, ori_errs, depth_errs, vel_errs, hold_fracs, successes = [], [], [], [], [], [], []
     vel_alongs, vel_cmds = [], []
     thrust_uses, servo_motions, thrust_changes, ang_speeds = [], [], [], []
+    null_fracs, roll_uses, esc_all = [], [], []   # allocation acceptance metrics (Umiusi_sim#3)
     for ep in range(args.episodes):
         obs, info = env.reset(seed=args.seed + ep)
         ep_ret, steps, in_tol = 0.0, 0, 0
@@ -111,6 +116,9 @@ def main():
             esc, servo = info["esc_applied"], info["servo"]  # slew-limited actual thrust
             ang_speed_sum += float(info.get("ang_speed", 0.0))
             thrust_sum += float(np.mean(np.abs(esc)))
+            null_fracs.append(float(info.get("null_frac", 0.0)))
+            roll_uses.append(float(info.get("roll_use", 0.0)))
+            esc_all.extend(np.abs(esc).tolist())
             if prev_esc is not None:
                 thrust_chg_sum += float(np.mean(np.abs(esc - prev_esc)))
                 servo_mot_sum += float(np.mean(np.abs(servo - prev_servo)))
@@ -157,6 +165,11 @@ def main():
     print(f"mean hold fraction : {np.mean(hold_fracs) * 100:.0f}%   (steps within tolerance)")
     print(f"final-step success : {np.mean(successes) * 100:.0f}%")
     print(f"mean thrust use    : {np.mean(thrust_uses):.3f}   (mean |esc|, 0..1 -> minimize)")
+    print(f"median |esc|       : {np.median(esc_all):.3f}   (accept: <= the deploy max_duty)")
+    print(f"mean null share    : {np.mean(null_fracs) * 100:.1f}%   (null mode / vertical power; accept <= 5%,"
+          f" real 8/25 run: 41.2%)")
+    print(f"mean roll authority: {np.mean(roll_uses) * 100:.1f}%   (roll mode / cap max; accept >= 50%,"
+          f" real 8/25 run: 19%)")
     print(f"mean angular vel   : {np.mean(ang_speeds):.3f} rad/s   (wobble -> minimize)")
     print(f"mean servo motion  : {np.mean(servo_motions):.2f} deg/step   (vibration -> minimize)")
     print(f"mean thrust change : {np.mean(thrust_changes):.3f} /step     (|Δesc| -> minimize)")

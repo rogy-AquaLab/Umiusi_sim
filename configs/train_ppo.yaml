@@ -52,6 +52,13 @@ env:
   # The 2026-08-21 pool failure #3 (pitch/yaw swapped in obs) is impossible when both sides
   # speak rep103. Left at "sim" while av_cal1 (launched from this file) is in flight.
   obs_frame: sim
+  # Feed the plant's ESC cap (sim.max_duty) into the observation as ONE extra dim, appended LAST
+  # (existing layouts stay a prefix -> warm-start by zero-padding the first layer). With the cap
+  # domain-randomized but UNOBSERVED, the economical policy converges onto the lowest sampled cap
+  # and a field cap raise buys nothing; observed, the behaviour is cap-conditional (raise max_duty
+  # -> actually descend faster). Deploy: the node already owns a max_duty parameter — append it to
+  # the obs vector (a contract addition, no new cross-package dependency).
+  observe_max_duty: true
 
 reward:
   w_pos: 1.0                      # -w_pos * ||position_error||            (pose)
@@ -67,7 +74,21 @@ reward:
   # --- economy / smoothness (minimize thrust, servo vibration, thrust changes) ---
   # NOTE: kept LIGHT so they don't freeze the servos and break attitude tracking (att_v3 lesson).
   # Raise gradually once tracking is solid.
-  w_effort: 0.03                  # -w_effort * ||esc_command||            (thrust magnitude)
+  # 2026-08-26 (Umiusi_sim#3, the 8/25 underwater run): the effort term moves to the POWER
+  # dimension and a NULL-MODE penalty is added. Order matters: the plant now caps |esc| at
+  # max_duty FIRST (duty becomes a scarce resource), THEN these penalties teach the allocation
+  # within it — penalties without the cap teach "use more" instead. Both ride the econ_ramp
+  # curriculum (0 -> 1 over econ_ramp_frac of training): task first, then economize — a strong
+  # effort penalty from step 0 collapses into the do-nothing local optimum.
+  w_effort: 1.0                   # -w_effort * sum(|esc_i|^effort_exp)  (electrical power, see below)
+  effort_exp: 3.0                 # power ~ u^3 (propeller law): penalize the real cost (heat /
+                                  # battery), not duty count. 0 restores the legacy ||esc||_2 norm
+  w_null: 1.0                     # -w_null * |null-mode amplitude| / cap-force: the (+ - + -)
+                                  # diagonal esc mode makes NO net force and NO moment — pure waste
+                                  # the magnitude-only effort term cannot see (41.2 % of vertical
+                                  # power in the 8/25 run). Named and penalized directly.
+                                  # accept: null share 41 % -> <= 5 %, roll authority 19 % -> >= 50 %
+  econ_ramp_frac: 0.3             # ramp w_effort + w_null 0 -> full over this fraction of training
   w_servo_rate: 0.35              # -w_servo_rate * ||servo_angle - prev|| (servo vibration; raised from 0.25)
   w_thrust_rate: 0.15             # -w_thrust_rate * ||esc - prev_esc||    (thrust change)
   w_action_rate: 0.10             # -w_action_rate * ||action - prev_action|| (raised from 0.02: the real bag
@@ -117,6 +138,10 @@ domain_rand:
                                   # bag-fitted (exp/max confounded below |u|=0.2) — bench test pins it
   buoyancy_offset_frac: 0.6       # CoB height *= 1 + U(-frac, frac): bag fit says 5-10 mm (was 50!)
   thrust_unit_frac: 0.10          # per-thruster thrust gain *= 1 + U(-frac, frac) (unit asymmetry)
+  max_duty_range: [0.2, 0.4]      # plant esc cap U(lo, hi) per episode: the operator raises the
+                                  # deploy clamp 0.25 -> 0.4 as trust builds; sampled (and observed,
+                                  # env.observe_max_duty) so ONE policy stays valid at any cap
+                                  # (upper bound 0.4 = post-allocation-fix ceiling, Umiusi_sim#3)
   obs_noise: 0.005                # gaussian obs noise std (in obs units; ~0.3deg / 0.005 rad·s⁻¹ sensor noise)
   action_latency_steps: 1         # control->actuation delay [control steps] (~20 ms at 50 Hz)
 

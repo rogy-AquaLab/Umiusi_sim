@@ -205,6 +205,9 @@ def main():
     cfg["env"]["task"] = "attitude_velocity"
     cfg["env"]["obs_mode"] = "imu"
     cfg["env"]["vel_cmd_horizontal"] = False
+    # Both bundles share ONE env, so they must share the obs contract: the current horiz/vert
+    # bundles are pre-cap 17-D (no observe_max_duty). Revisit when an 18-D bundle joins the pair.
+    cfg["env"]["observe_max_duty"] = False
     cfg["domain_rand"] = {"enabled": False}
     env = UmiusiPoseEnv(cfg)
 

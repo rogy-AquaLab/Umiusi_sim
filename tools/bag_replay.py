@@ -31,9 +31,11 @@ Usage:
 from __future__ import annotations
 
 import argparse
+from pathlib import Path
 
 import mujoco
 import numpy as np
+import yaml
 
 from umiusi_sim.simulator import UmiusiSimulator
 
@@ -88,6 +90,10 @@ def run_policy(args):
     cfg["env"]["task"] = "attitude_velocity"
     cfg["env"]["obs_mode"] = "imu"
     cfg["env"]["proprio_mode"] = "full"      # the deployed policies are 25-D
+    # obs contract of the target bundle: absent in its meta = trained WITHOUT the cap dim
+    _meta_p = Path(args.model) / "meta.yaml"
+    _meta = yaml.safe_load(_meta_p.read_text()) if _meta_p.exists() else {}
+    cfg["env"]["observe_max_duty"] = bool(_meta.get("observe_max_duty", False))
     model = PPO.load(f"{args.model}/final.zip", device="cpu")
     venv = DummyVecEnv([lambda: UmiusiPoseEnv(cfg)])
     vn = VecNormalize.load(f"{args.model}/vecnormalize.pkl", venv)

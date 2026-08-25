@@ -14,8 +14,10 @@ Artifacts (all under the gitignored models/<run-name>/):
 """
 
 import argparse
+import pickle
 from pathlib import Path
 
+import torch
 import yaml
 from stable_baselines3 import PPO, SAC, TD3
 from stable_baselines3.common.callbacks import BaseCallback, CheckpointCallback
@@ -56,6 +58,71 @@ class CurriculumCallback(BaseCallback):
         return True
 
 
+class EconRampCallback(BaseCallback):
+    """Ramp the economy penalties (w_effort + w_null, via env.econ_ramp) 0 -> 1 over the first
+    `frac` of training: learn/keep the task first, then economize. A strong effort penalty from
+    step 0 collapses into the do-nothing local optimum (att_v3-era lesson)."""
+
+    def __init__(self, total, frac):
+        super().__init__()
+        self.total, self.frac = total, frac
+        self._last_pct = -1
+
+    def _on_step(self):
+        p = min(1.0, self.num_timesteps / max(self.frac * self.total, 1.0))
+        pct = int(p * 100)
+        if pct != self._last_pct:  # throttle the set_attr IPC
+            self._last_pct = pct
+            self.training_env.set_attr("econ_ramp", p)
+        return True
+
+
+def warm_start(model, init_path, venv):
+    """Copy policy/value weights (and optimizer-free state) from a previous run into `model`.
+
+    Handles a GROWN observation vector (e.g. observe_max_duty appends 1 dim): new obs dims must be
+    appended LAST, then every first-layer weight matrix is zero-padded on the input side — the
+    loaded policy initially IGNORES the new inputs and learns to use them, keeping everything it
+    knows. Also returns the previous VecNormalize obs stats zero-padded the same way (mean 0 /
+    var 1 for new dims, so the new obs pass through unscaled at first).
+    """
+    init_path = Path(init_path)
+    zip_path = init_path if init_path.suffix == ".zip" else init_path / "final.zip"
+    old = type(model).load(str(zip_path), device="cpu")
+    old_dim = int(old.observation_space.shape[0])
+    new_dim = int(model.observation_space.shape[0])
+    if old.action_space != model.action_space:
+        raise ValueError(f"action space mismatch: {old.action_space} vs {model.action_space}")
+    if new_dim < old_dim:
+        raise ValueError(f"obs shrank {old_dim} -> {new_dim}; warm start only supports growth")
+    pad = new_dim - old_dim
+    sd, new_sd = old.policy.state_dict(), model.policy.state_dict()
+    for k, w in sd.items():
+        if pad and w.dim() == 2 and w.shape[1] == old_dim and new_sd[k].shape[1] == new_dim:
+            w = torch.cat([w, torch.zeros(w.shape[0], pad, dtype=w.dtype)], dim=1)
+        if new_sd[k].shape != w.shape:
+            raise ValueError(f"cannot adapt {k}: {tuple(w.shape)} -> {tuple(new_sd[k].shape)}")
+        new_sd[k] = w
+    model.policy.load_state_dict(new_sd)
+
+    stats_path = zip_path.parent / "vecnormalize.pkl"
+    if stats_path.exists():
+        with open(stats_path, "rb") as f:   # unpickle directly: VecNormalize.load would demand a
+            old_vn = pickle.load(f)          # matching (old-dim) env just to read the stats
+        rms = old_vn.obs_rms
+        if pad:
+            import numpy as np
+            rms.mean = np.concatenate([rms.mean, np.zeros(pad)])
+            rms.var = np.concatenate([rms.var, np.ones(pad)])
+        venv.obs_rms = rms
+        venv.ret_rms = old_vn.ret_rms
+        # FREEZE the normalization: the policy's input scaling must not drift under the new
+        # reward/plant, or the transferred weights see a shifting input distribution.
+        venv.training = False
+        return True
+    return False
+
+
 def build_model(algo, cfg, venv, seed, tb_dir):
     policy_kwargs = {"net_arch": cfg["policy"]["net_arch"]}
     common = {"policy": "MlpPolicy", "env": venv, "seed": seed, "verbose": 1,
@@ -85,6 +152,12 @@ def main():
     ap.add_argument("--domain-rand", action="store_true",
                     help="enable domain randomization (buoyancy/thrust/drag + obs noise + action latency; sim2real)")
     ap.add_argument("--timesteps", type=int, default=None, help="override total_timesteps")
+    ap.add_argument("--init-from", default=None,
+                    help="warm-start from a previous run (dir with final.zip, or a .zip): copies the "
+                         "policy weights (zero-padding first layers if the obs vector GREW, e.g. "
+                         "observe_max_duty) and loads + FREEZES its VecNormalize stats")
+    ap.add_argument("--learning-rate", type=float, default=None,
+                    help="override ppo.learning_rate (use a reduced LR when continuing a run)")
     ap.add_argument("--n-envs", type=int, default=None, help="override number of parallel envs")
     ap.add_argument("--seed", type=int, default=None)
     ap.add_argument("--run-name", default=None)
@@ -110,6 +183,8 @@ def main():
         obs_mode = _DEFAULT_OBS[task]
     cfg["env"]["obs_mode"] = obs_mode  # store the resolved suite so eval matches it
     algo = args.algo or cfg.get("algo", "ppo")
+    if args.learning_rate is not None:
+        cfg.setdefault("ppo", {})["learning_rate"] = args.learning_rate
     total_timesteps = args.timesteps or cfg["total_timesteps"]
     n_envs = args.n_envs or cfg["n_envs"]
     seed = args.seed if args.seed is not None else cfg.get("seed", 0)
@@ -126,6 +201,12 @@ def main():
     venv = VecNormalize(venv, norm_obs=True, norm_reward=(algo == "ppo"), clip_obs=10.0)
 
     model = build_model(algo, cfg, venv, seed, run_dir / "tb")
+
+    if args.init_from:
+        froze = warm_start(model, args.init_from, venv)
+        print(f"[train] warm-started from {args.init_from} "
+              f"(obs {model.observation_space.shape[0]}-D, "
+              f"vecnormalize {'loaded+frozen' if froze else 'NOT found — fresh stats'})")
 
     # Checkpoint ~10x over the run (save_freq is per-env steps).
     save_freq = max(total_timesteps // (10 * n_envs), 1)
@@ -151,6 +232,13 @@ def main():
         print(f"[train] curriculum: cone/yaw/tilt/elev 0 -> {cone_max:.0f}/{yaw_max:.0f}/{tilt_max:.0f}"
               f"/{elev_max:.0f} over {cfrac * 100:.0f}% of steps")
 
+    # Economy-penalty curriculum: ramp w_effort + w_null in 0 -> full over econ_ramp_frac of steps.
+    econ_frac = float(cfg["reward"].get("econ_ramp_frac", 0.0))
+    if econ_frac > 0.0:
+        venv.set_attr("econ_ramp", 0.0)
+        callbacks.append(EconRampCallback(total_timesteps, econ_frac))
+        print(f"[train] econ curriculum: w_effort/w_null 0 -> full over {econ_frac * 100:.0f}% of steps")
+
     print(f"[train] task={task} algo={algo} obs_mode={obs_mode} n_envs={n_envs} "
           f"timesteps={total_timesteps} seed={seed} -> {run_dir}")
     model.learn(total_timesteps=total_timesteps, callback=callbacks)
@@ -159,6 +247,10 @@ def main():
     venv.save(str(run_dir / "vecnormalize.pkl"))  # obs/reward normalization stats for eval
     with open(run_dir / "meta.yaml", "w") as f:
         yaml.safe_dump({"algo": algo, "task": task, "obs_mode": obs_mode, "vecnormalize": True,
+                        "proprio_mode": cfg["env"].get("proprio_mode"),
+                        "obs_frame": cfg["env"].get("obs_frame"),
+                        "observe_max_duty": bool(cfg["env"].get("observe_max_duty", False)),
+                        "init_from": args.init_from,
                         "vel_cmd_cone_deg": cfg["env"].get("vel_cmd_cone_deg"),
                         "yaw_target_deg": cfg["env"].get("yaw_target_deg"),
                         "tilt_target_deg": cfg["env"].get("tilt_target_deg"),

@@ -21,6 +21,7 @@ import argparse
 from pathlib import Path
 
 import numpy as np
+import yaml
 
 _AZ = (0, 45, 90, 135, 180, -135, -90, -45)
 _EL = (-60, -30, 0, 30, 60)
@@ -52,6 +53,9 @@ def main():
     cfg["env"]["task"] = "attitude_velocity"
     cfg["env"]["obs_mode"] = "imu"
     cfg["env"]["vel_cmd_horizontal"] = False
+    # obs contract of the target bundle: absent in its meta = trained WITHOUT the cap dim
+    meta = yaml.safe_load((d / "meta.yaml").read_text()) if (d / "meta.yaml").exists() else {}
+    cfg["env"]["observe_max_duty"] = bool(meta.get("observe_max_duty", False))
     cfg["domain_rand"] = {"enabled": False}
     model = PPO.load(str(ck), device="cpu")
     vn = VecNormalize.load(str(vec), DummyVecEnv([lambda: UmiusiPoseEnv(cfg)]))

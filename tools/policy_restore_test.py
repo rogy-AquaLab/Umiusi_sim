@@ -17,6 +17,7 @@ sys.path.insert(0, str(ROOT / "packages/sim/src"))
 from umiusi_rl.envs.umiusi_pose_env import UmiusiPoseEnv, load_config  # noqa: E402
 from stable_baselines3 import PPO                                       # noqa: E402
 from stable_baselines3.common.vec_env import DummyVecEnv, VecNormalize  # noqa: E402
+import yaml
 
 # POL = 検証する対象バンドル。使用時にこれを対象へ向ける。
 POL = (ROOT / "../ros2_ws/src/sinsei_UMIUSI_autonomy/umiusi_rl_control/models/cruise_policy").resolve()
@@ -31,6 +32,9 @@ def make_env():
     cfg = load_config(str(ROOT / "configs/train_ppo.yaml"))
     cfg["env"]["task"] = "attitude_velocity"
     cfg["env"]["obs_mode"] = "imu"
+    # obs contract of the target bundle: absent in its meta = trained WITHOUT the cap dim
+    meta = yaml.safe_load((POL / "meta.yaml").read_text()) if (POL / "meta.yaml").exists() else {}
+    cfg["env"]["observe_max_duty"] = bool(meta.get("observe_max_duty", False))
     cfg["env"]["yaw_target_deg"] = 180.0
     cfg["env"]["vel_cmd_cone_deg"] = 180.0
     cfg["domain_rand"]["enabled"] = False

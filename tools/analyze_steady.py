@@ -41,9 +41,13 @@ def main():
     md = Path(args.model).parent
     meta = yaml.safe_load((md / "meta.yaml").read_text()) if (md / "meta.yaml").exists() else {}
     cfg = load_config(meta.get("config", "configs/train_ppo.yaml"))
-    for k in ("task", "obs_mode", "vel_cmd_cone_deg", "yaw_target_deg", "tilt_target_deg"):
+    for k in ("task", "obs_mode", "proprio_mode", "obs_frame",
+              "vel_cmd_cone_deg", "yaw_target_deg", "tilt_target_deg"):
         if meta.get(k) is not None:
             cfg["env"][k] = meta[k]
+    # obs-contract key: absent in old runs = trained WITHOUT the cap dim (never let the newer
+    # config file grow the obs vector under an old policy)
+    cfg["env"]["observe_max_duty"] = bool(meta.get("observe_max_duty", False))
     if meta.get("disturbance"):  # measure steady state under the same disturbances it trained with
         cfg.setdefault("disturbance", {})["enabled"] = True
     env = UmiusiPoseEnv(cfg)

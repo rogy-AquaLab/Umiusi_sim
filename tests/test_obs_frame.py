@@ -16,8 +16,10 @@ from umiusi_rl.envs.umiusi_pose_env import _OBS_FRAMES, UmiusiPoseEnv, load_conf
 
 def _cfg(**env_over):
     cfg = load_config("configs/train_ppo.yaml")
+    # observe_max_duty False: these tests exercise policies trained on the 17-D contract
+    # (the config file default grew to 18-D for the Phase2 cap-conditioned runs).
     cfg["env"] = {**cfg["env"], "task": "attitude_velocity", "obs_mode": "imu",
-                  "proprio_mode": "action", **env_over}
+                  "proprio_mode": "action", "observe_max_duty": False, **env_over}
     cfg["domain_rand"] = {"enabled": False}
     return cfg
 

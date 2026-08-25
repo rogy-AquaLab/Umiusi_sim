@@ -75,6 +75,14 @@ _OBS_FRAMES = {
     "rep103": np.array([[1.0, 0.0, 0.0], [0.0, 0.0, -1.0], [0.0, 1.0, 0.0]]),
     "ned": np.array([[1.0, 0.0, 0.0], [0.0, 0.0, 1.0], [0.0, -1.0, 0.0]]),
 }
+# Vertical-thrust mode decomposition over the 4 thruster positions (the pivots form a square, so
+# these four vectors are exactly orthogonal): heave (+ + + +), roll = left - right, pitch = front -
+# back, and the NULL mode (+ - + -), which produces no net force and no moment — pure waste (heat /
+# battery / servo wear). The 8/25 underwater run put 41.2 % of the vertical power into the null
+# mode (Umiusi_sim#3); the reward names and penalizes it directly, because a magnitude-only effort
+# term cannot see it (a null command has the same action-space norm as a useful one).
+# Signs per unit name: (roll, pitch, null); heave is all +1.
+_VERT_MODE_SIGNS = {"lf": (1, 1, 1), "lb": (1, -1, -1), "rb": (-1, -1, 1), "rf": (-1, 1, -1)}
 
 
 def load_config(path):
@@ -147,6 +155,32 @@ class UmiusiPoseEnv(gym.Env):
         self.obs_frame = obs_frame
         self._obs_P = _OBS_FRAMES[obs_frame]
         self.rw = cfg["reward"]
+        # --- economy shaping (Umiusi_sim#3: the deploy cap + null-mode waste) -------------------
+        # effort_exp > 0 switches the effort penalty from the legacy L2 norm to the POWER-dimension
+        # sum(|u_i|^exp): thrust ~ u^2 but electrical power ~ u^3 (propeller law), so exp = 3 makes
+        # the penalty proportional to the real cost (heat / battery). w_null names the vertical
+        # null mode (see _VERT_MODE_SIGNS) — pure waste a magnitude-only term cannot see.
+        # econ_ramp is a 0..1 multiplier on BOTH (curriculum: learn the task first, then economize —
+        # a strong effort penalty from step 0 collapses into the do-nothing local optimum, an
+        # att_v3-era lesson). Default 1.0 so eval and non-curriculum runs are unaffected.
+        self.effort_exp = float(self.rw.get("effort_exp", 0.0))   # 0 = legacy ||esc||_2
+        self.w_null = float(self.rw.get("w_null", 0.0))
+        self.econ_ramp = 1.0
+        # Vertical mode decomposition (heave/roll/pitch/null), rows orthonormal over the 4 units in
+        # ACTION order. Needs the geometric unit names; with an old no-name config the null penalty
+        # and its diagnostics are simply off.
+        names = list(self.sim.unit_names)
+        if set(names) == set(_VERT_MODE_SIGNS):
+            self._vert_modes = np.array(
+                [[1.0, *(float(s) for s in _VERT_MODE_SIGNS[n])] for n in names]).T / 2.0
+        else:
+            self._vert_modes = None
+        # Observe the plant's ESC cap (1 obs dim, appended LAST so existing layouts are a prefix):
+        # with max_duty domain-randomized but unobserved, the economical policy converges onto the
+        # lowest sampled cap and a field cap raise buys nothing; observing it makes the behaviour
+        # cap-conditional. The deploy node already owns a max_duty parameter, so feeding it into the
+        # obs adds no new cross-package dependency — only one more entry in the obs contract.
+        self.observe_max_duty = bool(e.get("observe_max_duty", False))
         self.dr = cfg.get("domain_rand", {"enabled": False})
         # sim2real: control->actuation delay (steps); only applied when domain_rand is enabled.
         self.action_latency = int(self.dr.get("action_latency_steps", 0))
@@ -165,13 +199,15 @@ class UmiusiPoseEnv(gym.Env):
             "servo_tau": self.sim.servo_tau,
             "thrust_exp": self.sim.thrust_curve_exp,
             "buoy_offset": self.sim.buoyancy_offset,
+            "max_duty": self.sim.max_duty,
         }
         self._servo_offset = np.zeros(4)   # per-episode servo neutral offset [rad] (DR)
         self._thrust_gain = np.ones(4)     # per-episode per-thruster thrust asymmetry (DR)
 
         # attitude_velocity adds the feedforward velocity command (3), no measured velocity (no DVL).
         obs_dim = (_EXTERO_DIM[self.obs_mode] + _PROPRIO_DIM[self.proprio_mode]
-                   + (3 if self.task == "attitude_velocity" else 0))
+                   + (3 if self.task == "attitude_velocity" else 0)
+                   + (1 if self.observe_max_duty else 0))
         self.action_space = spaces.Box(-1.0, 1.0, shape=(ACT_DIM,), dtype=np.float32)
         self.observation_space = spaces.Box(-np.inf, np.inf, shape=(obs_dim,), dtype=np.float32)
 
@@ -220,6 +256,7 @@ class UmiusiPoseEnv(gym.Env):
             self.sim.servo_tau = b["servo_tau"]
             self.sim.thrust_curve_exp = b["thrust_exp"]
             self.sim.set_buoyancy_offset(b["buoy_offset"])
+            self.sim.max_duty = b["max_duty"]
             self._servo_offset = np.zeros(4)
             self._thrust_gain = np.ones(4)
             return
@@ -252,6 +289,12 @@ class UmiusiPoseEnv(gym.Env):
         bo_frac = self.dr.get("buoyancy_offset_frac", 0.0)
         if bo_frac > 0.0:
             self.sim.set_buoyancy_offset(b["buoy_offset"] * (1.0 + u(-1, 1) * bo_frac))
+        # ESC cap: sample the deploy clamp per episode (the operator raises max_duty in the field
+        # from 0.25 toward 0.4 as trust builds — Umiusi_sim#3) so one policy stays valid at any cap.
+        # Pair with env.observe_max_duty so the policy can actually EXPLOIT a higher cap.
+        md_range = self.dr.get("max_duty_range")
+        self.sim.max_duty = (u(float(md_range[0]), float(md_range[1])) if md_range
+                             else b["max_duty"])
         # Per-thruster imperfections: servo neutral offset [deg] and thrust-gain asymmetry.
         off = self.dr.get("servo_offset_deg", 0.0)
         self._servo_offset = np.radians(u(-off, off, size=4)) if off > 0.0 else np.zeros(4)
@@ -329,6 +372,8 @@ class UmiusiPoseEnv(gym.Env):
             proprio = [servo_n, thrust_n, self.prev_action]
         else:  # "action": only signals that exist identically on the real vehicle
             proprio = [self.prev_action]
+        if self.observe_max_duty:  # appended LAST: existing layouts stay a prefix (warm-start friendly)
+            proprio = proprio + [np.array([self.sim.max_duty])]
         obs = np.concatenate(extero + proprio)
         if self.dr.get("enabled", False) and self.dr.get("obs_noise", 0.0) > 0.0:
             obs = obs + self.np_random.normal(0.0, self.dr["obs_noise"], size=obs.shape)
@@ -414,7 +459,25 @@ class UmiusiPoseEnv(gym.Env):
             v_perp = float(np.linalg.norm(v - v_along * dhat)) if vcn > 1e-6 else speed
         vel_err = v_perp  # only the perpendicular drift is a controllable error (magnitude isn't observable)
         ang_speed = float(np.linalg.norm(state["ang_vel"]))
-        effort = float(np.linalg.norm(action[4:8]))              # thrust magnitude
+        # Effort: legacy = L2 norm of the esc command; effort_exp > 0 = sum(|u|^exp), the POWER
+        # dimension (exp 3) so the penalty tracks the real cost (heat / battery), not duty count.
+        if self.effort_exp > 0.0:
+            effort = float(np.sum(np.abs(action[4:8]) ** self.effort_exp))
+        else:
+            effort = float(np.linalg.norm(action[4:8]))          # thrust magnitude (legacy)
+        # Vertical thrust mode decomposition (BODY frame — the allocation geometry lives there):
+        # null_n = null-mode amplitude in units of the per-thruster cap force, null_frac = the null
+        # share of vertical mode power (the 8/25 run: 41.2 %), roll_use = roll-mode amplitude over
+        # its cap-limited maximum (8/25: 19 % of authority used).
+        null_n = null_frac = roll_use = 0.0
+        if self._vert_modes is not None:
+            v_vert = state["thrust_world"] @ R[:, 1]             # body-frame vertical force per unit [N]
+            m_h, m_r, m_p, m_n = self._vert_modes @ v_vert
+            f_cap = self.sim.max_duty ** self.sim.thrust_curve_exp * self.sim.thrust_per_cmd
+            null_n = abs(m_n) / max(f_cap, 1e-9)
+            mode_power = m_h * m_h + m_r * m_r + m_p * m_p + m_n * m_n
+            null_frac = float(m_n * m_n / mode_power) if mode_power > 1e-12 else 0.0
+            roll_use = abs(m_r) / max(2.0 * f_cap, 1e-9)
         action_rate = float(np.linalg.norm(action - self.prev_action))
         servo_rate = float(np.linalg.norm(state["servo"] - self.prev_servo))       # actual servo motion
         thrust_rate = float(np.linalg.norm(action[4:8] - self.prev_action[4:8]))   # thrust command change
@@ -429,7 +492,10 @@ class UmiusiPoseEnv(gym.Env):
         def prox(err, scale):
             return float(np.exp(-((err / scale) ** 2)))
 
-        reward = -rw["w_effort"] * effort - rw["w_action_rate"] * action_rate
+        # Economy terms ride econ_ramp (0..1 curriculum): task first, then economize.
+        reward = -self.econ_ramp * rw["w_effort"] * effort - rw["w_action_rate"] * action_rate
+        if self.w_null > 0.0:
+            reward -= self.econ_ramp * self.w_null * null_n
         reward -= rw.get("w_servo_rate", 0.0) * servo_rate      # penalize servo chatter (smooth steering)
         reward -= rw.get("w_thrust_rate", 0.0) * thrust_rate    # penalize thrust command changes
         reward -= rw.get("w_cmd_gap", 0.0) * cmd_gap            # penalize unreachable servo commands
@@ -497,6 +563,9 @@ class UmiusiPoseEnv(gym.Env):
         info["esc_cmd"] = action[4:8].copy()               # raw policy command (thrust use)
         info["esc_applied"] = self.sim.esc_current.copy()  # slew-limited applied esc (true thrust change)
         info["cmd_gap"] = cmd_gap                          # ||servo command - actual|| [rad] (reachability)
+        info["null_frac"] = null_frac                      # null share of vertical mode power (accept: <= 5 %)
+        info["roll_use"] = roll_use                        # roll-mode amplitude / cap max (accept: >= 50 %)
+        info["max_duty"] = self.sim.max_duty               # plant esc cap this episode (DR-sampled)
         return self._get_obs(state, R, ori_err_vec), reward, terminated, truncated, info
 
     def _info(self, state, pos_err, ori_err, depth_err, success):

@@ -141,9 +141,13 @@ def build_env_and_policy(model_path: Path, config: str | None, algo: str | None)
 
     cfg = load_config(config)
     # Match the exact task / sensor-suite / curriculum the policy trained with (as rl/eval.py does).
-    for k in ("task", "obs_mode", "vel_cmd_cone_deg", "yaw_target_deg", "tilt_target_deg"):
+    for k in ("task", "obs_mode", "proprio_mode", "obs_frame",
+              "vel_cmd_cone_deg", "yaw_target_deg", "tilt_target_deg"):
         if meta.get(k) is not None:
             cfg["env"][k] = meta[k]
+    # obs-contract key: absent in old runs = trained WITHOUT the cap dim (never let the newer
+    # config file grow the obs vector under an old policy)
+    cfg["env"]["observe_max_duty"] = bool(meta.get("observe_max_duty", False))
     # Nominal model at deploy: no domain-rand obs noise, no disturbances (mirror eval defaults).
     cfg.setdefault("domain_rand", {})["enabled"] = False
     cfg.setdefault("disturbance", {})["enabled"] = False

@@ -77,6 +77,11 @@ class UmiusiSimulator:
         # Propeller-law thrust curve F = sign(u)|u|^exp * thrust_per_cmd (1.0 = old linear map).
         # Fitted against the 2026-08-21 pool bag: linear overpredicts low-duty thrust ~10x.
         self.thrust_curve_exp = float(t.get("thrust_curve_exp", 1.0))
+        # ESC duty cap |u| <= max_duty — the DEPLOY-PATH clamp (navigator/rl_attitude max_duty),
+        # modeled in the PLANT so training sees the same saturated command chain the robot runs.
+        # The 8/25 run showed a capless-trained policy demands |esc| median 0.63 against a 0.2
+        # deploy cap -> permanent saturation / bang-bang (Umiusi_sim#3). 1.0 = no cap (old behavior).
+        self.max_duty = float(t.get("max_duty", 1.0))
         # Action channel order (issue #3, item 1): action[k] drives the unit NAMED
         # action_order[k]. Per-unit names live in the config (geometric: lf/lb/rf/rb); the default
         # order is the autonomy-side POSITIONS contract. Without names (old config) fall back to
@@ -139,6 +144,7 @@ class UmiusiSimulator:
         self.servo_ctrl = np.zeros(4)
         self.esc_current = np.zeros(4)
         self.thrust_mag = np.zeros(4)
+        self.thrust_world = np.zeros((4, 3))  # last applied per-thruster world force [N]
         self.prev_vel_body = np.zeros(6)
         self.current_world = np.zeros(3)    # water-current velocity [m/s] (disturbance; set by the env)
         self.ext_force_world = np.zeros(3)  # extra external force [N] at the CoM (impulse disturbance)
@@ -148,7 +154,7 @@ class UmiusiSimulator:
     def step(self, action):
         action = np.asarray(action, dtype=float).reshape(8)
         servo_target = np.clip(action[:4], -1.0, 1.0) * self.servo_range_rad
-        esc_target = np.clip(action[4:8], -1.0, 1.0)
+        esc_target = np.clip(action[4:8], -self.max_duty, self.max_duty)
         for _ in range(self.substeps):
             self.servo_ctrl = thr.track(self.servo_ctrl, servo_target, self.servo_slew_rad,
                                         self.servo_tau, self.dt)
@@ -220,6 +226,7 @@ class UmiusiSimulator:
         for k in range(4):
             bid, sid = self.thr_ids[k], self.site_ids[k]
             f_thr = thr.thrust_to_world(self.thrust_mag[k], self.thrust_axes[k], d.xmat[bid])
+            self.thrust_world[k] = f_thr  # kept for the RL null-mode decomposition / diagnostics
             mujoco.mj_applyFT(m, d, f_thr, zero3, d.site_xpos[sid], bid, d.qfrc_applied)
 
     # -- observation -----------------------------------------------------------
@@ -234,6 +241,7 @@ class UmiusiSimulator:
             "ang_vel": vel6[:3].copy(),
             "servo": np.array([d.qpos[a] for a in self.servo_qadr]),
             "thrust": self.thrust_mag.copy(),
+            "thrust_world": self.thrust_world.copy(),
         }
 
     # -- perception ------------------------------------------------------------

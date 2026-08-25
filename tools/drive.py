@@ -145,10 +145,14 @@ def _build_env(model_path, no_disturb=True):
     config = meta.get("config", "configs/train_ppo.yaml")
 
     cfg = load_config(config)
-    for k in ("task", "obs_mode", "vel_cmd_cone_deg", "yaw_target_deg", "tilt_target_deg"):
+    for k in ("task", "obs_mode", "proprio_mode", "obs_frame",
+              "vel_cmd_cone_deg", "yaw_target_deg", "tilt_target_deg"):
         if meta.get(k) is not None:
             cfg["env"][k] = meta[k]
     cfg["env"]["task"] = meta.get("task", cfg["env"].get("task", "attitude_velocity"))
+    # obs-contract key: absent in old runs = trained WITHOUT the cap dim (never let the newer
+    # config file grow the obs vector under an old policy)
+    cfg["env"]["observe_max_duty"] = bool(meta.get("observe_max_duty", False))
     if no_disturb:
         cfg.setdefault("disturbance", {})["enabled"] = False
     cfg.setdefault("domain_rand", {})["enabled"] = False
