@@ -100,6 +100,14 @@ def main():
     meta = {"obs_dim": OBS_DIM, "act_dim": ACT_DIM,
             "net_arch": model.policy.net_arch if hasattr(model.policy, "net_arch") else None,
             "layers": arch}
+    # 学習側 meta.yaml の契約キーを転記する。特に obs_frame はノードのローダが**必須**で見る
+    # (rep103 以外/欠落は起動拒否 — 2026-08-21 の軸取り違えの再発防止ゲート)。
+    train_meta_p = POL / "meta.yaml"
+    tm = yaml.safe_load(train_meta_p.read_text()) if train_meta_p.exists() else {}
+    for k in ("obs_frame", "task", "obs_mode", "proprio_mode"):
+        if tm.get(k) is not None:
+            meta[k] = tm[k]
+    meta["source"] = POL.name
     fields = obs_fields(POL, OBS_DIM)
     if fields is not None:
         meta["obs_fields"] = fields
