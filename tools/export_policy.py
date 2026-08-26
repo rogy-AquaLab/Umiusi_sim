@@ -23,8 +23,8 @@ from gymnasium import spaces
 # 実機側で動く推論実装は sinsei_UMIUSI_autonomy/tools/policy_infer.py に一本化してある
 # (重複を避けるため、ここでは検証時にそこから import する)。
 AUTONOMY = Path("../ros2_ws/src/sinsei_UMIUSI_autonomy").resolve()
-# POL = 書き出す対象バンドル。使用時にこれを対象へ向ける(既定は最初に書き出した cruise_policy のまま)。
-POL = AUTONOMY / "umiusi_rl_control/models/cruise_policy"
+# POL = 書き出す対象バンドル。argv[1] で上書きできる (既定は最初に書き出した cruise_policy)。
+POL = Path(sys.argv[1]).resolve() if len(sys.argv) > 1 else AUTONOMY / "umiusi_rl_control/models/cruise_policy"
 OUT = POL / "export"
 # 25 = 旧 proprio_mode "full" (imu 6 + v_cmd 3 + servo 4 + thrust 4 + prev_action 8)。
 # proprio_mode "action" で学習したポリシーは 17 (imu 6 + v_cmd 3 + prev_action 8)。
@@ -109,7 +109,9 @@ def main():
         print(f"  {k:46s} {tuple(v.shape)}")
 
     # --- 素 torch 実装で SB3 と一致するか検証 ---
+    # policy_infer は tools/ から umiusi_rl_control パッケージへ移動した (どちらでも動くよう両方通す)
     sys.path.insert(0, str(AUTONOMY / 'tools'))
+    sys.path.insert(0, str(AUTONOMY / 'umiusi_rl_control' / 'umiusi_rl_control'))
     import policy_infer as pi
     runner = pi.PolicyRunner(OUT)
     rng = np.random.default_rng(0)
