@@ -199,6 +199,11 @@ class LagrangeCallback(BaseCallback):
               + f"  | probe ori={ori_m if ori_m is None else round(ori_m, 3)} "
                 f"track={track_m if track_m is None else round(track_m, 3)}")
 
+    def _on_training_end(self):
+        if self._probe_env is not None:   # release the probe's MuJoCo model with the run
+            self._probe_env.close()
+            self._probe_env = None
+
 
 def warm_start(model, init_path, venv):
     """Copy policy/value weights (and optimizer-free state) from a previous run into `model`.

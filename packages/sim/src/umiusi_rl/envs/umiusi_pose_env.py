@@ -521,7 +521,7 @@ class UmiusiPoseEnv(gym.Env):
         action = np.clip(np.asarray(action, dtype=float), -1.0, 1.0)
         mode_rate_mag = 0.0
         if self._mixer is not None:  # wrench modes -> 8-D actuator command; downstream unchanged
-            raw = np.clip(np.asarray(action, dtype=float), -1.0, 1.0)
+            raw = action                                   # already clipped to [-1, 1] above
             if self._mode_rate_action:  # action = mode RATE: integrate (slew limit is inherent)
                 mode_rate_mag = float(np.mean(np.abs(raw)))
                 action = np.clip(self._mode_prev_modes + raw * self._mode_slew_step, -1.0, 1.0)

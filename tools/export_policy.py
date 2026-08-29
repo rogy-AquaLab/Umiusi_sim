@@ -17,7 +17,7 @@ import torch
 import yaml
 from stable_baselines3 import PPO
 
-from umiusi_rl.envs.mode_mixer import MODE_NAMES, _MODE_SIGNS
+from umiusi_rl.envs.mode_mixer import DEADBAND_FRAC, MODE_NAMES, _MODE_SIGNS
 from stable_baselines3.common.vec_env import DummyVecEnv, VecNormalize
 import gymnasium as gym
 from gymnasium import spaces
@@ -66,17 +66,22 @@ def obs_fields(bundle_dir, obs_dim):
     return fields
 
 
-def action_contract(tm):
+def action_contract(tm, env, sim_cfg):
     """Deploy-side contract for a wrench-mode policy (action_mode: modes).
 
     A modes policy does NOT output [servo x4, esc x4]: it outputs 6 wrench-mode RATES, and the
     deploy node must reproduce the same three stages the sim ran, in order, or the robot gets a
     different plant than the one that was trained (the A-11 failure mode). The policy rides the
     slew limiter (measured: 100 % of steps), so none of this is optional.
+
+    The plant constants are READ FROM THE SIM CONFIG this run trained against, never hardcoded:
+    thrust_per_cmd is explicitly UNMEASURED (configs/umiusi.yaml — bench calibration pending), so
+    a literal here would silently ship a stale contract the first time it is retuned, and the
+    deployed plant would diverge from the trained one — the A-11 failure this contract prevents.
     """
     if tm.get("action_mode") != "modes":
         return None
-    env = tm.get("_env", {})
+    thr = sim_cfg["thrusters"]
     return {
         "action_mode": "modes",
         "mode_names": list(MODE_NAMES),
@@ -93,11 +98,11 @@ def action_contract(tm):
         "mode_signs": {n: list(s) for n, s in _MODE_SIGNS.items()},
         "mode_sign_columns": ["fx", "fy", "tz", "fz", "tx", "ty"],
         "mode_slew_per_s": float(env.get("mode_slew_per_s", 0.0)),
-        "deadband_frac": 0.02,
-        "thrust_per_cmd": 30.0,
-        "thrust_curve_exp": 2.0,
-        "servo_range_deg": 90.0,
-        "control_rate_hz": 50.0,
+        "deadband_frac": float(DEADBAND_FRAC),
+        "thrust_per_cmd": float(thr["thrust_per_cmd"]),
+        "thrust_curve_exp": float(thr.get("thrust_curve_exp", 1.0)),
+        "servo_range_deg": float(max(abs(v) for v in thr["servo_range_deg"])),
+        "control_rate_hz": float(sim_cfg["sim"]["control_rate_hz"]),
     }
 
 
@@ -147,10 +152,14 @@ def main():
     for k in ("obs_frame", "task", "obs_mode", "proprio_mode", "action_mode"):
         if tm.get(k) is not None:
             meta[k] = tm[k]
-    # The env block lives in the TRAINING config, not the run meta: resolve it for the contract.
+    # The env block and the plant constants live in the TRAINING config / the sim config it
+    # points at, not the run meta: resolve both so the contract carries the values this run
+    # actually trained with (never literals — see action_contract).
     if tm.get("action_mode") == "modes":
         train_cfg = yaml.safe_load((_ROOT / tm.get("config", "configs/train_ppo.yaml")).read_text())
-        contract = action_contract({**tm, "_env": train_cfg.get("env", {})})
+        sim_cfg_p = Path(train_cfg.get("sim_config", "configs/umiusi.yaml"))
+        sim_cfg_p = sim_cfg_p if sim_cfg_p.is_absolute() else _ROOT / sim_cfg_p
+        contract = action_contract(tm, train_cfg.get("env", {}), yaml.safe_load(sim_cfg_p.read_text()))
         if contract is not None:
             if not contract["mode_slew_per_s"]:
                 raise SystemExit("action_mode=modes but mode_slew_per_s is 0 in the training config "

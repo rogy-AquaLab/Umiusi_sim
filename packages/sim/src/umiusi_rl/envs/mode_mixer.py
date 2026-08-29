@@ -52,6 +52,10 @@ _MODE_SIGNS = {  # name: (fx, fy, tz, fz, tx, ty)
 }
 MODE_DIM = 6
 MODE_NAMES = ("fx", "fy", "fz", "tx", "ty", "tz")
+# Below this fraction of f_max a unit's force direction is numerically meaningless (atan2 at
+# zero), so it holds its previous servo angle and zeroes the esc. Part of the DEPLOY contract
+# (tools/export_policy.py reads it from here) — the deployed mixer must use the same value.
+DEADBAND_FRAC = 0.02
 
 
 class ModeMixer:
@@ -67,7 +71,7 @@ class ModeMixer:
     """
 
     def __init__(self, unit_names, thrust_axes, servo_range_rad, thrust_per_cmd,
-                 thrust_curve_exp, deadband_frac=0.02):
+                 thrust_curve_exp, deadband_frac=DEADBAND_FRAC):
         names = list(unit_names)
         if set(names) != set(_MODE_SIGNS):
             raise ValueError(f"mode mixer needs geometric unit names {sorted(_MODE_SIGNS)}, "
