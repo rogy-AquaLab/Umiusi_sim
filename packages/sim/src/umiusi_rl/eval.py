@@ -19,7 +19,7 @@ import yaml
 from stable_baselines3 import PPO, SAC, TD3
 from stable_baselines3.common.vec_env import DummyVecEnv, VecNormalize
 
-from umiusi_rl.envs.umiusi_pose_env import UmiusiPoseEnv, load_config
+from umiusi_rl.envs.umiusi_pose_env import VEL_PER_CAP, UmiusiPoseEnv, load_config
 
 ALGOS = {"ppo": PPO, "sac": SAC, "td3": TD3}
 
@@ -46,17 +46,22 @@ def main():
     ap.add_argument("--record", default=None,
                     help="write an mp4 of the rollout (headless; run with MUJOCO_GL=egl)")
     ap.add_argument("--seed", type=int, default=1000)
+    ap.add_argument("--vecnormalize", default=None,
+                    help="explicit VecNormalize stats .pkl (default: <model dir>/vecnormalize.pkl). "
+                         "For mid-run checkpoints pass checkpoints/ppo_vecnormalize_<N>_steps.pkl")
     args = ap.parse_args()
 
     model_path = Path(args.model)
     meta_path = model_path.parent / "meta.yaml"
+    if not meta_path.exists():  # mid-run checkpoint: checkpoints/ppo_<N>_steps.zip -> run dir meta
+        meta_path = model_path.parent.parent / "meta.yaml"
     meta = yaml.safe_load(meta_path.read_text()) if meta_path.exists() else {}
     algo = args.algo or meta.get("algo", "ppo")
     config = args.config or meta.get("config", "configs/train_ppo.yaml")
 
     cfg = load_config(config)
     # match the task + sensor suite + curriculum condition the policy was trained with
-    for k in ("task", "obs_mode", "proprio_mode", "obs_frame",
+    for k in ("task", "obs_mode", "proprio_mode", "obs_frame", "action_mode",
               "vel_cmd_cone_deg", "yaw_target_deg", "tilt_target_deg"):
         if meta.get(k) is not None:
             cfg["env"][k] = meta[k]
@@ -97,7 +102,7 @@ def main():
     model = ALGOS[algo].load(str(model_path), device="cpu")
 
     # Reapply the training-time observation normalization (VecNormalize stats), if any.
-    stats_path = model_path.parent / "vecnormalize.pkl"
+    stats_path = Path(args.vecnormalize) if args.vecnormalize else model_path.parent / "vecnormalize.pkl"
     if stats_path.exists():
         _dummy = DummyVecEnv([lambda: UmiusiPoseEnv(cfg)])
         vn = VecNormalize.load(str(stats_path), _dummy)
@@ -111,9 +116,11 @@ def main():
             return o
 
     returns, pos_errs, ori_errs, depth_errs, vel_errs, hold_fracs, successes = [], [], [], [], [], [], []
-    vel_alongs, vel_cmds = [], []
+    vel_alongs, vel_cmds, vel_reach = [], [], []
     thrust_uses, servo_motions, thrust_changes, ang_speeds = [], [], [], []
     null_fracs, roll_uses, esc_all = [], [], []   # allocation acceptance metrics (Umiusi_sim#3)
+    mode_rates = []                               # mean |mode rate action| (rate-action runs)
+    vert_powers = []                              # per-step vertical mode power (null weighting)
     for ep in range(args.episodes):
         obs, info = env.reset(seed=args.seed + ep)
         ep_ret, steps, in_tol = 0.0, 0, 0
@@ -130,7 +137,9 @@ def main():
             ang_speed_sum += float(info.get("ang_speed", 0.0))
             thrust_sum += float(np.mean(np.abs(esc)))
             null_fracs.append(float(info.get("null_frac", 0.0)))
+            mode_rates.append(float(info.get("mode_rate_mag", 0.0)))
             roll_uses.append(float(info.get("roll_use", 0.0)))
+            vert_powers.append(float(info.get("vert_power", 0.0)))
             esc_all.extend(np.abs(esc).tolist())
             if prev_esc is not None:
                 thrust_chg_sum += float(np.mean(np.abs(esc - prev_esc)))
@@ -150,6 +159,7 @@ def main():
         vel_errs.append(info.get("vel_err", 0.0))
         vel_alongs.append(info.get("vel_along", 0.0))
         vel_cmds.append(info.get("vel_cmd_speed", 0.0))
+        vel_reach.append(min(info.get("vel_cmd_speed", 0.0), VEL_PER_CAP * env.sim.max_duty))
         hold_fracs.append(in_tol / max(steps, 1))
         successes.append(info.get("is_success", False))
         thrust_uses.append(thrust_sum / max(steps, 1))
@@ -175,16 +185,31 @@ def main():
     print(f"mean final depth err: {np.mean(depth_errs):.3f} m")
     print(f"attitude_velocity  : speed along cmd {np.mean(vel_alongs):.3f} / desired {np.mean(vel_cmds):.3f} m/s"
           f"   sideways drift {np.mean(vel_errs):.3f} m/s")
+    # "Cruise formed" acceptance is judged against the PHYSICALLY REACHABLE speed at the episode's
+    # cap (open-loop ceiling ~ VEL_PER_CAP * max_duty), not the raw command — commands above the
+    # ceiling are unsatisfiable by any policy (measured 2026-08-26, Umiusi_sim#3).
+    if np.mean(vel_reach) > 1e-9:
+        print(f"cruise vs reachable: {np.mean(vel_alongs) / np.mean(vel_reach) * 100:.0f}%   "
+              f"(along / min(desired, {VEL_PER_CAP:.2f}*cap); ACCEPT >= 70%)")
     print(f"mean hold fraction : {np.mean(hold_fracs) * 100:.0f}%   (steps within tolerance)")
     print(f"final-step success : {np.mean(successes) * 100:.0f}%")
     print(f"mean thrust use    : {np.mean(thrust_uses):.3f}   (mean |esc|, 0..1 -> minimize)")
     print(f"median |esc|       : {np.median(esc_all):.3f}   (accept: <= the deploy max_duty)")
     print(f"mean null share    : {np.mean(null_fracs) * 100:.1f}%   (null mode / vertical power; accept <= 5%,"
           f" real 8/25 run: 41.2%)")
+    # Power-weighted null share = the ACCEPTANCE metric (Umiusi_sim#3): the per-step mean above
+    # over-counts near-zero-power steps whose ratio is numerical noise.
+    wp = np.array(vert_powers)
+    nf = np.array(null_fracs)
+    if wp.sum() > 1e-12:
+        print(f"null share (pw)    : {float((nf * wp).sum() / wp.sum()) * 100:.1f}%   "
+              f"(power-weighted; ACCEPT <= 5%)")
     print(f"mean roll authority: {np.mean(roll_uses) * 100:.1f}%   (roll mode / cap max; accept >= 50%,"
           f" real 8/25 run: 19%)")
     print(f"mean angular vel   : {np.mean(ang_speeds):.3f} rad/s   (wobble -> minimize)")
     print(f"mean servo motion  : {np.mean(servo_motions):.2f} deg/step   (vibration -> minimize)")
+    if np.any(np.array(mode_rates) > 0.0):
+        print(f"mean |mode rate|   : {np.mean(mode_rates):.3f}   (rate action; 1.0 = riding the slew limit)")
     print(f"mean thrust change : {np.mean(thrust_changes):.3f} /step     (|Δesc| -> minimize)")
 
 
