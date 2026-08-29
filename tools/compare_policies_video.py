@@ -169,13 +169,17 @@ def rollout(mdir, cap, v_cmd, steps, size, seed):
 
         renderer.update_scene(env.sim.data, camera="track")
         sc = renderer.scene
-        # per-thruster force (world frame), anchored at the unit pivots
+        # Per-unit force, anchored OUTBOARD of the hull. The pivots sit inside the hull
+        # (|z| 0.187 vs the hull's 0.265 half-extent), so an arrow drawn from the pivot is
+        # buried in the body — offset it radially outward, next to the visible thruster can.
         for k, pv in enumerate(pivots):
-            pivot = com + R @ pv
+            radial = np.array([pv[0], 0.0, pv[2]])
+            radial = radial / max(np.linalg.norm(radial), 1e-9)
+            pivot = com + R @ (pv + radial * 0.17)
             f = np.asarray(st["thrust_world"][k], dtype=float)
             if np.linalg.norm(f) > 1e-3:
-                _arrow(sc, pivot, pivot + f * (0.32 / max(f_cap_arrow, 1e-9)),
-                       _RGBA["thrust"], 0.012)
+                _arrow(sc, pivot, pivot + f * (0.55 / max(f_cap_arrow, 1e-9)),
+                       _RGBA["thrust"], 0.018)
         top = com + np.array([0.0, 0.22, 0.0])
         _arrow(sc, top, top + env.v_cmd_world * 1.2, _RGBA["v_cmd"], 0.012)
         _arrow(sc, top, top + st["lin_vel"] * 1.2, _RGBA["v_act"], 0.012)
