@@ -59,6 +59,16 @@ env:
   # -> actually descend faster). Deploy: the node already owns a max_duty parameter — append it to
   # the obs vector (a contract addition, no new cross-package dependency).
   observe_max_duty: true
+  # Action parameterization. "esc" = raw 8-D [servo x4, esc x4] (default; every existing run).
+  # "modes" = 6-D wrench modes [fx, fy, fz, tx, ty, tz] (REP-103 axes) expanded to the 8-D
+  # actuator command by ModeMixer: the two null patterns (the (+,-,+,-) vertical diagonal that
+  # wasted 41% of the 8/25 run's vertical power, and its horizontal twin) are NOT in the basis,
+  # so the commanded null share is structurally ~0 instead of reward-shaped (which failed at
+  # w_null 1..5 — av_cap1/2). prev_action / reward terms still see the mixed 8-D command, so
+  # the OBS CONTRACT is unchanged. Scale: one mode at +/-1 = per-unit force at the CURRENT cap.
+  # Override with --action-mode. Deploy needs the same mixer after policy inference (the mixer
+  # is the deployed FF allocation's per-unit step with a fixed mode basis in front).
+  action_mode: esc
 
 reward:
   w_pos: 1.0                      # -w_pos * ||position_error||            (pose)
