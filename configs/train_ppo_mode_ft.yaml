@@ -1,0 +1,257 @@
+# FINE-TUNE variant of train_ppo.yaml for the wrench-mode (action_mode: modes) BC warm start
+# (Umiusi_sim#3, 2026-08-26). ONLY the transient-suppression weights differ from the base file:
+# realized null share is dominated by servo-lag transients (projected teacher: ~19% with commanded
+# null structurally zero), so the smoothness penalties are raised to attack the cause. Keep every
+# other value in sync with train_ppo.yaml when that file changes.
+#
+# Training / RL config for UmiusiPoseEnv (multi-task: attitude / attitude_depth / attitude_velocity / pose).
+# The task is selected with --task (default below). Reward/success always use the TRUE state; a limited
+# obs_mode just leaves part of the task unobservable. See the env docstring for the four tasks.
+# Consumed by umiusi_rl/train.py (PPO default; --algo sac/td3 to switch). Sim params: configs/umiusi.yaml.
+
+sim_config: configs/umiusi.yaml   # physical model params (resolved relative to repo root)
+
+# Adaptive constraint multipliers (train.py LagrangeCallback): each rollout the measured
+# constraint signals move the env's lagrange multipliers toward these TARGETS — replaces
+# hand-tuning the attitude-vs-cruise penalty balance (av_mode4..8 seesaw). The targets are
+# the acceptance criteria themselves.
+lagrange:
+  enabled: true
+  eta: 0.05                       # multiplier learning rate (small -> no oscillation)
+  # Per-constraint ceilings (evidence, av_mode10 vs 12): attitude NEEDS a high ceiling — mode10's
+  # lambda_ori rose to 8 during the formative phase then decayed to 3.4 once satisfied, giving the
+  # best attitude of any run; mode12 capped everything at 2.0, tracking became excellent but
+  # attitude regressed to 0.36 rad. Tracking keeps the low ceiling: its term carries w_vel_dir_ratio
+  # 4.0, and at lambda 8 it swamped the task reward outright (mode11: reward -8680).
+  lambda_max:
+    ori: 8.0
+    track: 1.3                    # 2.0 -> 1.3 (av_mode16): 15 runs map a clean PARETO FRONTIER —
+                                  # weak tracking pressure gives attitude 0.135 / gain 0.5-0.6
+                                  # (mode10), strong gives gain ~1.0 / attitude 0.26-0.37
+                                  # (mode12/14/15, and 15M steps did NOT dissolve it: this is a
+                                  # trade, not an optimization shortfall). Aim between them.
+  ori_target: 0.20                # mean per-step ori_err [rad] (success tolerance)
+  track_target: 0.35              # mean clipped |v-vcn| ratio, SYMMETRIC, in DETERMINISTIC-PROBE units
+                                  # (av_mode14+: the multipliers are driven by a greedy eval-condition
+                                  # probe, not by noisy training rollouts). Proven reachable: av_mode12's
+                                  # greedy policy tracked to 0.09; mode10/13 sat at 0.64-0.67.
+  probe_every: 10                 # rollouts between deterministic probes (10 x 16384 steps ~ 1% overhead)
+  probe_episodes: 4               # 2 was too noisy (track read 0.24 vs 0.67 on different seeds)
+
+env:
+  # Task (choose with --task): what target the agent must reach and hold.
+  #   attitude        random target orientation (roll/pitch/yaw)         sensor: AHRS (e.g. BNO055)
+  #   attitude_depth  random orientation + random depth                  sensor: AHRS + depth
+  #   pose            go-to-pose: random position, upright orientation    sensor: AHRS + depth + DVL + position
+  task: attitude_depth
+  # Sensor suite for the observation ("auto" = the task default; reward/success ALWAYS use the
+  # true state). full=28 | imu=22 | imu_depth=23 | imu_depth_dvl=26. Override with --obs-mode.
+  obs_mode: auto
+  horizon: 600                    # control steps per episode (12 s at 50 Hz)
+  start_jitter: 0.10              # start position uniformly jittered by +/- this [m] (0 = always origin)
+  # go-to-pose (task=pose) target:
+  target_box: [0.75, 0.50, 0.75]  # target position sampled uniformly in +/- these [m] (x, y, z)
+  workspace_bounds: [2.0, 1.5, 2.0]  # pose episode ends (out-of-bounds) if |pos| exceeds these [m]
+  # attitude / attitude_depth targets:
+  tilt_target_deg: 45.0           # max target tilt (roll/pitch) [deg]
+  yaw_target_deg: 180.0           # target yaw sampled in +/- this [deg]
+  depth_target_range: 0.50        # target depth sampled in +/- this [m] (attitude_depth)
+  vel_cmd_max: 0.40               # max commanded world speed [m/s] (attitude_velocity, feedforward)
+  vel_cmd_horizontal: true        # true: horizontal (x-z) cruise cmd; false: 3-D (adds elevation, for depth approach)
+  vel_cmd_elev_deg: 60.0          # 3-D only: max |elevation| of the command [deg]; curriculum ramps 0 -> this
+  vel_cmd_horizontal_prob: 0.35   # 3-D only: floor of pure-horizontal episodes (multimodality guard —
+                                  # the drone-mode vertical basin otherwise swallows horizontal cruise)
+  vel_cmd_cone_deg: 180.0         # v_cmd direction within +/- this of +X (0 = fixed +X; curriculum widens it)
+  vel_cmd_cap_frac: 0.8           # sample |v_cmd| <= this * (0.68 * max_duty), the episode's physically
+                                  # reachable speed (open-loop ceiling measured 2026-08-26: 0.171 m/s at cap
+                                  # 0.25). The base config's flat U(0, 0.4) commands speeds no policy can
+                                  # reach at low caps — cruise never forms chasing them (Umiusi_sim#3)
+  # Mode-command slew (modes action mode only; 0 = off). Null diagnosis (2026-08-26): the
+  # policy settled into a permanent bang-bang thrash (servo cmd jumps > 65 deg median, esc sign
+  # flips near-every step) whose byproduct is the ~14% realized null. Rate-limiting the 6-D MODE
+  # vector (action units/s; 2.0 = full -1..1 swing in 1 s, direction flips ~180 deg/s — inside
+  # the 250 deg/s servo slew) makes the fast-dither strategy structurally unreachable for a
+  # scratch policy, while every intermediate command stays in the null-free subspace (mode
+  # coords are linear; slewing the folded servo/esc instead RAISED null to 19.7% in the smoke).
+  mode_slew_per_s: 2.0            # deploy-side mixer must apply the same slew (meta.json contract)
+  # Rate-action form (av_mode4): the action IS the mode rate (m += a * slew_step). Under the
+  # target+limiter form the policy rode the limiter 100% of steps with saturated raw targets
+  # and ent_coef inflated std to 1.88 (raw noise had become physically free) — the raw signal
+  # stayed bang-bang. As a rate, a=0 is HOLD, exploration noise integrates into smooth wander,
+  # and w_mode_rate below has a real gradient. Deploy integrates identically (meta.json contract).
+  mode_rate_action: true
+  vel_cmd_hi_prob: 0.3            # 30% of episodes command 0.9-1.0x the reachable ceiling: train
+                                  # (and measure) top-speed cruise, not only the U(0, hi) mean ~hi/2
+  vel_cmd_zero_prob: 0.15         # P(v_cmd = 0) per episode: explicit hold-station episodes so "don't move"
+                                  # is well inside the training distribution (dry tests / narrow pools, issue #1)
+  vel_tol: 0.10                   # velocity match tolerance [m/s] for success
+  vel_deadband: 0.05              # no sideways-drift penalty below this [m/s] (kills precision-chasing servo chatter)
+  # tolerances / shaping:
+  pos_tol: 0.15                   # position within this [m] for success (pose)
+  ori_tol: 0.20                   # orientation within this [rad] for success
+  depth_tol: 0.10                 # depth within this [m] for success (attitude_depth)
+  near_goal_dist: 0.50            # linear velocity penalized only within this distance (pose) [m]
+  near_goal_ori: 0.15             # within this ori error [rad] the "settle" penalties kick in
+  ori_deadband: 0.05              # no orientation reward gradient within this [rad] (~3deg): settle, don't chatter
+  # Proprioception fed to the policy. "action" = previous action only — the sim2real-safe suite:
+  # the real servos have NO position feedback (the 2026-08-21 bag showed /state angle is a pure
+  # command echo) and rpm telemetry is partly dead, so feeding sim servo/thrust state trains on
+  # signals the robot cannot supply (issue #3, item 4). "full" restores the old 16-D suite.
+  proprio_mode: action
+  # Frame the OBSERVATION 3-vectors (ori_err / gyro / v_cmd ...) are expressed in. "sim" = the
+  # CAD +Y-up training-native frame (default; keeps existing runs valid). "rep103" = x fwd,
+  # y left, z up — the ROS/IMU convention: train with this (or convert an existing policy with
+  # tools/convert_policy_frame.py) so the robot feeds its IMU straight in, no axis shuffling.
+  # The 2026-08-21 pool failure #3 (pitch/yaw swapped in obs) is impossible when both sides
+  # speak rep103. Left at "sim" while av_cal1 (launched from this file) is in flight.
+  obs_frame: sim
+  # Feed the plant's ESC cap (sim.max_duty) into the observation as ONE extra dim, appended LAST
+  # (existing layouts stay a prefix -> warm-start by zero-padding the first layer). With the cap
+  # domain-randomized but UNOBSERVED, the economical policy converges onto the lowest sampled cap
+  # and a field cap raise buys nothing; observed, the behaviour is cap-conditional (raise max_duty
+  # -> actually descend faster). Deploy: the node already owns a max_duty parameter — append it to
+  # the obs vector (a contract addition, no new cross-package dependency).
+  observe_max_duty: true
+  # Action parameterization. "esc" = raw 8-D [servo x4, esc x4] (default; every existing run).
+  # "modes" = 6-D wrench modes [fx, fy, fz, tx, ty, tz] (REP-103 axes) expanded to the 8-D
+  # actuator command by ModeMixer: the two null patterns (the (+,-,+,-) vertical diagonal that
+  # wasted 41% of the 8/25 run's vertical power, and its horizontal twin) are NOT in the basis,
+  # so the commanded null share is structurally ~0 instead of reward-shaped (which failed at
+  # w_null 1..5 — av_cap1/2). prev_action / reward terms still see the mixed 8-D command, so
+  # the OBS CONTRACT is unchanged. Scale: one mode at +/-1 = per-unit force at the CURRENT cap.
+  # Override with --action-mode. Deploy needs the same mixer after policy inference (the mixer
+  # is the deployed FF allocation's per-unit step with a fixed mode basis in front).
+  action_mode: esc
+
+reward:
+  w_pos: 1.0                      # -w_pos * ||position_error||            (pose)
+  w_ori: 1.0                      # -w_ori * orientation_error (rot-vec norm to target)
+  w_vel: 0.10                     # -w_vel * ||linear velocity|| near the goal (pose, holding)
+  w_angvel: 0.60                  # -w_angvel * ||angular velocity||  (damp rotation). Raised 0.05 -> 0.60
+                                  # (2026-08-21): the corrected physics has 1/2..1/10 of the old rotational
+                                  # damping, so the plant no longer damps wobble for free — av_sim2real2 (first
+                                  # run at 0.05) cruised with 0.8 rad/s wobble. Old note (a 0.20 bump did
+                                  # nothing) predates the physics fix; the settle terms still handle the
+                                  # near-goal regime.
+  w_depth: 2.0                    # -w_depth * |depth error|              (attitude_depth)
+  # --- economy / smoothness (minimize thrust, servo vibration, thrust changes) ---
+  # NOTE: kept LIGHT so they don't freeze the servos and break attitude tracking (att_v3 lesson).
+  # Raise gradually once tracking is solid.
+  # 2026-08-26 (Umiusi_sim#3, the 8/25 underwater run): the effort term moves to the POWER
+  # dimension and a NULL-MODE penalty is added. Order matters: the plant now caps |esc| at
+  # max_duty FIRST (duty becomes a scarce resource), THEN these penalties teach the allocation
+  # within it — penalties without the cap teach "use more" instead. Both ride the econ_ramp
+  # curriculum (0 -> 1 over econ_ramp_frac of training): task first, then economize — a strong
+  # effort penalty from step 0 collapses into the do-nothing local optimum.
+  w_effort: 1.0                   # -w_effort * sum(|esc_i|^effort_exp)  (electrical power, see below)
+  effort_exp: 3.0                 # power ~ u^3 (propeller law): penalize the real cost (heat /
+                                  # battery), not duty count. 0 restores the legacy ||esc||_2 norm
+  w_null: 5.0                     # -w_null * |null-mode amplitude| / cap-force: the (+ - + -)
+                                  # diagonal esc mode makes NO net force and NO moment — pure waste
+                                  # the magnitude-only effort term cannot see (41.2 % of vertical
+                                  # power in the 8/25 run). Named and penalized directly.
+                                  # accept: null share 41 % -> <= 5 %, roll authority 19 % -> >= 50 %
+                                  # 1.0 -> 5.0 (av_cap1 の教訓): 巡航時は鉛直パワー自体が小さく
+                                  # |m_null|/f_cap ~ 0.2 -> 罰 0.2/step ではタスク項 (~2-4/step) に
+                                  # 埋もれ、3M 継続でも null 比 21.8% -> 21.6% と donor の配分癖を
+                                  # 崩せなかった。5.0 で ~1/step に引き上げる
+  econ_ramp_frac: 0.3             # ramp w_effort + w_null 0 -> full over this fraction of training
+  w_servo_rate: 0.90              # -w_servo_rate * ||servo_angle - prev|| (0.35 base -> 0.90: kill the
+                                  # servo-lag transients behind the realized null share)
+  w_thrust_rate: 0.30             # -w_thrust_rate * ||esc - prev_esc||    (0.15 base -> 0.30: esc reversals
+                                  # from the atan2 fold are the other transient-null source)
+  w_action_rate: 0.10             # -w_action_rate * ||action - prev_action|| (raised from 0.02: the real bag
+                                  # showed +/-1 sign-flapping commands every step; penalize the COMMAND, not
+                                  # only the slew-smoothed servo, so the flapping is visible to learning)
+  w_cmd_gap: 0.30                 # -w_cmd_gap * ||servo_cmd - servo_actual|| [rad] (0.10 base): penalize commands the
+                                  # servo cannot reach (issue #2: 100% duty, on-target 0.1% of the time).
+                                  # With the converging servo model this pushes toward REACHABLE commands.
+  # Extra penalties applied ONLY near the target (ori_err < near_goal_ori) to kill steady-state
+  # limit cycles / servo chatter without discouraging the initial slew to the target.
+  w_settle_servo: 0.80            # -w_settle_servo * ||Δservo|| when near the goal (hold task)
+  w_settle_thrust: 0.40           # -w_settle_thrust * ||Δesc|| when near the goal (hold task)
+  w_settle_servo_cruise: 0.60     # -this * ||Δservo|| when cruising steadily on-course (cuts servo chatter;
+                                  # thrust is left free to modulate for speed). attitude_velocity only.
+  # Dense "closeness" bonuses: + w_*_bonus * exp(-(err / *_scale)^2)  (smooth pull to the goal)
+  w_ori_bonus: 4.0                # 3.0 base -> 4.0: attitude is the weakest axis of the rate-action runs
+                                  # (0.29-0.38 rad vs tol 0.20; av_mode4's 0.15 not yet recovered)
+  ori_scale: 0.35                 # rad
+  w_pos_bonus: 3.0                # pose
+  pos_scale: 0.50                 # m
+  w_depth_bonus: 2.0              # attitude_depth
+  depth_scale: 0.25               # m
+  w_vel_dir: 10.0                 # + reward speed ALONG the commanded direction, capped at desired (attitude_velocity)
+  w_mode_rate: 0.2                # mode_rate_action: - this * mean|a| (rate USE; 0 = hold). Gives the raw
+                                  # signal its first real smoothness gradient — earlier servo/action-rate
+                                  # penalties all measured POST-slew values and were structurally toothless
+  w_vel_dir_ratio: 4.0            # > 0 replaces w_vel_dir with TRACKING-RATIO units: + this * v_along/v_cmd
+                                  # (capped at 1). Cap-aware commands shrank the absolute w_vel_dir term to
+                                  # ~0.7/step (vs ~3/step attitude bonus) and av_mode2 rationally abandoned
+                                  # cruising; ratio units keep the cruise incentive cap-independent
+  w_vel_perp: 6.0                 # - penalize velocity PERPENDICULAR to the command (sideways drift; 4 -> 6
+                                  # 2026-08-21: drift 0.24 m/s vs tol 0.10 was the main success blocker, and at
+                                  # v_cmd = 0 this term IS the hold-station stillness penalty)
+  goal_bonus: 5.0                 # +goal_bonus per step while within tolerance
+  out_of_bounds_penalty: 50.0     # one-time penalty when leaving the workspace (pose)
+
+# Domain randomization for sim-to-real robustness. DEFAULT OFF (all fracs used only if enabled).
+# Applied at each reset as a multiplicative/additive perturbation around the config values.
+domain_rand:
+  enabled: false                  # enable at train/eval time with --domain-rand (sim2real robustness)
+  # NOTE 2026-08-21: the physics params are now ESTIMATES with known error bars (tools/estimate_hydro):
+  # drag ~±30 %, added mass ~±30 % trans / x2 rot, servo rate 100-500 deg/s plausible. DR should at
+  # least span those bars — the 2026-08-21 real test showed a policy trained without DR on placeholder
+  # physics does not transfer at all, so "lighter DR for sim score" optimizes the wrong metric.
+  buoyancy_frac: 0.05             # displaced_volume *= 1 + U(-frac, frac)
+  thrust_frac: 0.15               # thrust_per_cmd  *= 1 + U(-frac, frac) (30 N/unit is UNMEASURED — wide)
+  drag_frac: 0.30                 # linear & quadratic drag *= 1 + U(-frac, frac) (estimate error bar)
+  added_mass_frac: 0.40           # added-mass diag *= 1 + U(-frac, frac, per-axis) (widest error bar)
+  servo_slew_range_deg_s: [100.0, 500.0]  # per-episode servo rate limit U(lo, hi) (real rate unknown;
+                                  # the bag analysis showed any value in this range kills the flapping —
+                                  # randomizing it makes the policy valid whatever the true rate is)
+  servo_tau_frac: 0.5             # servo small-signal tau *= 1 + U(-frac, frac)
+  servo_offset_deg: 3.0           # per-thruster servo neutral offset U(-this, this) [deg] per episode
+  thrust_exp_range: [1.5, 2.8]    # thrust-curve exponent U(lo, hi): low-duty thrust shape is only
+                                  # bag-fitted (exp/max confounded below |u|=0.2) — bench test pins it
+  buoyancy_offset_frac: 0.6       # CoB height *= 1 + U(-frac, frac): bag fit says 5-10 mm (was 50!)
+  thrust_unit_frac: 0.10          # per-thruster thrust gain *= 1 + U(-frac, frac) (unit asymmetry)
+  max_duty_range: [0.2, 0.4]      # plant esc cap U(lo, hi) per episode: the operator raises the
+                                  # deploy clamp 0.25 -> 0.4 as trust builds; sampled (and observed,
+                                  # env.observe_max_duty) so ONE policy stays valid at any cap
+                                  # (upper bound 0.4 = post-allocation-fix ceiling, Umiusi_sim#3)
+  obs_noise: 0.005                # gaussian obs noise std (in obs units; ~0.3deg / 0.005 rad·s⁻¹ sensor noise)
+  action_latency_steps: 1         # control->actuation delay [control steps] (~20 ms at 50 Hz)
+
+# External disturbances (steady water current + random force impulses). DEFAULT OFF; --disturb enables.
+# A current is modeled as a water velocity (drag uses v - current), so it drags the vehicle along.
+disturbance:
+  enabled: false
+  current_max: 0.30               # steady current speed sampled U(0, this) per episode [m/s]
+  current_horizontal: true        # current in the x-z plane
+  impulse_prob: 0.01              # per control step, chance to start a force impulse
+  impulse_force: 25.0             # impulse force magnitude [N]
+  impulse_steps: 5                # impulse duration [control steps]
+
+# --- Algorithm ---------------------------------------------------------------
+algo: ppo                         # ppo (default) | sac | td3  (override with --algo)
+n_envs: 8                         # parallel environments (CPU vectorization)
+total_timesteps: 300000           # override with --timesteps
+seed: 0
+
+policy:
+  net_arch: [256, 256]            # MLP hidden sizes for actor/critic
+
+# PPO hyperparameters (used when algo == ppo). SAC/TD3 fall back to SB3 defaults + net_arch.
+ppo:
+  n_steps: 2048                   # rollout length per env
+  batch_size: 512
+  n_epochs: 10
+  gamma: 0.99
+  gae_lambda: 0.95
+  ent_coef: 0.003                 # 0.01 -> 0.0 -> 0.003: 0.01 inflated std to 1.88 once the mode slew made
+                                  # raw noise physically free (binary-effective actions); 0.0 (av_mode4) found
+                                  # cruise at the curriculum's opening cap 0.4 (102%) but could not re-adapt
+                                  # when the cap range widened (26% at 0.25) — keep a SMALL bonus so the policy
+                                  # stays plastic across the cap range without the std blow-up
+  learning_rate: 0.0003
+  clip_range: 0.2
