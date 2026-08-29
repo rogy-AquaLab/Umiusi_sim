@@ -148,7 +148,8 @@ mj_applyFT(F_thr_k, point = site_xpos[t k _thrust], body = thruster_k)
 
 §3 の逆問題：所望の body レンチが与えられると、解析的な **8×6 配分行列**がそれを 4 つの
 `(servo_angle, esc)` ペアへ写像する。`competition_run` で使われ、ROS コントローラからも利用可能である。
-**Frame mapping note:** FF 軸 ≠ sim 軸（`Vx → sim −X`、`Vz → +Y`、`Vy → yaw couple`）。これは
+**Frame mapping note:** FF 軸 ≠ sim 軸（`Vx → sim −X`、`Vz → +Y`、`Vy → +Z sway`。旧記述の
+「yaw couple」は右舷 2 基の行入れ替え移植バグの症状で 2026-08-26 修正済み）。これは
 `control.py` に文書化されており、`validate_sim.check_ff_allocation`（純ヒーブはスピンせず上昇し、純サージは水平を保つ）で守られる。FF フレームの符号調整はトラッキング中のフォローアップ項目である。
 
 ---

@@ -229,7 +229,8 @@ vs balloon), and prints a pop timeline + final score (typically 80). The world i
 `mujoco.MjSpec` and does **not** touch the base model, so `validate_sim` stays green. Perception + a
 behavior FSM replace the ground-truth driver in the next phase.
 > The feed-forward allocation's axes don't line up 1:1 with the sim (empirically `Vx→−X`, `Vz→+Y`,
-> `Vy→yaw couple`) — documented in `control.py`; reconcile before driving the sim from real `ros2_control`.
+> `Vy→+Z sway`; the old "Vy→yaw couple" note was a symptom of a starboard row-swap port bug, fixed
+> 2026-08-26) — documented in `control.py`; reconcile before driving the sim from real `ros2_control`.
 
 **Perception-in-the-loop autonomy** (vision replaces the ground-truth driver, still no RL) — the robot
 detects balloons from its OWN underwater-degraded `front_cam` with the learned detector, and a
