@@ -70,7 +70,7 @@ class ModeMixer:
     null share (smoke 19.7% vs ~14% baseline) while freezing the servos.
     """
 
-    def __init__(self, unit_names, thrust_axes, servo_range_rad, thrust_per_cmd,
+    def __init__(self, unit_names, thrust_axes, unit_pivots, servo_range_rad, thrust_per_cmd,
                  thrust_curve_exp, deadband_frac=DEADBAND_FRAC):
         names = list(unit_names)
         if set(names) != set(_MODE_SIGNS):
@@ -83,13 +83,28 @@ class ModeMixer:
         self.thrust_per_cmd = float(thrust_per_cmd)
         self.thrust_curve_exp = float(thrust_curve_exp)
         self.deadband_frac = float(deadband_frac)
-        # Geometry consistency: the fx/fy signs must match the configured tangent directions
-        # (guards a config edit silently breaking the hardcoded table).
+        # Geometry consistency: guard a config edit silently breaking the hardcoded table.
+        # BOTH groups are checked, because a wrong sign here is silent — it does not crash, it
+        # just makes a "pure roll" command produce something else (the earlier feed_forward port
+        # turned pure pitch into the zero-wrench null mode exactly this way, autonomy A-12).
+        # Horizontal (fx, fy): against the configured tangent directions.
         ax = np.asarray(thrust_axes, dtype=float)
         if not (np.all(np.sign(ax[:, 0]) == self._Sh[:, 0])
                 and np.all(-np.sign(ax[:, 2]) == self._Sh[:, 1])
                 and np.allclose(ax[:, 1], 0.0, atol=1e-6)):
             raise ValueError("thrust_axes do not match the mode sign table (geometry changed?)")
+        # Vertical (fz, tx, ty): against the mounting-pivot square. All units push up together
+        # (fz), roll is port-minus-starboard (REP-103 +y = left = CAD -z), and REP-103 +pitch
+        # about +y is nose-DOWN, so ty = -(front - back) with CAD +x forward.
+        pv = np.asarray(unit_pivots, dtype=float)
+        if pv.shape != (4, 3):
+            raise ValueError(f"unit_pivots must be (4, 3) in action order, got {pv.shape}")
+        roll_sign = -np.sign(pv[:, 2] - pv[:, 2].mean())     # port (CAD -z) side up
+        pitch_sign = -np.sign(pv[:, 0] - pv[:, 0].mean())    # front (CAD +x) side down
+        if not (np.all(self._Sv[:, 0] == 1.0)
+                and np.all(roll_sign == self._Sv[:, 1])
+                and np.all(pitch_sign == self._Sv[:, 2])):
+            raise ValueError("unit_pivots do not match the mode sign table (geometry changed?)")
 
     def mix(self, modes, max_duty, prev_servo_cmd):
         """Return action[8] = [servo x4, esc x4], each channel in [-1, 1].

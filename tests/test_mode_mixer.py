@@ -15,6 +15,7 @@ import sys
 from pathlib import Path
 
 import numpy as np
+import pytest
 
 _ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(_ROOT / "packages" / "sim" / "src"))
@@ -25,7 +26,7 @@ from umiusi_sim.simulator import UmiusiSimulator  # noqa: E402
 
 
 def _mixer(sim):
-    return ModeMixer(sim.unit_names, sim.thrust_axes, sim.servo_range_rad,
+    return ModeMixer(sim.unit_names, sim.thrust_axes, sim.unit_pivots, sim.servo_range_rad,
                      sim.thrust_per_cmd, sim.thrust_curve_exp)
 
 
@@ -48,6 +49,34 @@ def test_mode_basis_is_orthogonal_and_null_free():
     assert np.allclose(vert.T @ vert_null, 0.0)            # fz/tx/ty cannot express the null
     horiz_null = vert_null                                  # same (+,-,+,-) diagonal in action order
     assert np.allclose(horiz.T @ horiz_null, 0.0)
+
+
+def test_geometry_guard_rejects_a_layout_the_sign_table_no_longer_describes():
+    """The sign table is hardcoded, so a config geometry edit must fail LOUDLY.
+
+    A wrong vertical sign is otherwise silent: nothing crashes, "pure roll" just stops being
+    roll (the feed_forward port turned pure pitch into the zero-wrench null mode exactly this
+    way — autonomy known_issues A-12). Both groups are guarded, so check both.
+    """
+    sim = UmiusiSimulator()
+    # Port/starboard swapped (roll column no longer matches the pivots) -> vertical guard.
+    swapped = sim.unit_pivots.copy()
+    swapped[:, 2] *= -1.0
+    with pytest.raises(ValueError, match="unit_pivots"):
+        ModeMixer(sim.unit_names, sim.thrust_axes, swapped, sim.servo_range_rad,
+                  sim.thrust_per_cmd, sim.thrust_curve_exp)
+    # Fore/aft swapped (pitch column) -> also the vertical guard.
+    flipped = sim.unit_pivots.copy()
+    flipped[:, 0] *= -1.0
+    with pytest.raises(ValueError, match="unit_pivots"):
+        ModeMixer(sim.unit_names, sim.thrust_axes, flipped, sim.servo_range_rad,
+                  sim.thrust_per_cmd, sim.thrust_curve_exp)
+    # Tangent directions reversed -> horizontal guard (unchanged behavior, pinned here too).
+    with pytest.raises(ValueError, match="thrust_axes"):
+        ModeMixer(sim.unit_names, -sim.thrust_axes, sim.unit_pivots, sim.servo_range_rad,
+                  sim.thrust_per_cmd, sim.thrust_curve_exp)
+    # The real geometry still constructs.
+    _mixer(sim)
 
 
 def test_single_mode_full_scale_hits_the_cap_exactly():

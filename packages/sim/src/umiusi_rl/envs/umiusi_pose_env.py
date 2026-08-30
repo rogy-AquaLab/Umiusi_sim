@@ -237,8 +237,8 @@ class UmiusiPoseEnv(gym.Env):
             # NOMINAL plant constants (not the DR-perturbed episode values): the deployed mixer
             # runs with the same nominals, and the mismatch is the policy's feedback problem.
             self._mixer = ModeMixer(self.sim.unit_names, self.sim.thrust_axes,
-                                    self.sim.servo_range_rad, self.sim.thrust_per_cmd,
-                                    self.sim.thrust_curve_exp)
+                                    self.sim.unit_pivots, self.sim.servo_range_rad,
+                                    self.sim.thrust_per_cmd, self.sim.thrust_curve_exp)
             # Mode-command slew (mode_slew_per_s, action units/s; 0 = off): rate-limits the
             # 6-D MODE vector before mixing, so the realized wrench cannot change faster than
             # this — the bang-bang fast-dither strategy (null diagnosis 2026-08-26: servo cmd

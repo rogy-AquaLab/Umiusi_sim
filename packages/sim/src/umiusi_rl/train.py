@@ -126,6 +126,15 @@ class LagrangeCallback(BaseCallback):
     (optimistic -> constraint switched off on a policy that was violating it). The probe costs
     ~1 % of wall clock (probe_episodes x horizon every probe_every rollouts).
 
+    NOTE the probe env is built from the config ONCE and is deliberately NOT synced with the
+    curriculum callbacks: it always poses the FINAL cone / tilt / yaw range, while the training
+    envs are still at fraction p. So early probes measure a harder task than the policy is being
+    trained on and the multipliers grow early. That is the intended behavior, not an oversight —
+    the targets are ACCEPTANCE-eval numbers, and av_mode10's attitude came precisely from
+    lambda_ori reaching its ceiling during the formative phase and decaying once satisfied. The
+    cost is that the "pinned at lambda_max" warning below can fire from curriculum lag rather
+    than an unreachable target; read it together with the probe values printed each cycle.
+
     `lambda_max` may be a scalar or a per-constraint mapping. It is not a safety knob but a
     DESIGN choice per constraint: av_mode10's attitude success came from lambda_ori reaching 8
     during the formative phase (then decaying to 3.4 once satisfied); capping every multiplier
