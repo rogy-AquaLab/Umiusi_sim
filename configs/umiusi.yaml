@@ -32,48 +32,40 @@ hull:
   center: [-0.23098, 0.100, 0.0]              # bbox center in hull frame [m]
 
 # --- hydrodynamic damping, diagonal, body axes ------------------------------------------------
-# ORDER: [x(surge), y(heave/up), z(sway), rot+X(roll), rot+Y(yaw), rot+Z(pitch)] — the linear(3)/
-# angular(3) body axes as the simulator applies them (the old comment said "roll, pitch, yaw",
-# which mislabeled the last two: +Y is UP here, so rotation about +Y is YAW).
+# ORDER: [x(surge), y(heave/up), z(sway), rot+X(roll), rot+Y(yaw), rot+Z(pitch)] — +Y is UP here,
+# so rotation about +Y is YAW, not pitch.
 # Derived from CAD silhouette areas x BlueROV2-identified effective Cd (von Benzon et al. 2022,
-# JMSE 10(12):1898, experimentally identified in a pool, same vehicle class: 13.5 vs 12.5 kg).
-# Reproduce / re-derive with: python -m tools.estimate_hydro   (docs/calibration_plan.md has the
-# in-water experiments that replace these with measured values.)
-# Predicted terminal surge speed at full command: ~0.8 m/s (BlueROV2 measures 0.72 at 85 N).
+# JMSE 10(12):1898, same vehicle class). Re-derive: python -m tools.estimate_hydro
+# ESTIMATES, not measurements — docs/calibration_plan.md has the in-water experiments.
 drag:
   linear:    [11.5, 13.7, 0.0, 0.15, 0.60, 1.19]    # N/(m/s) ; N*m/(rad/s)
   quadratic: [118.0, 79.1, 144.0, 0.49, 2.01, 0.70] # N/(m/s)^2 ; N*m/(rad/s)^2
 added_mass:
-  # Diagonal added mass/inertia, same axis order as drag. ENABLED (was all-0/OFF): estimated from
-  # Lamb's ellipsoid x per-axis solidity (translational) and a rod distribution (rotational), each
-  # CALIBRATED against the BlueROV2 published values by running the same recipe on its geometry
-  # (see tools/estimate_hydro.py; residual ~±30 % trans, ~x2 rot — domain-rand covers this).
-  # Heave added mass is 57 % of vehicle mass: ignoring it (the old 0) badly overpredicted the
-  # vertical/pitch transient response. Applied via the one-substep-lagged finite-difference
-  # acceleration in simulator.py (stability verified in validate_sim's open_loop check).
+  # Diagonal added mass/inertia, same axis order as drag. Estimated (tools/estimate_hydro.py) from
+  # Lamb's ellipsoid x per-axis solidity, calibrated against BlueROV2 published values; residual
+  # ~±30 % translational, ~x2 rotational, which domain-rand covers. Do NOT zero these: heave added
+  # mass is 57 % of vehicle mass and dropping it badly overpredicts the vertical/pitch transient.
   diag: [2.69, 7.10, 3.16, 0.082, 0.165, 0.122]
 
 # --- LIFT: force perpendicular to the body-frame flow, growing with angle of attack -----------
-# force = coef * |v|^2 * sin(a)cos(a) perpendicular to v, where a = angle of attack (flow vs the
-# longitudinal ref_axis). VANISHES for flow along the ref axis (surge) AND perpendicular to it
-# (pure heave/sway) -> only OBLIQUE flow lifts; keeps the axis-aligned validate invariants intact.
-# coef = 1/2*rho*Cl*A [N/(m/s)^2] (lumped). PLACEHOLDER (modest, ENABLED) — calibrate vs tow tests.
-# coef: 0.0 recovers the old no-lift model.
+# force = coef * |v|^2 * sin(a)cos(a) perpendicular to v, a = angle of attack vs the longitudinal
+# ref_axis. Vanishes for flow along the ref axis AND perpendicular to it, so only OBLIQUE flow
+# lifts — that is what keeps the axis-aligned validate_sim invariants intact.
+# coef = 1/2*rho*Cl*A [N/(m/s)^2], lumped. PLACEHOLDER — calibrate against tow tests. 0.0 = off.
 lift:
   coef: 12.0                    # ~1.5 N max lift at the 0.4 m/s cruise speed (modest)
   ref_axis: [1.0, 0.0, 0.0]     # longitudinal (streamlined/elongated) body axis = +X (forward)
 
 # --- Center-of-pressure OFFSET (translation-induced / Munk-like moment) -----------------------
-# The translational drag force is applied at CoM + this offset (body frame [x, y, z], meters), so a
-# broadside translation induces a turning/righting moment. Small (a few cm). PLACEHOLDER (ENABLED).
-# [0.0, 0.0, 0.0] recovers the old model (drag through the CoM, zero translation moment).
+# Translational drag is applied at CoM + this offset (body frame [x, y, z], m), so a broadside
+# translation induces a turning/righting moment. PLACEHOLDER. [0, 0, 0] = drag through the CoM.
 cop_offset: [0.03, 0.0, 0.0]
 
 # --- Optional off-diagonal (cross-axis) damping moments ---------------------------------------
 # Extra body moment coupled to translational velocity: M += -(lin*v + quad*|v|*v). Default 0 = OFF.
 #   sway_yaw    body-Z (sway)  velocity -> yaw moment about +Y (weathercocking)
 #   heave_pitch body-Y (heave) velocity -> pitch moment about +Z
-# Kept OFF by default (the CoP offset above already supplies a translation->moment coupling).
+# OFF by default: the CoP offset above already supplies a translation->moment coupling.
 coupling:
   sway_yaw:    [0.0, 0.0]       # [linear N*m/(m/s), quadratic N*m/(m/s)^2]
   heave_pitch: [0.0, 0.0]
@@ -87,54 +79,48 @@ thrusters:
   # i.e. phi = atan(f_vertical / f_horizontal) — matching sinsei_umiusi_control's FeedForward
   # allocation (horizontal comp -> surge/sway/yaw, vertical comp -> heave/roll/pitch).
   servo_range_deg: [-90.0, 90.0]
-  # Servo = Hitec HS-646WP. Datasheet no-load speed 0.20 s/60deg @6V .. 0.17 s/60deg @7.4V
-  # (= ~300..350 deg/s). Derated to 250 deg/s as an in-water/loaded estimate; stall torque
-  # ~0.94..1.14 N*m is modeled as the actuator forcerange in src/umiusi_sim/description/umiusi.xml.
-  servo_slew_deg_per_s: 250.0  # servo rate limit (mirrors max_duty_step_per_sec concept)
-  # Servo tracking model: rate = clip((target - angle) / servo_tau_s, +/- slew). Large errors move
-  # at the slew limit; within slew*tau (~12.5 deg) of the target the response is a first-order lag
-  # (tau ~ the HS-646WP small-signal response), so the servo CONVERGES to the command instead of
-  # rate-limiting forever (issue #2/#3: the pure-slew model never settled under a flapping policy,
-  # which hid the "commands are unreachable" pathology from training). servo_tau_s: 0 -> old pure
-  # slew model.
+  # Servo = Hitec HS-646WP: datasheet ~300..350 deg/s no-load, derated for in-water load. Stall
+  # torque is modeled as the actuator forcerange in description/umiusi.xml, not here.
+  servo_slew_deg_per_s: 250.0  # servo rate limit
+  # Tracking model: rate = clip((target - angle) / servo_tau_s, +/- slew). Beyond slew*tau (~12.5
+  # deg) of error it moves at the slew limit, inside it as a first-order lag — so the servo
+  # CONVERGES rather than rate-limiting forever. Keep tau > 0: a pure-slew servo never settles
+  # under a flapping policy, which hides unreachable commands from training. 0 = pure slew.
   servo_tau_s: 0.05            # first-order small-signal time constant [s]
   thrust_slew_per_s: 4.0       # ESC command slew [esc units/s] (mirrors max_duty_step_per_sec); caps thrust changes
   # Thrust curve: F = sign(u) * |u|^thrust_curve_exp * thrust_per_cmd  (u = slewed esc command).
-  # exp 1.0 = the old linear map. 2.0 = propeller law (duty -> rpm roughly linear, thrust ~ rpm^2):
-  # the servo-debug pool bag rejects the linear map at low duty (open-loop gyro RMSE 0.28 linear
-  # vs 0.05-0.08 for exp 2-3 — at duty 0.2 the real thrust is ~10x smaller than linear predicts).
-  # The bag only covers |u| <= 0.2, so exp vs max is confounded: bench-calibrate (plan 3).
+  # 2.0 = propeller law (duty -> rpm roughly linear, thrust ~ rpm^2); 1.0 = linear.
+  # BOTH VALUES ARE UNCALIBRATED and confounded with each other: the only in-water data covers
+  # |u| <= 0.2. Bench-calibrate (docs/calibration_plan.md, plan 3) before trusting absolute speed,
+  # and RE-EXPORT any deployed policy afterwards — tools/export_policy.py copies these into the
+  # bundle's action_contract, and the robot reproduces the plant from that copy.
   thrust_per_cmd: 30.0         # N at FULL command (|u| = 1)
-  thrust_curve_exp: 2.0        # propeller-law exponent (1.0 recovers the old linear map)
-  # ESC duty cap |u| <= max_duty, applied in the PLANT before the slew. This is the deploy-path
-  # clamp (navigator/rl_attitude max_duty) made part of the training plant: the 8/25 underwater
-  # run showed a capless-trained policy demands |esc| median 0.63 against the robot's cap ->
-  # 96 % of samples saturated (bang-bang, no proportional control). 0.25 matches the deploy
-  # default (roll-capsize margin 1.1x; the capsize threshold is duty 0.235 — Umiusi_sim#3).
-  # Training additionally randomizes this over domain_rand.max_duty_range so one policy stays
-  # valid when the operator raises the cap in the field.
+  thrust_curve_exp: 2.0        # propeller-law exponent
+  # ESC duty cap |u| <= max_duty, applied in the PLANT before the slew — the deploy-path clamp
+  # (navigator/rl_attitude max_duty) made part of the training plant. Train WITH a cap: a
+  # capless-trained policy saturates against the robot's clamp and degenerates to bang-bang.
+  # 0.25 matches the deploy default and sits ~1.1x under the roll-capsize threshold.
+  # domain_rand.max_duty_range randomizes it so one policy survives an operator raising the cap.
   max_duty: 0.25
   # Per-unit: pivot = measured servo joint (base_link frame; from CAD placement.txt), and
   # thrust_axis = the NEUTRAL (servo=0) thrust direction = horizontal tangential (perp to the arm),
   # expressed in the thruster body frame (= base frame at servo=0). The MJCF hinge axis (= arm) is
   # authoritative for how the servo rotates this.
   #
-  # NAMES ARE GEOMETRIC (issue #3, item 1). In this right-handed frame (+X fwd, +Y up) +Z is
-  # STARBOARD (fwd x up = right), so z<0 = port(left), z>0 = starboard(right); x=-0.023 is the
-  # front pair, x=-0.397 the back pair (CoM x = -0.24). Hence 1=lf, 2=lb, 3=RF, 4=RB — the old
-  # "3=rb 4=rf (ASSUMED)" labels had the starboard pair swapped front/back. The action order below
-  # (not the id numbering) is the interface contract; once the id->position wiring is verified on
-  # the real vehicle (spin one unit at a time), fix any mismatch HERE by editing the names.
+  # NAMES ARE GEOMETRIC, and they are what umiusi_rl.envs.mode_mixer keys its sign table on.
+  # In this right-handed frame (+X fwd, +Y up) +Z is STARBOARD, so z<0 = port, z>0 = starboard;
+  # x=-0.023 is the front pair, x=-0.397 the back pair. The `action_order` below — NOT the id
+  # numbering — is the interface contract shared with the robot. If the id->position wiring is
+  # ever found to differ on the real vehicle, fix it HERE by editing the names.
   units:
     - {id: 1, name: lf, pivot: [-0.022777, 0.09815, -0.187224], thrust_axis: [ 0.7081, 0.0,  0.7061]}
     - {id: 2, name: lb, pivot: [-0.397223, 0.09815, -0.187224], thrust_axis: [ 0.7081, 0.0, -0.7061]}
     - {id: 3, name: rf, pivot: [-0.022777, 0.09815,  0.187224], thrust_axis: [-0.7081, 0.0,  0.7061]}
     - {id: 4, name: rb, pivot: [-0.397223, 0.09815,  0.187224], thrust_axis: [-0.7081, 0.0, -0.7061]}
-  # Action channel order: action[k] (both servo_k and esc_k) drives the unit NAMED action_order[k].
-  # This matches sinsei_UMIUSI_autonomy's POSITIONS = ("lf", "lb", "rb", "rf") so the policy's
-  # channels mean the same thruster in sim and on the robot. Under the geometric names above this
-  # maps action[2] -> unit id 4 and action[3] -> unit id 3 (the old code implicitly used id order,
-  # which swapped the starboard pair relative to the autonomy contract).
+  # action[k] (both servo_k and esc_k) drives the unit NAMED action_order[k]. This MUST stay equal
+  # to sinsei_UMIUSI_autonomy's POSITIONS, or a policy channel means a different thruster on the
+  # robot than in sim — and nothing on either side can detect that. Note it is NOT id order:
+  # here action[2] -> id 4 and action[3] -> id 3.
   action_order: [lf, lb, rb, rf]
 
 # --- competition field (balloon-popping scenario) ---------------------------------------------
