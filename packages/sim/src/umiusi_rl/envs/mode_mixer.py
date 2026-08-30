@@ -1,49 +1,27 @@
 """ModeMixer — wrench-mode action -> 8-D thruster action, with NO null-space coordinate.
 
-Umiusi_sim#3 follow-up (2026-08-26): reward shaping could not remove the vertical null mode
-(the (+,-,+,-) diagonal pattern; 41.2 % of vertical power in the 8/25 run, still ~22 % after
-w_null=1..5 continuation runs) because "null == 0" is an exact linear constraint on the raw
-8-D action that gradient descent only approaches. This mixer removes the constraint by
-re-parameterizing the ACTION: the policy commands 6 wrench modes and the two do-nothing
-patterns (vertical AND horizontal null) simply do not exist in the basis.
-
-Action contract (action_mode: "modes"): a = [fx, fy, fz, tx, ty, tz] in [-1, 1],
-a normalized body-frame wrench command in REP-103 axes (x fwd, y left, z up — the same
-convention as the deployed obs_frame):
+Action contract (action_mode: "modes"): a = [fx, fy, fz, tx, ty, tz] in [-1, 1], a normalized
+body-frame wrench command in REP-103 axes (x fwd, y left, z up — the deployed obs_frame):
     fx  surge (forward force)         tx  roll  (+ = left side up)
     fy  sway  (leftward force)        ty  pitch (+ = nose down, REP-103 right-hand)
     fz  heave (upward force)          tz  yaw   (+ = counter-clockwise seen from above)
 
-Scaling: a single mode at +/-1 commands each thruster at the CURRENT esc cap, i.e. the
-per-unit force f_max = thrust_per_cmd * max_duty**thrust_curve_exp. The cap is observed by
-the policy (observe_max_duty), so "1.0" always means "full available authority", whatever
-the operator set. Combined modes that overflow f_max are per-unit clipped (saturation the
-policy sees through prev_action and learns to moderate).
+One mode at +/-1 commands each thruster at the CURRENT esc cap, so "1.0" always means "full
+available authority"; combined modes that overflow it are clipped per unit.
 
-Per unit the horizontal (tangential t_i) and vertical components are combined exactly like
-the deployed feed-forward allocation (umiusi_perception.control / feed_forward.hpp):
-    servo = atan2(v, h)   (folded into +/-90 deg by reversing the esc for rear half-plane)
-    esc   = sign * (min(|f|, f_max) / thrust_per_cmd) ** (1 / thrust_curve_exp)
-The mixer uses the NOMINAL plant constants (thrust_per_cmd / thrust_curve_exp from the sim
-config, not the DR-perturbed episode values): the deployed mixer will run with the same
-nominal constants, and the mismatch is exactly what the policy's feedback learns to absorb.
-
-The idealization "horizontal component along t_i, vertical along +Y" matches the deploy
-allocation; the real hinge axis has a ~7 deg upward tilt (MJCF), whose small cross-coupling
-is part of the plant the policy corrects for.
+Two things must stay true of any edit here, and neither is checkable by a test:
+  * the fold to (servo, esc) must match the deployed feed-forward allocation
+    (umiusi_perception.control / feed_forward.hpp) — the robot runs that one;
+  * the plant constants must be the NOMINAL ones, never the DR-perturbed episode values,
+    because the deployed mixer runs with the nominals.
+The "horizontal along t_i, vertical along +Y" idealization is deliberate for the same reason
+(it matches deploy; the real hinge tilts ~7 deg up and the residual is part of the plant).
 """
 
 import numpy as np
 
-# Per-unit mode signs, keyed by geometric unit name (configs/umiusi.yaml `units[].name`).
-# Columns: (fx, fy, tz | fz, tx, ty). Derived from the thruster geometry:
-#   fx =  sign(thrust_axis.x)      fy = -sign(thrust_axis.z)   (REP-103 y = -sim z)
-#   tz = -1 for all units (the four tangents share one rotational sense: uniform +h -> -yaw)
-#   fz = +1 (all up)               tx / ty from the pivot square (tx = roll = left - right,
-#   ty = -(front - back): REP-103 +pitch about y(left) is nose-DOWN)
-# Every column is a Walsh vector; any two columns within a group are orthogonal, and the
-# missing 4th vectors — vertical (+,-,+,-) and horizontal (+,-,+,-) in action order — are
-# exactly the null modes this parameterization cannot express.
+# Per-unit mode signs in action order, keyed by unit name (configs/umiusi.yaml `units[].name`).
+# __init__ re-derives every column from the config geometry and rejects a mismatch.
 _MODE_SIGNS = {  # name: (fx, fy, tz, fz, tx, ty)
     "lf": (+1, -1, -1, +1, +1, -1),
     "lb": (+1, +1, -1, +1, +1, +1),
@@ -52,22 +30,18 @@ _MODE_SIGNS = {  # name: (fx, fy, tz, fz, tx, ty)
 }
 MODE_DIM = 6
 MODE_NAMES = ("fx", "fy", "fz", "tx", "ty", "tz")
-# Below this fraction of f_max a unit's force direction is numerically meaningless (atan2 at
-# zero), so it holds its previous servo angle and zeroes the esc. Part of the DEPLOY contract
-# (tools/export_policy.py reads it from here) — the deployed mixer must use the same value.
+# Part of the DEPLOY contract (tools/export_policy.py reads it from here): the deployed mixer
+# must use the same value.
 DEADBAND_FRAC = 0.02
 
 
 class ModeMixer:
     """modes[6] + max_duty + previous servo command -> action [servo x4, esc x4].
 
-    NOTE on rate limiting (2026-08-26, null diagnosis): temporal smoothing of the command
-    belongs on the MODE vector (in the env / deploy wrapper), never on this mixer's
-    servo/esc output. The null-free commands form a LINEAR subspace of the per-unit (h, v)
-    force space, and the mode coordinates are linear coordinates of it — a slewed mode
-    vector stays null-free at every intermediate step. Slewing the folded (servo, esc)
-    output instead interpolates OUTSIDE the subspace and was measured to RAISE the realized
-    null share (smoke 19.7% vs ~14% baseline) while freezing the servos.
+    Rate-limit the MODE vector (in the env / deploy wrapper), never this mixer's servo/esc
+    output: the null-free commands are a linear subspace and the modes are linear coordinates
+    of it, so a slewed mode vector stays null-free, while slewing the folded output
+    interpolates outside the subspace and raises the realized null share.
     """
 
     def __init__(self, unit_names, thrust_axes, unit_pivots, servo_range_rad, thrust_per_cmd,
@@ -83,19 +57,15 @@ class ModeMixer:
         self.thrust_per_cmd = float(thrust_per_cmd)
         self.thrust_curve_exp = float(thrust_curve_exp)
         self.deadband_frac = float(deadband_frac)
-        # Geometry consistency: guard a config edit silently breaking the hardcoded table.
-        # BOTH groups are checked, because a wrong sign here is silent — it does not crash, it
-        # just makes a "pure roll" command produce something else (the earlier feed_forward port
-        # turned pure pitch into the zero-wrench null mode exactly this way, autonomy A-12).
+        # Re-derive the table from the config geometry: a wrong sign never crashes, it just makes
+        # "pure roll" produce something else, so BOTH groups must be checked here.
         # Horizontal (fx, fy): against the configured tangent directions.
         ax = np.asarray(thrust_axes, dtype=float)
         if not (np.all(np.sign(ax[:, 0]) == self._Sh[:, 0])
                 and np.all(-np.sign(ax[:, 2]) == self._Sh[:, 1])
                 and np.allclose(ax[:, 1], 0.0, atol=1e-6)):
             raise ValueError("thrust_axes do not match the mode sign table (geometry changed?)")
-        # Vertical (fz, tx, ty): against the mounting-pivot square. All units push up together
-        # (fz), roll is port-minus-starboard (REP-103 +y = left = CAD -z), and REP-103 +pitch
-        # about +y is nose-DOWN, so ty = -(front - back) with CAD +x forward.
+        # Vertical (fz, tx, ty): against the mounting-pivot square, in CAD axes (+x fwd, -z port).
         pv = np.asarray(unit_pivots, dtype=float)
         if pv.shape != (4, 3):
             raise ValueError(f"unit_pivots must be (4, 3) in action order, got {pv.shape}")
@@ -109,10 +79,8 @@ class ModeMixer:
     def mix(self, modes, max_duty, prev_servo_cmd):
         """Return action[8] = [servo x4, esc x4], each channel in [-1, 1].
 
-        modes:          array-like (6,) in [-1, 1] — [fx, fy, fz, tx, ty, tz]
-        max_duty:       the plant's CURRENT esc cap (the same value the policy observes)
-        prev_servo_cmd: (4,) previous mixed servo command; held when a unit's force is in
-                        the deadband (atan2 undefined at zero — avoids servo flapping)
+        max_duty is the plant's CURRENT esc cap (the value the policy observes); a unit whose
+        force falls in the deadband holds prev_servo_cmd[i] (atan2 is undefined at zero).
         """
         m = np.clip(np.asarray(modes, dtype=float).reshape(MODE_DIM), -1.0, 1.0)
         f_max = self.thrust_per_cmd * float(max_duty) ** self.thrust_curve_exp

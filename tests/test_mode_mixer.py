@@ -52,12 +52,8 @@ def test_mode_basis_is_orthogonal_and_null_free():
 
 
 def test_geometry_guard_rejects_a_layout_the_sign_table_no_longer_describes():
-    """The sign table is hardcoded, so a config geometry edit must fail LOUDLY.
-
-    A wrong vertical sign is otherwise silent: nothing crashes, "pure roll" just stops being
-    roll (the feed_forward port turned pure pitch into the zero-wrench null mode exactly this
-    way — autonomy known_issues A-12). Both groups are guarded, so check both.
-    """
+    """A config geometry edit must fail LOUDLY: a wrong sign never crashes, "pure roll" just
+    stops being roll. Both sign groups are guarded, so check both."""
     sim = UmiusiSimulator()
     # Port/starboard swapped (roll column no longer matches the pivots) -> vertical guard.
     swapped = sim.unit_pivots.copy()
