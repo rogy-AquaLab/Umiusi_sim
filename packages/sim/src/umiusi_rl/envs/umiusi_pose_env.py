@@ -19,23 +19,19 @@ sensor set simply leaves part of the task unobservable:
                             command is horizontal by default, or 3-D when vel_cmd_horizontal=false
                             (needed to reach different depths). obs_mode "imu".
 
-Observation = exteroceptive (sensor-suite dependent) ++ proprioception (proprio_mode):
-    proprio_mode "full"    servo/range (4) + thrust/thrust_per_cmd (4) + prev action (8) = 16
-    proprio_mode "action"  prev action (8) only — the sim2real-safe suite: the real vehicle
-                           cannot measure servo angle or (reliably) rpm, so nothing else is fed
-                           back (issue #3, item 4). Dims below are for proprio_mode "full";
-                           subtract 8 for "action". attitude_velocity adds v_cmd (3) to either.
+Observation LAYOUT is a deploy contract — the robot's loader unpacks by position, so the order
+here is fixed (widths are computed from the tables below; don't restate them):
+    exteroceptive, per obs_mode
+        "full"          pos_err(3) + ori_err(3) + lin_vel(3) + ang_vel(3)
+        "imu"           ori_err(3) + ang_vel(3)
+        "imu_depth"     ori_err(3) + ang_vel(3) + depth_err(1)
+        "imu_depth_dvl" ori_err(3) + ang_vel(3) + depth_err(1) + lin_vel(3)
+    ++ v_cmd(3) for attitude_velocity, ++ proprioception, ++ max_duty(1) if observe_max_duty
+    (appended LAST so existing layouts stay a prefix).
 
-    obs_mode "full"          pos_err(3) + ori_err(3) + lin_vel(3) + ang_vel(3)      -> 28
-    obs_mode "imu"           ori_err(3) + ang_vel(3)                                -> 22
-    obs_mode "imu_depth"     ori_err(3) + ang_vel(3) + depth_err(1)                 -> 23
-    obs_mode "imu_depth_dvl" ori_err(3) + ang_vel(3) + depth_err(1) + lin_vel(3)    -> 26
-
-ori_err is the rotation-vector error to the (task-dependent) TARGET orientation, which an
-AHRS supplies (absolute attitude incl. magnetometer heading). Horizontal position (X, Z) is
-only in "full" — with imu/imu_depth/imu_depth_dvl it is unobservable (no GPS underwater), so
-imu* modes cannot do absolute horizontal station-keeping (imu_depth_dvl can still reject
-drift via velocity). See the project README (sensor / observability notes).
+ori_err is the rotation-vector error to the target orientation (an AHRS supplies absolute
+attitude incl. magnetometer heading). Horizontal position is observable only in "full" — there
+is no GPS underwater, so imu* modes cannot hold absolute horizontal station.
 """
 
 from pathlib import Path
@@ -53,15 +49,13 @@ from umiusi_rl.envs.mode_mixer import MODE_DIM, ModeMixer
 _ROOT = Path(__file__).resolve().parents[5]        # repo root (packages/sim/src/umiusi_rl/envs/..)
 
 ACT_DIM = 8
-# Open-loop terminal surge speed per unit of esc cap [m/s per max_duty], measured 2026-08-26
-# (servo 0, esc full: 0.171 m/s @ cap 0.25, 0.297 m/s @ cap 0.4). Used by vel_cmd_cap_frac to
-# keep velocity commands physically reachable; re-measure if thrust/drag calibration changes.
+# Open-loop terminal surge speed per unit of esc cap [m/s per max_duty]. Bounds the sampled
+# velocity command to something reachable; RE-MEASURE whenever thrust or drag is recalibrated.
 VEL_PER_CAP = 0.68
-# Proprioception width per proprio_mode (see below): "full" feeds back the sim's servo angle and
-# thrust state; "action" feeds back ONLY the previous action. The real vehicle cannot measure
-# servo angle (RC servos have no position feedback — the bag showed /state angle is an echo of
-# the command) and its rpm telemetry is partly dead, so "action" is the sim2real-safe suite
-# (issue #3, item 4): everything in it exists identically on the robot.
+# "full" feeds back the sim's servo angle and thrust state; "action" feeds back only the previous
+# action and is the sim2real-safe suite — the real vehicle cannot measure servo angle (RC servos
+# have no position feedback) and its rpm telemetry is partly dead, so do NOT add plant state to a
+# suite meant for deployment.
 _PROPRIO_DIM = {"full": 16, "action": 8}
 # Exteroceptive (navigation-sensor) dimensions per observation mode.
 _EXTERO_DIM = {"full": 12, "imu": 6, "imu_depth": 7, "imu_depth_dvl": 10}
@@ -69,25 +63,20 @@ _EXTERO_DIM = {"full": 12, "imu": 6, "imu_depth": 7, "imu_depth_dvl": 10}
 _DEFAULT_OBS = {"pose": "full", "attitude": "imu", "attitude_depth": "imu_depth",
                 "attitude_velocity": "imu"}
 _Y_UP = np.array([0.0, 1.0, 0.0])
-# Observation frame presets: rows = target-frame axes in sim/CAD coordinates. Every 3-vector in
-# the OBSERVATION (ori_err, angular velocity, lin_vel/pos_err, v_cmd) is expressed in this frame;
-# physics, reward and success stay in the sim frame. "rep103" (x fwd, y left, z up — the ROS
-# convention the robot's IMU speaks) is the DEPLOYMENT CONTRACT: a policy trained with it consumes
-# the robot's IMU data with no hand-written axis shuffling (the missing remap scrambled pitch/yaw
-# on the 2026-08-21 pool test — sim2real issue #3). Default "sim" keeps every existing run valid;
-# tools/convert_policy_frame.py converts trained policies between frames exactly.
+# Rows = target-frame axes in sim/CAD coordinates. Applies to every 3-vector in the OBSERVATION
+# only; physics, reward and success stay in the sim frame. "rep103" (x fwd, y left, z up) is the
+# DEPLOYMENT CONTRACT — a policy trained in it consumes the robot's IMU with no axis shuffling.
+# Default "sim" keeps existing runs valid; tools/convert_policy_frame.py converts exactly.
 _OBS_FRAMES = {
     "sim": np.eye(3),
     "rep103": np.array([[1.0, 0.0, 0.0], [0.0, 0.0, -1.0], [0.0, 1.0, 0.0]]),
     "ned": np.array([[1.0, 0.0, 0.0], [0.0, 0.0, 1.0], [0.0, -1.0, 0.0]]),
 }
-# Vertical-thrust mode decomposition over the 4 thruster positions (the pivots form a square, so
-# these four vectors are exactly orthogonal): heave (+ + + +), roll = left - right, pitch = front -
-# back, and the NULL mode (+ - + -), which produces no net force and no moment — pure waste (heat /
-# battery / servo wear). The 8/25 underwater run put 41.2 % of the vertical power into the null
-# mode (Umiusi_sim#3); the reward names and penalizes it directly, because a magnitude-only effort
-# term cannot see it (a null command has the same action-space norm as a useful one).
-# Signs per unit name: (roll, pitch, null); heave is all +1.
+# Vertical-thrust mode decomposition over the 4 pivots (a square, so the four vectors are exactly
+# orthogonal): heave (+ + + +), roll = left - right, pitch = front - back, and the NULL mode
+# (+ - + -), which makes no net force and no moment — pure waste. The null term must be named
+# explicitly: a magnitude-only effort penalty cannot see it, since a null command has the same
+# action-space norm as a useful one. Signs per unit: (roll, pitch, null); heave is all +1.
 _VERT_MODE_SIGNS = {"lf": (1, 1, 1), "lb": (1, -1, -1), "rb": (-1, -1, 1), "rf": (-1, 1, -1)}
 
 
@@ -130,27 +119,20 @@ class UmiusiPoseEnv(gym.Env):
         self.tilt_target_deg = float(e.get("tilt_target_deg", 45.0))
         self.yaw_target_deg = float(e.get("yaw_target_deg", 180.0))
         self.vel_cmd_max = float(e.get("vel_cmd_max", 0.4))  # max commanded speed [m/s] (attitude_velocity)
-        # Cap-aware command ceiling (0 = off): sample |v_cmd| <= vel_cmd_cap_frac * (VEL_PER_CAP *
-        # max_duty), the episode's PHYSICALLY REACHABLE speed. Open-loop full surge tops out at
-        # ~0.171 m/s (cap 0.25) / 0.297 m/s (cap 0.4) — roughly linear in cap (F ~ cap^2, drag ~ v^2)
-        # — so commands beyond it (the old flat U(0, 0.4)) are unsatisfiable and cruise never forms.
+        # Cap-aware ceiling (0 = off): |v_cmd| <= frac * VEL_PER_CAP * max_duty, the episode's
+        # physically reachable speed. Commands above it are unsatisfiable by any policy.
         self.vel_cmd_cap_frac = float(e.get("vel_cmd_cap_frac", 0.0))
-        # P(high-speed episode): command U(0.9, 1.0) * the sampled ceiling instead of U(0, hi),
-        # so near-top-speed cruise is actually in the training distribution (the flat U(0, hi)
-        # mean is ~hi/2 and top-speed tracking would stay untrained/unmeasured).
+        # P(high-speed episode): U(0.9, 1.0) * ceiling instead of U(0, ceiling), so near-top-speed
+        # cruise is in the training distribution at all (a flat draw averages half the ceiling).
         self.vel_cmd_hi_prob = float(e.get("vel_cmd_hi_prob", 0.0))
         self.vel_cmd_horizontal = bool(e.get("vel_cmd_horizontal", True))  # sample v_cmd in the x-z plane
         self.vel_cmd_cone_deg = float(e.get("vel_cmd_cone_deg", 180.0))  # v_cmd dir within +/- this of +X (curriculum)
         self.vel_cmd_zero_prob = float(e.get("vel_cmd_zero_prob", 0.0))  # P(v_cmd == 0): hold-station episodes
-        # 3-D command shaping (vel_cmd_horizontal: false). The vehicle is effectively MULTIMODAL —
-        # "drone mode" (all thrusters tilted vertical) moves vertically far more easily than the
-        # tangential-thrust horizontal mode, and naive 3-D training collapses into the vertical
-        # basin, catastrophically forgetting horizontal cruise (av_cal2/3_3d lesson). Two guards:
-        #   vel_cmd_elev_deg        max |elevation| of the command [deg] — a CURRICULUM can ramp
-        #                           this from 0 (pure horizontal) upward via set_attr.
-        #   vel_cmd_horizontal_prob per-episode probability of forcing elevation = 0, keeping a
-        #                           FLOOR of pure-horizontal episodes so that skill never leaves
-        #                           the training distribution.
+        # 3-D command shaping (vel_cmd_horizontal: false). The vehicle is MULTIMODAL — vertical
+        # motion is far easier than tangential-thrust cruise — so naive 3-D training collapses into
+        # the vertical basin and forgets horizontal cruise. Do not remove either guard:
+        #   vel_cmd_elev_deg        max |elevation| [deg]; a curriculum ramps it up from 0.
+        #   vel_cmd_horizontal_prob P(force elevation = 0), a FLOOR of pure-horizontal episodes.
         self.vel_cmd_elev_deg = float(e.get("vel_cmd_elev_deg", 90.0))
         self.vel_cmd_horizontal_prob = float(e.get("vel_cmd_horizontal_prob", 0.0))
         self.vel_tol = float(e.get("vel_tol", 0.10))         # velocity match tolerance [m/s]
@@ -170,14 +152,12 @@ class UmiusiPoseEnv(gym.Env):
         self.obs_frame = obs_frame
         self._obs_P = _OBS_FRAMES[obs_frame]
         self.rw = cfg["reward"]
-        # --- economy shaping (Umiusi_sim#3: the deploy cap + null-mode waste) -------------------
-        # effort_exp > 0 switches the effort penalty from the legacy L2 norm to the POWER-dimension
-        # sum(|u_i|^exp): thrust ~ u^2 but electrical power ~ u^3 (propeller law), so exp = 3 makes
-        # the penalty proportional to the real cost (heat / battery). w_null names the vertical
-        # null mode (see _VERT_MODE_SIGNS) — pure waste a magnitude-only term cannot see.
-        # econ_ramp is a 0..1 multiplier on BOTH (curriculum: learn the task first, then economize —
-        # a strong effort penalty from step 0 collapses into the do-nothing local optimum, an
-        # att_v3-era lesson). Default 1.0 so eval and non-curriculum runs are unaffected.
+        # --- economy shaping ---------------------------------------------------------------------
+        # effort_exp > 0 uses the POWER-dimension sum(|u_i|^exp) instead of the L2 norm: thrust ~ u^2
+        # but electrical power ~ u^3, so exp = 3 tracks the real cost. econ_ramp is a 0..1 multiplier
+        # on the economy terms — any effort penalty applied from step 0 collapses into the
+        # do-nothing local optimum, so new penalties belong on the ramp too. Default 1.0 leaves
+        # eval and non-curriculum runs unaffected.
         self.effort_exp = float(self.rw.get("effort_exp", 0.0))   # 0 = legacy ||esc||_2
         self.w_null = float(self.rw.get("w_null", 0.0))
         self.econ_ramp = 1.0
@@ -190,11 +170,9 @@ class UmiusiPoseEnv(gym.Env):
                 [[1.0, *(float(s) for s in _VERT_MODE_SIGNS[n])] for n in names]).T / 2.0
         else:
             self._vert_modes = None
-        # Observe the plant's ESC cap (1 obs dim, appended LAST so existing layouts are a prefix):
-        # with max_duty domain-randomized but unobserved, the economical policy converges onto the
-        # lowest sampled cap and a field cap raise buys nothing; observing it makes the behaviour
-        # cap-conditional. The deploy node already owns a max_duty parameter, so feeding it into the
-        # obs adds no new cross-package dependency — only one more entry in the obs contract.
+        # Observe the plant's ESC cap (1 obs dim): with max_duty randomized but UNobserved, the
+        # economical policy converges onto the lowest sampled cap and raising the cap in the field
+        # buys nothing. The deploy node already owns a max_duty parameter to feed it.
         self.observe_max_duty = bool(e.get("observe_max_duty", False))
         self.dr = cfg.get("domain_rand", {"enabled": False})
         # sim2real: control->actuation delay (steps); only applied when domain_rand is enabled.
@@ -223,13 +201,9 @@ class UmiusiPoseEnv(gym.Env):
         obs_dim = (_EXTERO_DIM[self.obs_mode] + _PROPRIO_DIM[self.proprio_mode]
                    + (3 if self.task == "attitude_velocity" else 0)
                    + (1 if self.observe_max_duty else 0))
-        # Action parameterization (Umiusi_sim#3 null-space follow-up):
-        #   "esc"   (default) raw 8-D [servo x4, esc x4] — every existing run.
-        #   "modes" 6-D wrench modes [fx, fy, fz, tx, ty, tz] (REP-103 axes) expanded to the
-        #           8-D action by ModeMixer — the two null patterns are unrepresentable, so the
-        #           commanded null share is structurally ~0 instead of reward-shaped. Everything
-        #           downstream (latency buffer, DR perturbation, reward terms, prev_action and
-        #           thus the OBS CONTRACT) keeps seeing the mixed 8-D actuator command.
+        # "esc" = raw 8-D [servo x4, esc x4]; "modes" = 6-D wrench modes expanded by ModeMixer.
+        # Under "modes" everything downstream (latency buffer, DR, reward, prev_action and thus
+        # the OBS CONTRACT) still sees the mixed 8-D command — keep it that way.
         self.action_mode = e.get("action_mode", "esc")
         if self.action_mode not in ("esc", "modes"):
             raise ValueError(f"unknown action_mode {self.action_mode!r}; expected 'esc' or 'modes'")
@@ -239,22 +213,15 @@ class UmiusiPoseEnv(gym.Env):
             self._mixer = ModeMixer(self.sim.unit_names, self.sim.thrust_axes,
                                     self.sim.unit_pivots, self.sim.servo_range_rad,
                                     self.sim.thrust_per_cmd, self.sim.thrust_curve_exp)
-            # Mode-command slew (mode_slew_per_s, action units/s; 0 = off): rate-limits the
-            # 6-D MODE vector before mixing, so the realized wrench cannot change faster than
-            # this — the bang-bang fast-dither strategy (null diagnosis 2026-08-26: servo cmd
-            # jumps > 65 deg median, ~200 deg/s perpetual servo racing) is structurally
-            # unreachable. Slewing MUST happen in mode coordinates: they are linear coordinates
-            # of the null-free force subspace, so every intermediate command stays null-free
-            # (slewing the folded servo/esc instead RAISES realized null — see ModeMixer note).
+            # Mode-command slew [action units/s; 0 = off]: rate-limits the 6-D MODE vector before
+            # mixing, which makes the bang-bang dither strategy structurally unreachable. Slewing
+            # MUST happen here, in mode coordinates, and never on the mixer's folded output.
             slew = float(e.get("mode_slew_per_s", 0.0))
             dt = 1.0 / float(self.sim.cfg["sim"]["control_rate_hz"])
             self._mode_slew_step = slew * dt if slew > 0.0 else None
-            # mode_rate_action: the action IS the mode RATE (a in [-1,1] scales the slew step:
-            # m += a * step). Under the target+limiter form the policy learns to ride the
-            # limiter with saturated targets (av_mode3: 100 % of steps at full slew, |raw -
-            # applied| ~ 1.1, std blown up to 1.88 by ent_coef because raw noise became
-            # physically free). As a rate, a = 0 means HOLD, the raw signal is the physical
-            # quantity itself, and a rate penalty (w_mode_rate) finally has a real gradient.
+            # mode_rate_action: the action IS the mode RATE (m += a * step), so a = 0 means HOLD
+            # and w_mode_rate has a real gradient. Under the alternative target+limiter form the
+            # policy just rides the limiter with saturated targets and the penalty is toothless.
             self._mode_rate_action = bool(e.get("mode_rate_action", False))
             if self._mode_rate_action and self._mode_slew_step is None:
                 raise ValueError("mode_rate_action requires mode_slew_per_s > 0 (the rate scale)")
@@ -265,8 +232,8 @@ class UmiusiPoseEnv(gym.Env):
             self._mixer = None
         self._mode_prev_servo = np.zeros(4)
         self._mode_prev_modes = np.zeros(MODE_DIM)
-        # Adaptive constraint multipliers (name -> lambda, default 1.0), updated from outside
-        # by train.py's LagrangeCallback via venv.set_attr("lagrange", ...).
+        # Adaptive constraint multipliers (name -> lambda, default 1.0), set from outside by
+        # train.py's LagrangeCallback via env_method("apply_train_ctx", ...).
         self.lagrange = {}
         act_dim = MODE_DIM if self._mixer is not None else ACT_DIM
         self.action_space = spaces.Box(-1.0, 1.0, shape=(act_dim,), dtype=np.float32)
@@ -330,10 +297,8 @@ class UmiusiPoseEnv(gym.Env):
         am_frac = self.dr.get("added_mass_frac", 0.0)
         if am_frac > 0.0:
             self.sim.added_mass_diag = b["added_mass"] * (1.0 + u(-1, 1, size=6) * am_frac)
-        # The real servo rate is only estimated (datasheet 300-350 deg/s no-load, derated in
-        # water/under load) and the bag analysis showed the policy behaves well over 100-500 deg/s
-        # WHEN it has learned not to lean on one specific rate (issue #2, proposal C): sample the
-        # slew limit per episode so the policy works for whatever the true rate is.
+        # The real servo rate is only estimated, so sample the slew limit per episode: the policy
+        # must not lean on one specific rate.
         slew_range = self.dr.get("servo_slew_range_deg_s")
         if slew_range:
             self.sim.servo_slew_rad = np.radians(u(float(slew_range[0]), float(slew_range[1])))
@@ -443,12 +408,9 @@ class UmiusiPoseEnv(gym.Env):
     def apply_train_ctx(self, **kwargs):
         """Set training-context attributes from a VecEnv callback.
 
-        MUST be called via ``venv.env_method("apply_train_ctx", ...)`` — attribute LOOKUP
-        forwards through gymnasium wrappers (Monitor), so the method binds to this env.
-        Plain ``venv.set_attr`` does NOT forward: it sets the attribute on the Monitor
-        wrapper while the env keeps its own — the silent bug that disabled every curriculum
-        (econ_ramp, cap range, cone/yaw/tilt) and the Lagrange multipliers up to av_mode9
-        (discovered 2026-08-27: mode9 trained bit-identically to mode8).
+        MUST be called via ``venv.env_method("apply_train_ctx", ...)``. Do NOT use
+        ``venv.set_attr``: it does not forward through the Monitor wrapper, so it sets the
+        attribute on the wrapper while this env keeps its own — silently, with no error.
         """
         for k, v in kwargs.items():
             if not hasattr(self, k):
@@ -570,10 +532,9 @@ class UmiusiPoseEnv(gym.Env):
             effort = float(np.sum(np.abs(action[4:8]) ** self.effort_exp))
         else:
             effort = float(np.linalg.norm(action[4:8]))          # thrust magnitude (legacy)
-        # Vertical thrust mode decomposition (BODY frame — the allocation geometry lives there):
-        # null_n = null-mode amplitude in units of the per-thruster cap force, null_frac = the null
-        # share of vertical mode power (the 8/25 run: 41.2 %), roll_use = roll-mode amplitude over
-        # its cap-limited maximum (8/25: 19 % of authority used).
+        # Vertical thrust mode decomposition, in the BODY frame (the allocation geometry lives
+        # there). null_n = null amplitude in per-thruster cap forces, null_frac = null share of
+        # vertical mode power, roll_use = roll amplitude over its cap-limited maximum.
         null_n = null_frac = roll_use = vert_power = 0.0
         if self._vert_modes is not None:
             v_vert = state["thrust_world"] @ R[:, 1]             # body-frame vertical force per unit [N]
@@ -605,25 +566,21 @@ class UmiusiPoseEnv(gym.Env):
         reward -= rw.get("w_servo_rate", 0.0) * servo_rate      # penalize servo chatter (smooth steering)
         reward -= rw.get("w_thrust_rate", 0.0) * thrust_rate    # penalize thrust command changes
         reward -= rw.get("w_cmd_gap", 0.0) * cmd_gap            # penalize unreachable servo commands
-        # mode_rate_action: penalize rate USE (0 = hold). Rides econ_ramp — from step 0 it is
-        # exactly the "strong effort penalty -> do-nothing local optimum" trap (see w_effort note).
+        # Penalize rate USE (0 = hold); on econ_ramp, like every other effort term.
         reward -= self.econ_ramp * rw.get("w_mode_rate", 0.0) * mode_rate_mag
-        # Near the target attitude, damp actuation. HOLD task: press both servo AND thrust to a stop
-        # (kills limit cycles). CRUISE task: once the drift is small too (steadily on-course), damp the
-        # SERVO (steering) chatter — but NOT the thrust, which may still modulate to hold speed. This is
-        # the steady-cruise servo-settle that cuts the residual servo vibration.
+        # Near the target attitude, damp actuation. HOLD: stop servo AND thrust (kills limit
+        # cycles). CRUISE: damp the servo only — the thrust must stay free to hold speed.
         if ori_err < self.near_goal_ori:
             if not self.track_velocity:
                 reward -= rw.get("w_settle_servo", 0.0) * servo_rate
                 reward -= rw.get("w_settle_thrust", 0.0) * thrust_rate
             elif v_perp < self.vel_tol:
                 reward -= rw.get("w_settle_servo_cruise", 0.0) * servo_rate
-        # Deadband: no orientation reward gradient once inside ori_deadband, so the policy has no
-        # incentive to chatter for sub-deadband precision — it can settle and hold still.
+        # Deadband: no gradient inside ori_deadband, so the policy can settle instead of chattering
+        # for sub-deadband precision.
         ori_eff = max(0.0, ori_err - self.ori_deadband)
-        # self.lagrange: adaptive constraint multipliers (LagrangeCallback in train.py updates
-        # them toward explicit targets, e.g. "mean ori_err <= 0.2 rad" — replaces hand-tuning
-        # the attitude-vs-cruise balance). Default 1.0 = the static config weights.
+        # lagrange multipliers default to 1.0 = the static config weights (train.py adapts them
+        # toward explicit targets).
         reward -= self.lagrange.get("ori", 1.0) * rw["w_ori"] * ori_eff
         reward += rw.get("w_ori_bonus", 0.0) * prox(ori_eff, rw.get("ori_scale", 0.35))
         if self.track_position:
@@ -637,24 +594,18 @@ class UmiusiPoseEnv(gym.Env):
             reward -= rw.get("w_depth", 1.0) * abs(depth_err)
             reward += rw.get("w_depth_bonus", 0.0) * prox(abs(depth_err), rw.get("depth_scale", 0.25))
         if self.track_velocity:  # aim propulsion in the commanded DIRECTION (speed is not observable)
-            # w_vel_dir_ratio > 0 switches the cruise reward to TRACKING-RATIO units
-            # (full reward at v_along == commanded, independent of |v_cmd|): with cap-aware
-            # commands the absolute form w_vel_dir * v scales down with the cap and drowns in
-            # the attitude terms — av_mode2 rationally abandoned cruising for that reason.
-            # The 0.05 m/s floor keeps near-zero commands from amplifying velocity noise.
+            # w_vel_dir_ratio > 0 puts the cruise reward in TRACKING-RATIO units (full reward at
+            # v_along == commanded, independent of |v_cmd|). The absolute form below scales down
+            # with the esc cap and drowns in the attitude terms, so cap-aware commands need this.
             wvr = rw.get("w_vel_dir_ratio", 0.0)
             if wvr > 0.0:
-                # TRACK the commanded speed, don't just reach it (av_mode5 cruised at 1.6x the
-                # command — the capped form min(v, vcn) gives overshoot for free, but FF
-                # deployment needs the commanded speed). The overshoot penalty must stay GENTLE:
-                # the av_mode6 1:1 ratio form blew up at small vcn (denominator 0.05 -> a 5 cm/s
-                # excess on a 6 cm/s command cost 3.3/step) and its gradient noise wrecked the
-                # shared trunk — attitude collapsed to 0.44-0.75 rad. Deadband 2 cm/s, slope
-                # 0.5, denominator floored at 0.10 m/s.
-                # SYMMETRIC tracking penalty (av_mode10 lesson: penalizing only overshoot left a
-                # monotonic but weak transfer curve, gain 0.5-0.6 — undershoot was free). |v - vcn|
-                # past a 2 cm/s deadband, clipped at 1.0 (bounded gradient), "track" multiplier
-                # adapted by the Lagrange callback toward mean <= track_target.
+                # TRACK the command, don't just reach it: the capped form min(v, vcn) gives
+                # overshoot away for free, but a feedforward deployment needs the commanded speed.
+                # Three properties this term must keep, each of which cost a run to learn:
+                #   symmetric  — penalize undershoot too, or the transfer curve stays weak;
+                #   deadbanded and CLIPPED at 1.0 — bounded gradient, or the noise wrecks the
+                #                shared trunk and attitude collapses with it;
+                #   denominator floored — else a few cm/s error on a tiny command dominates.
                 den = max(vcn, 0.10)
                 vel_track = min(1.0, max(0.0, abs(v_along - vcn) - 0.02) / den)
                 reward += wvr * (min(max(v_along, 0.0), vcn) / den
