@@ -229,7 +229,8 @@ vs balloon), and prints a pop timeline + final score (typically 80). The world i
 `mujoco.MjSpec` and does **not** touch the base model, so `validate_sim` stays green. Perception + a
 behavior FSM replace the ground-truth driver in the next phase.
 > The feed-forward allocation's axes don't line up 1:1 with the sim (empirically `Vx→−X`, `Vz→+Y`,
-> `Vy→yaw couple`) — documented in `control.py`; reconcile before driving the sim from real `ros2_control`.
+> `Vy→+Z sway`; the old "Vy→yaw couple" note was a symptom of a starboard row-swap port bug, fixed
+> 2026-08-26) — documented in `control.py`; reconcile before driving the sim from real `ros2_control`.
 
 **Perception-in-the-loop autonomy** (vision replaces the ground-truth driver, still no RL) — the robot
 detects balloons from its OWN underwater-degraded `front_cam` with the learned detector, and a
@@ -314,6 +315,48 @@ z up, **the deployment contract**), or `ned`. Train in any frame, then hand the 
 `tools/convert_policy_frame.py` converts a trained policy exactly (no retraining — a signed permutation
 of the input weights + VecNormalize stats), and `tools/preflight_policy.py` generates/verifies
 `golden.npz` so a loaded-on-the-robot policy is provably the one the sim validated.
+
+**Action contract (`env.action_mode`, `--action-mode`).** `esc` (default) is the raw 8-D
+`[servo x4, esc x4]`. **`modes`** instead has the policy command 6 **wrench modes**
+`[fx, fy, fz, tx, ty, tz]` (REP-103 body axes), expanded to the 8-D actuator command by
+[`ModeMixer`](packages/sim/src/umiusi_rl/envs/mode_mixer.py). The two do-nothing null patterns are
+not in the basis, so the commanded null share is structurally ~0 instead of reward-shaped (the real
+8/25 run wasted 41 % of vertical power there). Two env keys shape it: `mode_slew_per_s` rate-limits
+the mode vector (slewing must happen in *mode* coordinates — slewing the folded servo/esc output
+raises the realized null), and `mode_rate_action: true` makes the action the mode **rate**
+(`a = 0` means hold), which removes the limiter-riding pathology of the target form. `w_mode_rate`
+penalizes rate use. Everything downstream — latency buffer, DR, reward terms, `prev_action` and thus
+the obs contract — still sees the mixed 8-D command. `--obs-frame` likewise overrides `env.obs_frame`
+so a policy can train natively in the deploy frame. `export_policy.py` writes the three deploy stages
+(integrate → mix → fold) and the plant constants into `meta.json` as `action_contract`; **the deploy
+node must reproduce them exactly**, or the robot runs a different plant than the trained one.
+
+**Adaptive constraints (`lagrange:` in the training config).** Instead of hand-tuning the
+attitude-vs-cruise penalty balance, set explicit targets (`ori_target` on steady-state `ori_err`,
+`track_target` on the symmetric speed-tracking ratio) and `LagrangeCallback` scales the matching
+reward multipliers toward them. The signals are measured on a periodic **deterministic probe** under
+acceptance-eval conditions (greedy, no DR/disturbance) — training rollouts proved an unreliable proxy
+in both directions. `lambda_max` is per-constraint and is a design choice, not a safety knob.
+
+**Cap-aware velocity commands.** `vel_cmd_cap_frac` caps the sampled speed command at the episode's
+*physically reachable* speed (`VEL_PER_CAP * max_duty`; open-loop surge tops out near 0.68·cap), and
+`vel_cmd_hi_prob` puts near-top-speed episodes in the distribution. `w_vel_dir_ratio` switches the
+cruise reward to tracking-ratio units so it does not scale away with the cap. `eval` correspondingly
+reports **cruise vs reachable** and the **power-weighted** null share (the acceptance metrics), plus
+`--vecnormalize` to evaluate a mid-run checkpoint with its matching stats.
+
+**Policy tooling** (repo root `tools/`, full workspace env):
+
+| tool | what it does |
+| --- | --- |
+| `preflight_policy.py` | generate / verify `golden.npz` — a loaded policy is provably the validated one |
+| `export_policy.py` | write the deploy bundle (weights, obs norm, `meta.json` incl. `action_contract`) |
+| `capsize_gate.py` | roll-deviation / capsize gate under DR + disturbance, per esc cap |
+| `attitude_speed_tradeoff.py` | is the attitude-vs-cruise seesaw physics or optimization? (speed at held attitudes) |
+| `ff_transfer.py` | commanded-vs-realized speed transfer curve (cruise gain, monotonicity) |
+| `compare_policies_video.py` | side-by-side video with a thruster instrument panel (null-mode share) |
+| `candidate_report.sh` | run the full acceptance battery on a candidate run |
+| `python -m umiusi_rl.distill` | BC warm start: project an `esc` teacher onto the mode basis |
 
 **Sensor note:** underwater there is no GPS, so horizontal position (X, Z) is only observable in `full`.
 A 9-DOF AHRS (BNO055) gives absolute orientation incl. magnetometer heading (cheap → attitude tasks are

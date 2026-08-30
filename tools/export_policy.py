@@ -16,12 +16,15 @@ import numpy as np
 import torch
 import yaml
 from stable_baselines3 import PPO
+
+from umiusi_rl.envs.mode_mixer import DEADBAND_FRAC, MODE_NAMES, _MODE_SIGNS
 from stable_baselines3.common.vec_env import DummyVecEnv, VecNormalize
 import gymnasium as gym
 from gymnasium import spaces
 
 # 実機側で動く推論実装は sinsei_UMIUSI_autonomy/tools/policy_infer.py に一本化してある
 # (重複を避けるため、ここでは検証時にそこから import する)。
+_ROOT = Path(__file__).resolve().parents[1]          # umiusi_sim repo root (config paths)
 AUTONOMY = Path("../ros2_ws/src/sinsei_UMIUSI_autonomy").resolve()
 # POL = 書き出す対象バンドル。argv[1] で上書きできる (既定は最初に書き出した cruise_policy)。
 POL = Path(sys.argv[1]).resolve() if len(sys.argv) > 1 else AUTONOMY / "umiusi_rl_control/models/cruise_policy"
@@ -63,6 +66,46 @@ def obs_fields(bundle_dir, obs_dim):
     return fields
 
 
+def action_contract(tm, env, sim_cfg):
+    """Deploy-side contract for a wrench-mode policy (action_mode: modes).
+
+    A modes policy does NOT output [servo x4, esc x4]: it outputs 6 wrench-mode RATES, and the
+    deploy node must reproduce the same three stages the sim ran, in order, or the robot gets a
+    different plant than the one that was trained (the A-11 failure mode). The policy rides the
+    slew limiter (measured: 100 % of steps), so none of this is optional.
+
+    The plant constants are READ FROM THE SIM CONFIG this run trained against, never hardcoded:
+    thrust_per_cmd is explicitly UNMEASURED (configs/umiusi.yaml — bench calibration pending), so
+    a literal here would silently ship a stale contract the first time it is retuned, and the
+    deployed plant would diverge from the trained one — the A-11 failure this contract prevents.
+    """
+    if tm.get("action_mode") != "modes":
+        return None
+    thr = sim_cfg["thrusters"]
+    return {
+        "action_mode": "modes",
+        "mode_names": list(MODE_NAMES),
+        "note": "action = mode RATES in [-1,1] (REP-103 body wrench), NOT servo/esc",
+        "stages": [
+            {"1_integrate": "m += a * mode_slew_per_s * dt, clipped to [-1, 1]; m persists "
+                            "across steps and resets to 0 on disarm"},
+            {"2_mix": "per unit: h = Sh @ (m.fx, m.fy, m.tz) * f_max, v = Sv @ (m.fz, m.tx, m.ty) "
+                      "* f_max, with f_max = thrust_per_cmd * max_duty**thrust_curve_exp"},
+            {"3_fold": "servo = atan2(v, h) folded into +/-90 deg by reversing the esc sign; "
+                       "esc = sign * (min(|f|, f_max)/thrust_per_cmd)**(1/thrust_curve_exp); "
+                       "a unit inside the deadband holds its previous servo angle and zeroes esc"},
+        ],
+        "mode_signs": {n: list(s) for n, s in _MODE_SIGNS.items()},
+        "mode_sign_columns": ["fx", "fy", "tz", "fz", "tx", "ty"],
+        "mode_slew_per_s": float(env.get("mode_slew_per_s", 0.0)),
+        "deadband_frac": float(DEADBAND_FRAC),
+        "thrust_per_cmd": float(thr["thrust_per_cmd"]),
+        "thrust_curve_exp": float(thr.get("thrust_curve_exp", 1.0)),
+        "servo_range_deg": float(max(abs(v) for v in thr["servo_range_deg"])),
+        "control_rate_hz": float(sim_cfg["sim"]["control_rate_hz"]),
+    }
+
+
 def stub():
     class S(gym.Env):
         def __init__(self):
@@ -79,6 +122,8 @@ def main():
     pol = model.policy
     # 実際の観測次元はモデルが知っている (proprio_mode "action" なら 17)。
     OBS_DIM = int(np.prod(model.observation_space.shape))
+    global ACT_DIM
+    ACT_DIM = int(np.prod(model.action_space.shape))   # 6 for action_mode "modes", 8 for "esc"
 
     # --- 重み: 素の tensor だけの state_dict にする ---
     sd = {k: v.detach().cpu().clone() for k, v in pol.state_dict().items()}
@@ -104,9 +149,22 @@ def main():
     # (rep103 以外/欠落は起動拒否 — 2026-08-21 の軸取り違えの再発防止ゲート)。
     train_meta_p = POL / "meta.yaml"
     tm = yaml.safe_load(train_meta_p.read_text()) if train_meta_p.exists() else {}
-    for k in ("obs_frame", "task", "obs_mode", "proprio_mode"):
+    for k in ("obs_frame", "task", "obs_mode", "proprio_mode", "action_mode"):
         if tm.get(k) is not None:
             meta[k] = tm[k]
+    # The env block and the plant constants live in the TRAINING config / the sim config it
+    # points at, not the run meta: resolve both so the contract carries the values this run
+    # actually trained with (never literals — see action_contract).
+    if tm.get("action_mode") == "modes":
+        train_cfg = yaml.safe_load((_ROOT / tm.get("config", "configs/train_ppo.yaml")).read_text())
+        sim_cfg_p = Path(train_cfg.get("sim_config", "configs/umiusi.yaml"))
+        sim_cfg_p = sim_cfg_p if sim_cfg_p.is_absolute() else _ROOT / sim_cfg_p
+        contract = action_contract(tm, train_cfg.get("env", {}), yaml.safe_load(sim_cfg_p.read_text()))
+        if contract is not None:
+            if not contract["mode_slew_per_s"]:
+                raise SystemExit("action_mode=modes but mode_slew_per_s is 0 in the training config "
+                                 "— the deploy contract would be incomplete")
+            meta["action_contract"] = contract
     meta["source"] = POL.name
     fields = obs_fields(POL, OBS_DIM)
     if fields is not None:

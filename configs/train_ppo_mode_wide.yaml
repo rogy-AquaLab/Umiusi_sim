@@ -1,9 +1,40 @@
+# WIDE-CAP variant of train_ppo_mode_ft.yaml — see max_duty_range below. Keep every other
+# value in sync with train_ppo_mode_ft.yaml.
+# FINE-TUNE variant of train_ppo.yaml for the wrench-mode (action_mode: modes) BC warm start
+# (Umiusi_sim#3, 2026-08-26). ONLY the transient-suppression weights differ from the base file:
+# realized null share is dominated by servo-lag transients (projected teacher: ~19% with commanded
+# null structurally zero), so the smoothness penalties are raised to attack the cause. Keep every
+# other value in sync with train_ppo.yaml when that file changes.
+#
 # Training / RL config for UmiusiPoseEnv (multi-task: attitude / attitude_depth / attitude_velocity / pose).
 # The task is selected with --task (default below). Reward/success always use the TRUE state; a limited
 # obs_mode just leaves part of the task unobservable. See the env docstring for the four tasks.
 # Consumed by umiusi_rl/train.py (PPO default; --algo sac/td3 to switch). Sim params: configs/umiusi.yaml.
 
 sim_config: configs/umiusi.yaml   # physical model params (resolved relative to repo root)
+
+# Adaptive constraint multipliers (train.py LagrangeCallback): each rollout the measured
+# constraint signals move the env's lagrange multipliers toward these TARGETS — replaces
+# hand-tuning the attitude-vs-cruise penalty balance (av_mode4..8 seesaw). The targets are
+# the acceptance criteria themselves.
+lagrange:
+  enabled: true
+  eta: 0.05                       # multiplier learning rate (small -> no oscillation)
+  # Per-constraint ceilings (evidence, av_mode10 vs 12): attitude NEEDS a high ceiling — mode10's
+  # lambda_ori rose to 8 during the formative phase then decayed to 3.4 once satisfied, giving the
+  # best attitude of any run; mode12 capped everything at 2.0, tracking became excellent but
+  # attitude regressed to 0.36 rad. Tracking keeps the low ceiling: its term carries w_vel_dir_ratio
+  # 4.0, and at lambda 8 it swamped the task reward outright (mode11: reward -8680).
+  lambda_max:
+    ori: 8.0
+    track: 2.0
+  ori_target: 0.20                # mean per-step ori_err [rad] (success tolerance)
+  track_target: 0.25              # mean clipped |v-vcn| ratio, SYMMETRIC, in DETERMINISTIC-PROBE units
+                                  # (av_mode14+: the multipliers are driven by a greedy eval-condition
+                                  # probe, not by noisy training rollouts). Proven reachable: av_mode12's
+                                  # greedy policy tracked to 0.09; mode10/13 sat at 0.64-0.67.
+  probe_every: 10                 # rollouts between deterministic probes (10 x 16384 steps ~ 1% overhead)
+  probe_episodes: 4               # 2 was too noisy (track read 0.24 vs 0.67 on different seeds)
 
 env:
   # Task (choose with --task): what target the agent must reach and hold.
@@ -29,6 +60,26 @@ env:
   vel_cmd_horizontal_prob: 0.35   # 3-D only: floor of pure-horizontal episodes (multimodality guard —
                                   # the drone-mode vertical basin otherwise swallows horizontal cruise)
   vel_cmd_cone_deg: 180.0         # v_cmd direction within +/- this of +X (0 = fixed +X; curriculum widens it)
+  vel_cmd_cap_frac: 0.8           # sample |v_cmd| <= this * (0.68 * max_duty), the episode's physically
+                                  # reachable speed (open-loop ceiling measured 2026-08-26: 0.171 m/s at cap
+                                  # 0.25). The base config's flat U(0, 0.4) commands speeds no policy can
+                                  # reach at low caps — cruise never forms chasing them (Umiusi_sim#3)
+  # Mode-command slew (modes action mode only; 0 = off). Null diagnosis (2026-08-26): the
+  # policy settled into a permanent bang-bang thrash (servo cmd jumps > 65 deg median, esc sign
+  # flips near-every step) whose byproduct is the ~14% realized null. Rate-limiting the 6-D MODE
+  # vector (action units/s; 2.0 = full -1..1 swing in 1 s, direction flips ~180 deg/s — inside
+  # the 250 deg/s servo slew) makes the fast-dither strategy structurally unreachable for a
+  # scratch policy, while every intermediate command stays in the null-free subspace (mode
+  # coords are linear; slewing the folded servo/esc instead RAISED null to 19.7% in the smoke).
+  mode_slew_per_s: 2.0            # deploy-side mixer must apply the same slew (meta.json contract)
+  # Rate-action form (av_mode4): the action IS the mode rate (m += a * slew_step). Under the
+  # target+limiter form the policy rode the limiter 100% of steps with saturated raw targets
+  # and ent_coef inflated std to 1.88 (raw noise had become physically free) — the raw signal
+  # stayed bang-bang. As a rate, a=0 is HOLD, exploration noise integrates into smooth wander,
+  # and w_mode_rate below has a real gradient. Deploy integrates identically (meta.json contract).
+  mode_rate_action: true
+  vel_cmd_hi_prob: 0.3            # 30% of episodes command 0.9-1.0x the reachable ceiling: train
+                                  # (and measure) top-speed cruise, not only the U(0, hi) mean ~hi/2
   vel_cmd_zero_prob: 0.15         # P(v_cmd = 0) per episode: explicit hold-station episodes so "don't move"
                                   # is well inside the training distribution (dry tests / narrow pools, issue #1)
   vel_tol: 0.10                   # velocity match tolerance [m/s] for success
@@ -103,12 +154,14 @@ reward:
                                   # 埋もれ、3M 継続でも null 比 21.8% -> 21.6% と donor の配分癖を
                                   # 崩せなかった。5.0 で ~1/step に引き上げる
   econ_ramp_frac: 0.3             # ramp w_effort + w_null 0 -> full over this fraction of training
-  w_servo_rate: 0.35              # -w_servo_rate * ||servo_angle - prev|| (servo vibration; raised from 0.25)
-  w_thrust_rate: 0.15             # -w_thrust_rate * ||esc - prev_esc||    (thrust change)
+  w_servo_rate: 0.90              # -w_servo_rate * ||servo_angle - prev|| (0.35 base -> 0.90: kill the
+                                  # servo-lag transients behind the realized null share)
+  w_thrust_rate: 0.30             # -w_thrust_rate * ||esc - prev_esc||    (0.15 base -> 0.30: esc reversals
+                                  # from the atan2 fold are the other transient-null source)
   w_action_rate: 0.10             # -w_action_rate * ||action - prev_action|| (raised from 0.02: the real bag
                                   # showed +/-1 sign-flapping commands every step; penalize the COMMAND, not
                                   # only the slew-smoothed servo, so the flapping is visible to learning)
-  w_cmd_gap: 0.10                 # -w_cmd_gap * ||servo_cmd - servo_actual|| [rad]: penalize commands the
+  w_cmd_gap: 0.30                 # -w_cmd_gap * ||servo_cmd - servo_actual|| [rad] (0.10 base): penalize commands the
                                   # servo cannot reach (issue #2: 100% duty, on-target 0.1% of the time).
                                   # With the converging servo model this pushes toward REACHABLE commands.
   # Extra penalties applied ONLY near the target (ori_err < near_goal_ori) to kill steady-state
@@ -118,13 +171,21 @@ reward:
   w_settle_servo_cruise: 0.60     # -this * ||Δservo|| when cruising steadily on-course (cuts servo chatter;
                                   # thrust is left free to modulate for speed). attitude_velocity only.
   # Dense "closeness" bonuses: + w_*_bonus * exp(-(err / *_scale)^2)  (smooth pull to the goal)
-  w_ori_bonus: 3.0
+  w_ori_bonus: 4.0                # 3.0 base -> 4.0: attitude is the weakest axis of the rate-action runs
+                                  # (0.29-0.38 rad vs tol 0.20; av_mode4's 0.15 not yet recovered)
   ori_scale: 0.35                 # rad
   w_pos_bonus: 3.0                # pose
   pos_scale: 0.50                 # m
   w_depth_bonus: 2.0              # attitude_depth
   depth_scale: 0.25               # m
   w_vel_dir: 10.0                 # + reward speed ALONG the commanded direction, capped at desired (attitude_velocity)
+  w_mode_rate: 0.2                # mode_rate_action: - this * mean|a| (rate USE; 0 = hold). Gives the raw
+                                  # signal its first real smoothness gradient — earlier servo/action-rate
+                                  # penalties all measured POST-slew values and were structurally toothless
+  w_vel_dir_ratio: 4.0            # > 0 replaces w_vel_dir with TRACKING-RATIO units: + this * v_along/v_cmd
+                                  # (capped at 1). Cap-aware commands shrank the absolute w_vel_dir term to
+                                  # ~0.7/step (vs ~3/step attitude bonus) and av_mode2 rationally abandoned
+                                  # cruising; ratio units keep the cruise incentive cap-independent
   w_vel_perp: 6.0                 # - penalize velocity PERPENDICULAR to the command (sideways drift; 4 -> 6
                                   # 2026-08-21: drift 0.24 m/s vs tol 0.10 was the main success blocker, and at
                                   # v_cmd = 0 this term IS the hold-station stillness penalty)
@@ -152,10 +213,17 @@ domain_rand:
                                   # bag-fitted (exp/max confounded below |u|=0.2) — bench test pins it
   buoyancy_offset_frac: 0.6       # CoB height *= 1 + U(-frac, frac): bag fit says 5-10 mm (was 50!)
   thrust_unit_frac: 0.10          # per-thruster thrust gain *= 1 + U(-frac, frac) (unit asymmetry)
-  max_duty_range: [0.2, 0.4]      # plant esc cap U(lo, hi) per episode: the operator raises the
-                                  # deploy clamp 0.25 -> 0.4 as trust builds; sampled (and observed,
-                                  # env.observe_max_duty) so ONE policy stays valid at any cap
-                                  # (upper bound 0.4 = post-allocation-fix ceiling, Umiusi_sim#3)
+  max_duty_range: [0.2, 1.0]      # WIDE cap range (2026-08-28): train the cap-conditioning over the
+                                  # full actuator range so raising the deploy clamp later needs no
+                                  # retraining. CAVEATS: (1) the thrust curve is calibrated only for
+                                  # |u| <= 0.2 (bag) and the 0825 yaw replay put the real vehicle at
+                                  # ~0.6x the model at duty 0.36 — everything above ~0.4 is sim
+                                  # extrapolation, so ACCEPTANCE is still judged at 0.2/0.25/0.4;
+                                  # (2) the deploy node clamps the observed cap to (0.2, 0.4)
+                                  # (rl_attitude_node MAX_DUTY_OBS_RANGE) — widen it there before the
+                                  # extra range is usable; (3) capsize comes faster at high cap (a
+                                  # full roll command flips the vehicle at every cap) — run the
+                                  # capsize gate eval before recommending a high cap on the robot.
   obs_noise: 0.005                # gaussian obs noise std (in obs units; ~0.3deg / 0.005 rad·s⁻¹ sensor noise)
   action_latency_steps: 1         # control->actuation delay [control steps] (~20 ms at 50 Hz)
 
@@ -185,6 +253,10 @@ ppo:
   n_epochs: 10
   gamma: 0.99
   gae_lambda: 0.95
-  ent_coef: 0.01                  # keep exploration up (helps discover the cruise thrust pattern)
+  ent_coef: 0.003                 # 0.01 -> 0.0 -> 0.003: 0.01 inflated std to 1.88 once the mode slew made
+                                  # raw noise physically free (binary-effective actions); 0.0 (av_mode4) found
+                                  # cruise at the curriculum's opening cap 0.4 (102%) but could not re-adapt
+                                  # when the cap range widened (26% at 0.25) — keep a SMALL bonus so the policy
+                                  # stays plastic across the cap range without the std blow-up
   learning_rate: 0.0003
   clip_range: 0.2

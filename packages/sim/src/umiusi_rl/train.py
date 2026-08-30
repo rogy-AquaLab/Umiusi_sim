@@ -14,9 +14,11 @@ Artifacts (all under the gitignored models/<run-name>/):
 """
 
 import argparse
+import copy
 import pickle
 from pathlib import Path
 
+import numpy as np
 import torch
 import yaml
 from stable_baselines3 import PPO, SAC, TD3
@@ -48,13 +50,13 @@ class CurriculumCallback(BaseCallback):
     def _on_step(self):
         p = min(1.0, self.num_timesteps / max(self.frac * self.total, 1.0))
         pct = int(p * 100)
-        if pct != self._last_pct:  # throttle the set_attr IPC to ~100 updates
+        if pct != self._last_pct:  # throttle the env_method IPC to ~100 updates
             self._last_pct = pct
-            self.training_env.set_attr("vel_cmd_cone_deg", p * self.cone_max)
-            self.training_env.set_attr("yaw_target_deg", p * self.yaw_max)
-            self.training_env.set_attr("tilt_target_deg", p * self.tilt_max)
+            self.training_env.env_method("apply_train_ctx", vel_cmd_cone_deg=p * self.cone_max,
+                                         yaw_target_deg=p * self.yaw_max,
+                                         tilt_target_deg=p * self.tilt_max)
             if self.elev_max > 0.0:
-                self.training_env.set_attr("vel_cmd_elev_deg", p * self.elev_max)
+                self.training_env.env_method("apply_train_ctx", vel_cmd_elev_deg=p * self.elev_max)
         return True
 
 
@@ -71,9 +73,9 @@ class EconRampCallback(BaseCallback):
     def _on_step(self):
         p = min(1.0, self.num_timesteps / max(self.frac * self.total, 1.0))
         pct = int(p * 100)
-        if pct != self._last_pct:  # throttle the set_attr IPC
+        if pct != self._last_pct:  # throttle the env_method IPC
             self._last_pct = pct
-            self.training_env.set_attr("econ_ramp", p)
+            self.training_env.env_method("apply_train_ctx", econ_ramp=p)
         return True
 
 
@@ -96,8 +98,120 @@ class CapRangeCurriculumCallback(BaseCallback):
         if pct != self._last_pct:
             self._last_pct = pct
             lo_now = self.hi - p * (self.hi - self.lo)
-            self.training_env.set_attr("dr", {**self.base_dr, "max_duty_range": [lo_now, self.hi]})
+            self.training_env.env_method("apply_train_ctx", dr={**self.base_dr, "max_duty_range": [lo_now, self.hi]})
         return True
+
+
+class LagrangeCallback(BaseCallback):
+    """Adaptive constraint multipliers (PID-Lagrangian, integral-only): replace hand-tuning of
+    the attitude-vs-cruise penalty balance with explicit TARGETS. Each rollout, measure the
+    constraint signals from step infos and scale the env's `lagrange` multipliers toward the
+    target: lambda <- clip(lambda * exp(eta * (measured - target) / target), 1/max, max).
+    A satisfied constraint decays its multiplier back toward the config's static weight (1.0
+    would freeze it); a violated one grows it. Small eta keeps the multipliers from oscillating.
+
+    Constraints (config `lagrange:` section), measured on the RELEVANT steps only:
+      ori:  mean STEADY-STATE ori_err [rad] (step_idx > settle_steps — the whole-episode mean
+            always includes the initial slew to a random target and can never satisfy a tight
+            target: av_mode9's multiplier pinned at the ceiling for exactly that reason)
+      track: mean vel_track (clipped |v - vcn| ratio, SYMMETRIC — av_mode10 showed penalizing
+            only overshoot leaves undershoot free: monotonic transfer but gain 0.5-0.6) on
+            steps WITH a velocity command (vcn > 0.02)
+
+    The signals are measured on a periodic DETERMINISTIC PROBE (greedy actions, DR and
+    disturbances off — the acceptance-eval conditions), not on the training rollouts. Training
+    rollouts proved an unreliable proxy in BOTH directions: exploration noise made av_mode12
+    read 0.62 while its greedy policy tracked to 0.09 (pessimistic -> multiplier pinned), and
+    made av_mode13's λ_track decay to its floor while the greedy policy tracked at 0.67
+    (optimistic -> constraint switched off on a policy that was violating it). The probe costs
+    ~1 % of wall clock (probe_episodes x horizon every probe_every rollouts).
+
+    NOTE the probe env is built from the config ONCE and is deliberately NOT synced with the
+    curriculum callbacks: it always poses the FINAL cone / tilt / yaw range, while the training
+    envs are still at fraction p. So early probes measure a harder task than the policy is being
+    trained on and the multipliers grow early. That is the intended behavior, not an oversight —
+    the targets are ACCEPTANCE-eval numbers, and av_mode10's attitude came precisely from
+    lambda_ori reaching its ceiling during the formative phase and decaying once satisfied. The
+    cost is that the "pinned at lambda_max" warning below can fire from curriculum lag rather
+    than an unreachable target; read it together with the probe values printed each cycle.
+
+    `lambda_max` may be a scalar or a per-constraint mapping. It is not a safety knob but a
+    DESIGN choice per constraint: av_mode10's attitude success came from lambda_ori reaching 8
+    during the formative phase (then decaying to 3.4 once satisfied); capping every multiplier
+    at 2.0 in av_mode12 removed that early pressure and attitude regressed to 0.36 rad even
+    though tracking became excellent.
+    """
+
+    def __init__(self, cfg, env_cfg):
+        super().__init__()
+        self.eta = float(cfg.get("eta", 0.05))
+        self.settle_steps = int(cfg.get("settle_steps", 150))
+        self.probe_every = int(cfg.get("probe_every", 10))      # rollouts between probes
+        self.probe_episodes = int(cfg.get("probe_episodes", 2))
+        self.targets = {"ori": float(cfg.get("ori_target", 0.20)),
+                        "track": float(cfg.get("track_target", 0.15))}
+        lmax = cfg.get("lambda_max", 8.0)
+        self.lmax = ({k: float(lmax.get(k, 8.0)) for k in self.targets}
+                     if isinstance(lmax, dict) else {k: float(lmax) for k in self.targets})
+        self.lam = {k: 1.0 for k in self.targets}
+        self._pinned = {k: 0 for k in self.targets}   # consecutive probes at the ceiling
+        self._rollouts = 0
+        self._probe_env = None
+        self._probe_cfg = copy.deepcopy(env_cfg)      # acceptance-eval conditions: no DR, no disturb
+        self._probe_cfg.setdefault("domain_rand", {})["enabled"] = False
+        self._probe_cfg.setdefault("disturbance", {})["enabled"] = False
+
+    def _probe(self):
+        """Greedy rollouts under eval conditions -> (mean steady ori_err, mean vel_track)."""
+        if self._probe_env is None:
+            self._probe_env = UmiusiPoseEnv(self._probe_cfg)
+        env = self._probe_env
+        vn = self.model.get_vec_normalize_env()
+        oris, tracks = [], []
+        for ep in range(self.probe_episodes):
+            obs, _ = env.reset(seed=90_000 + self._rollouts + ep)
+            done = False
+            while not done:
+                o = vn.normalize_obs(obs) if vn is not None else obs
+                action, _ = self.model.predict(o, deterministic=True)
+                obs, _r, term, trunc, info = env.step(action)
+                if info.get("step_idx", 0) > self.settle_steps:
+                    oris.append(float(info.get("ori_err", 0.0)))
+                if info.get("vel_cmd_speed", 0.0) > 0.02:
+                    tracks.append(float(info.get("vel_track", 0.0)))
+                done = term or trunc
+        return (float(np.mean(oris)) if oris else None,
+                float(np.mean(tracks)) if tracks else None)
+
+    def _on_step(self):
+        return True
+
+    def _on_rollout_end(self):
+        self._rollouts += 1
+        if self._rollouts % self.probe_every:
+            return
+        ori_m, track_m = self._probe()
+        for k, measured in (("ori", ori_m), ("track", track_m)):
+            if measured is None:
+                continue
+            tgt, lmax = self.targets[k], self.lmax[k]
+            self.lam[k] = float(np.clip(self.lam[k] * np.exp(self.eta * (measured - tgt) / tgt),
+                                        1.0 / lmax, lmax))
+            # An UNREACHABLE target pins the multiplier and its penalty swamps the task reward
+            # (av_mode11: track_target 0.15 -> lambda 8, reward -8680). Surface it early.
+            self._pinned[k] = self._pinned[k] + 1 if self.lam[k] >= lmax - 1e-6 else 0
+            if self._pinned[k] == 20:
+                print(f"[lagrange] WARNING: '{k}' pinned at lambda_max for 20 probes "
+                      f"(target {tgt} may be unreachable; measured {measured:.3f})")
+        self.training_env.env_method("apply_train_ctx", lagrange=dict(self.lam))
+        print("[lagrange] " + "  ".join(f"{k}={v:.2f}" for k, v in self.lam.items())
+              + f"  | probe ori={ori_m if ori_m is None else round(ori_m, 3)} "
+                f"track={track_m if track_m is None else round(track_m, 3)}")
+
+    def _on_training_end(self):
+        if self._probe_env is not None:   # release the probe's MuJoCo model with the run
+            self._probe_env.close()
+            self._probe_env = None
 
 
 def warm_start(model, init_path, venv):
@@ -185,6 +299,13 @@ def main():
                     help="ramp domain_rand.max_duty_range from [hi,hi] down to [lo,hi] over this "
                          "fraction of training (needs --domain-rand + max_duty_range): let cruise "
                          "form at the easy cap before exposing the barely-propelled low caps")
+    ap.add_argument("--action-mode", choices=["esc", "modes"], default=None,
+                    help="override env.action_mode: 'esc' = raw 8-D [servo x4, esc x4]; 'modes' = "
+                         "6-D wrench modes [fx, fy, fz, tx, ty, tz] expanded by ModeMixer (the "
+                         "null-space patterns are structurally unrepresentable — Umiusi_sim#3)")
+    ap.add_argument("--obs-frame", choices=["sim", "rep103", "ned"], default=None,
+                    help="override env.obs_frame (train natively in the deploy frame instead of "
+                         "converting afterwards with tools/convert_policy_frame.py)")
     ap.add_argument("--n-envs", type=int, default=None, help="override number of parallel envs")
     ap.add_argument("--seed", type=int, default=None)
     ap.add_argument("--run-name", default=None)
@@ -200,7 +321,7 @@ def main():
         donor_meta = (donor_meta if donor_meta.suffix != ".zip" else donor_meta.parent) / "meta.yaml"
         if donor_meta.exists():
             dm = yaml.safe_load(donor_meta.read_text())
-            for k in ("task", "obs_mode", "proprio_mode", "obs_frame"):
+            for k in ("task", "obs_mode", "proprio_mode", "obs_frame", "action_mode"):
                 if dm.get(k) is not None:
                     cfg["env"][k] = dm[k]
             print(f"[train] init-from contract: " +
@@ -210,6 +331,10 @@ def main():
     task = cfg["env"].get("task", "pose")
     if args.obs_mode:
         cfg["env"]["obs_mode"] = args.obs_mode
+    if args.action_mode:
+        cfg["env"]["action_mode"] = args.action_mode
+    if args.obs_frame:
+        cfg["env"]["obs_frame"] = args.obs_frame
     if args.disturb:
         cfg.setdefault("disturbance", {})["enabled"] = True
     if args.domain_rand:
@@ -251,7 +376,7 @@ def main():
     # Checkpoint ~10x over the run (save_freq is per-env steps).
     save_freq = max(total_timesteps // (10 * n_envs), 1)
     ckpt = CheckpointCallback(save_freq=save_freq, save_path=str(run_dir / "checkpoints"),
-                              name_prefix=algo)
+                              name_prefix=algo, save_vecnormalize=True)
     callbacks = [ckpt]
 
     # Curriculum (attitude_velocity): start fixed +X / level, widen to the config cone + yaw range.
@@ -267,10 +392,8 @@ def main():
         elev_max = 0.0
         if not bool(cfg["env"].get("vel_cmd_horizontal", True)):
             elev_max = float(cfg["env"].get("vel_cmd_elev_deg", 60.0))
-            venv.set_attr("vel_cmd_elev_deg", 0.0)
-        venv.set_attr("vel_cmd_cone_deg", 0.0)
-        venv.set_attr("yaw_target_deg", 0.0)
-        venv.set_attr("tilt_target_deg", 0.0)
+            venv.env_method("apply_train_ctx", vel_cmd_elev_deg=0.0)
+        venv.env_method("apply_train_ctx", vel_cmd_cone_deg=0.0, yaw_target_deg=0.0, tilt_target_deg=0.0)
         callbacks.append(CurriculumCallback(total_timesteps, cone_max, yaw_max, tilt_max, cfrac,
                                             elev_max=elev_max))
         print(f"[train] curriculum: cone/yaw/tilt/elev 0 -> {cone_max:.0f}/{yaw_max:.0f}/{tilt_max:.0f}"
@@ -280,29 +403,33 @@ def main():
     md_range = cfg.get("domain_rand", {}).get("max_duty_range")
     if args.cap_curriculum_frac > 0.0 and cfg.get("domain_rand", {}).get("enabled") and md_range:
         lo, hi = float(md_range[0]), float(md_range[1])
-        venv.set_attr("dr", {**cfg["domain_rand"], "max_duty_range": [hi, hi]})
+        venv.env_method("apply_train_ctx", dr={**cfg["domain_rand"], "max_duty_range": [hi, hi]})
         callbacks.append(CapRangeCurriculumCallback(total_timesteps, cfg["domain_rand"], lo, hi,
                                                     args.cap_curriculum_frac))
         print(f"[train] cap curriculum: max_duty_range [{hi},{hi}] -> [{lo},{hi}] "
               f"over {args.cap_curriculum_frac * 100:.0f}% of steps")
 
+    # Adaptive constraint multipliers (see LagrangeCallback): opt-in via config `lagrange.enabled`.
+    lag_cfg = cfg.get("lagrange", {})
+    if lag_cfg.get("enabled"):
+        callbacks.append(LagrangeCallback(lag_cfg, cfg))
+        print(f"[train] lagrange: ori<={lag_cfg.get('ori_target', 0.20)} rad, "
+              f"track<={lag_cfg.get('track_target', 0.15)}, eta={lag_cfg.get('eta', 0.05)}")
+
     # Economy-penalty curriculum: ramp w_effort + w_null in 0 -> full over econ_ramp_frac of steps.
     econ_frac = float(cfg["reward"].get("econ_ramp_frac", 0.0))
     if econ_frac > 0.0:
-        venv.set_attr("econ_ramp", 0.0)
+        venv.env_method("apply_train_ctx", econ_ramp=0.0)
         callbacks.append(EconRampCallback(total_timesteps, econ_frac))
         print(f"[train] econ curriculum: w_effort/w_null 0 -> full over {econ_frac * 100:.0f}% of steps")
 
-    print(f"[train] task={task} algo={algo} obs_mode={obs_mode} n_envs={n_envs} "
-          f"timesteps={total_timesteps} seed={seed} -> {run_dir}")
-    model.learn(total_timesteps=total_timesteps, callback=callbacks)
-
-    model.save(str(run_dir / "final"))
-    venv.save(str(run_dir / "vecnormalize.pkl"))  # obs/reward normalization stats for eval
+    # meta.yaml BEFORE learn(): everything in it is known upfront, and writing it now lets
+    # mid-run checkpoints be eval'd with the correct contract (action_mode/obs_frame/...).
     with open(run_dir / "meta.yaml", "w") as f:
         yaml.safe_dump({"algo": algo, "task": task, "obs_mode": obs_mode, "vecnormalize": True,
                         "proprio_mode": cfg["env"].get("proprio_mode"),
                         "obs_frame": cfg["env"].get("obs_frame"),
+                        "action_mode": cfg["env"].get("action_mode", "esc"),
                         "observe_max_duty": bool(cfg["env"].get("observe_max_duty", False)),
                         "init_from": args.init_from,
                         "vel_cmd_cone_deg": cfg["env"].get("vel_cmd_cone_deg"),
@@ -311,6 +438,12 @@ def main():
                         "disturbance": cfg.get("disturbance", {}).get("enabled", False),
                         "domain_rand": cfg.get("domain_rand", {}).get("enabled", False),
                         "config": args.config, "seed": seed, "total_timesteps": total_timesteps}, f)
+    print(f"[train] task={task} algo={algo} obs_mode={obs_mode} n_envs={n_envs} "
+          f"timesteps={total_timesteps} seed={seed} -> {run_dir}")
+    model.learn(total_timesteps=total_timesteps, callback=callbacks)
+
+    model.save(str(run_dir / "final"))
+    venv.save(str(run_dir / "vecnormalize.pkl"))  # obs/reward normalization stats for eval
     venv.close()
     print(f"[train] done. policy -> {run_dir / 'final.zip'}")
     print(f"[train] eval:  python -m umiusi_rl.eval --model {run_dir / 'final.zip'}")

@@ -129,7 +129,8 @@ FSM のカメラのみの pop 確認を可能にする。
 - `f = _ALLOC @ u` から各スラスタごとに: サーボ方位 `= atan(f_v / f_h)`（±90° にクランプ）; 大きさ
   `= hypot(f_h, f_v)`; 水平成分が後ろ向きを指すとき ESC 符号を反転; `thrust = ±mag/√2`。
 - **フレーム規約** (`:13`): sim 軸 ≠ コントローラ軸 — 経験的に `Vz → +Y (heave up)`,
-  `Vx → −X (surge, sign-flipped)`, `Vy → yaw couple`。呼び出し側はインテントを明示的にマッピングする:
+  `Vx → −X (surge, sign-flipped)`, `Vy → +Z sway`（旧記述の「yaw couple」は右舷 2 基の行が
+  入れ替わっていた移植バグの症状。2026-08-26 修正）。呼び出し側はインテントを明示的にマッピングする:
   `feedforward_allocation([0,0,yaw], [−surge, 0, heave])` (`autonomy_run.py:255`, `navigator_node.py:143`)。
   FF フレームの符号整合は追跡中の**ハードウェア立ち上げのフォローアップ**である (README)。
 

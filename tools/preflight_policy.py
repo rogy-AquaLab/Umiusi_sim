@@ -109,7 +109,10 @@ def generate(args):
         gold_obs.append(o)
         gold_act.append(a)
         names.append(name)
-        print(f"  {name:14s} servo {np.round(a[:4], 2)}  esc {np.round(a[4:], 2)}")
+        if len(a) == 6:   # action_mode "modes": the action is 6 wrench-mode RATES, not servo/esc
+            print(f"  {name:14s} mode rates [fx fy fz tx ty tz] {np.round(a, 2)}")
+        else:
+            print(f"  {name:14s} servo {np.round(a[:4], 2)}  esc {np.round(a[4:], 2)}")
         assert np.all(np.isfinite(a)), name
     sat = []
     for o in rand:
@@ -118,7 +121,8 @@ def generate(args):
         gold_act.append(a)
         names.append("random")
         sat.append(np.mean(np.abs(a) > 0.99))
-    print(f"  saturation over 64 random in-distribution obs: {np.mean(sat) * 100:.1f} %")
+    unit = ("rate-limit riding" if len(gold_act[0]) == 6 else "command saturation")
+    print(f"  {unit} over 64 random in-distribution obs: {np.mean(sat) * 100:.1f} %")
     np.savez(d / "golden.npz", obs=np.array(gold_obs), act=np.array(gold_act),
              names=np.array(names), obs_dim=dim)
     print(f"wrote {d / 'golden.npz'}  ({len(gold_obs)} vectors)")

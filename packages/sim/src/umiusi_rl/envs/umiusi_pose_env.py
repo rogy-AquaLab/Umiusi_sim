@@ -48,9 +48,15 @@ from gymnasium import spaces
 
 from umiusi_sim.simulator import UmiusiSimulator
 
+from umiusi_rl.envs.mode_mixer import MODE_DIM, ModeMixer
+
 _ROOT = Path(__file__).resolve().parents[5]        # repo root (packages/sim/src/umiusi_rl/envs/..)
 
 ACT_DIM = 8
+# Open-loop terminal surge speed per unit of esc cap [m/s per max_duty], measured 2026-08-26
+# (servo 0, esc full: 0.171 m/s @ cap 0.25, 0.297 m/s @ cap 0.4). Used by vel_cmd_cap_frac to
+# keep velocity commands physically reachable; re-measure if thrust/drag calibration changes.
+VEL_PER_CAP = 0.68
 # Proprioception width per proprio_mode (see below): "full" feeds back the sim's servo angle and
 # thrust state; "action" feeds back ONLY the previous action. The real vehicle cannot measure
 # servo angle (RC servos have no position feedback — the bag showed /state angle is an echo of
@@ -124,6 +130,15 @@ class UmiusiPoseEnv(gym.Env):
         self.tilt_target_deg = float(e.get("tilt_target_deg", 45.0))
         self.yaw_target_deg = float(e.get("yaw_target_deg", 180.0))
         self.vel_cmd_max = float(e.get("vel_cmd_max", 0.4))  # max commanded speed [m/s] (attitude_velocity)
+        # Cap-aware command ceiling (0 = off): sample |v_cmd| <= vel_cmd_cap_frac * (VEL_PER_CAP *
+        # max_duty), the episode's PHYSICALLY REACHABLE speed. Open-loop full surge tops out at
+        # ~0.171 m/s (cap 0.25) / 0.297 m/s (cap 0.4) — roughly linear in cap (F ~ cap^2, drag ~ v^2)
+        # — so commands beyond it (the old flat U(0, 0.4)) are unsatisfiable and cruise never forms.
+        self.vel_cmd_cap_frac = float(e.get("vel_cmd_cap_frac", 0.0))
+        # P(high-speed episode): command U(0.9, 1.0) * the sampled ceiling instead of U(0, hi),
+        # so near-top-speed cruise is actually in the training distribution (the flat U(0, hi)
+        # mean is ~hi/2 and top-speed tracking would stay untrained/unmeasured).
+        self.vel_cmd_hi_prob = float(e.get("vel_cmd_hi_prob", 0.0))
         self.vel_cmd_horizontal = bool(e.get("vel_cmd_horizontal", True))  # sample v_cmd in the x-z plane
         self.vel_cmd_cone_deg = float(e.get("vel_cmd_cone_deg", 180.0))  # v_cmd dir within +/- this of +X (curriculum)
         self.vel_cmd_zero_prob = float(e.get("vel_cmd_zero_prob", 0.0))  # P(v_cmd == 0): hold-station episodes
@@ -208,7 +223,53 @@ class UmiusiPoseEnv(gym.Env):
         obs_dim = (_EXTERO_DIM[self.obs_mode] + _PROPRIO_DIM[self.proprio_mode]
                    + (3 if self.task == "attitude_velocity" else 0)
                    + (1 if self.observe_max_duty else 0))
-        self.action_space = spaces.Box(-1.0, 1.0, shape=(ACT_DIM,), dtype=np.float32)
+        # Action parameterization (Umiusi_sim#3 null-space follow-up):
+        #   "esc"   (default) raw 8-D [servo x4, esc x4] — every existing run.
+        #   "modes" 6-D wrench modes [fx, fy, fz, tx, ty, tz] (REP-103 axes) expanded to the
+        #           8-D action by ModeMixer — the two null patterns are unrepresentable, so the
+        #           commanded null share is structurally ~0 instead of reward-shaped. Everything
+        #           downstream (latency buffer, DR perturbation, reward terms, prev_action and
+        #           thus the OBS CONTRACT) keeps seeing the mixed 8-D actuator command.
+        self.action_mode = e.get("action_mode", "esc")
+        if self.action_mode not in ("esc", "modes"):
+            raise ValueError(f"unknown action_mode {self.action_mode!r}; expected 'esc' or 'modes'")
+        if self.action_mode == "modes":
+            # NOMINAL plant constants (not the DR-perturbed episode values): the deployed mixer
+            # runs with the same nominals, and the mismatch is the policy's feedback problem.
+            self._mixer = ModeMixer(self.sim.unit_names, self.sim.thrust_axes,
+                                    self.sim.unit_pivots, self.sim.servo_range_rad,
+                                    self.sim.thrust_per_cmd, self.sim.thrust_curve_exp)
+            # Mode-command slew (mode_slew_per_s, action units/s; 0 = off): rate-limits the
+            # 6-D MODE vector before mixing, so the realized wrench cannot change faster than
+            # this — the bang-bang fast-dither strategy (null diagnosis 2026-08-26: servo cmd
+            # jumps > 65 deg median, ~200 deg/s perpetual servo racing) is structurally
+            # unreachable. Slewing MUST happen in mode coordinates: they are linear coordinates
+            # of the null-free force subspace, so every intermediate command stays null-free
+            # (slewing the folded servo/esc instead RAISES realized null — see ModeMixer note).
+            slew = float(e.get("mode_slew_per_s", 0.0))
+            dt = 1.0 / float(self.sim.cfg["sim"]["control_rate_hz"])
+            self._mode_slew_step = slew * dt if slew > 0.0 else None
+            # mode_rate_action: the action IS the mode RATE (a in [-1,1] scales the slew step:
+            # m += a * step). Under the target+limiter form the policy learns to ride the
+            # limiter with saturated targets (av_mode3: 100 % of steps at full slew, |raw -
+            # applied| ~ 1.1, std blown up to 1.88 by ent_coef because raw noise became
+            # physically free). As a rate, a = 0 means HOLD, the raw signal is the physical
+            # quantity itself, and a rate penalty (w_mode_rate) finally has a real gradient.
+            self._mode_rate_action = bool(e.get("mode_rate_action", False))
+            if self._mode_rate_action and self._mode_slew_step is None:
+                raise ValueError("mode_rate_action requires mode_slew_per_s > 0 (the rate scale)")
+            # Commanded null is structurally zero; the residual ACTUAL null (servo-lag
+            # transients, DR offsets) is not usefully controllable — don't reward-chase it.
+            self.w_null = 0.0
+        else:
+            self._mixer = None
+        self._mode_prev_servo = np.zeros(4)
+        self._mode_prev_modes = np.zeros(MODE_DIM)
+        # Adaptive constraint multipliers (name -> lambda, default 1.0), updated from outside
+        # by train.py's LagrangeCallback via venv.set_attr("lagrange", ...).
+        self.lagrange = {}
+        act_dim = MODE_DIM if self._mixer is not None else ACT_DIM
+        self.action_space = spaces.Box(-1.0, 1.0, shape=(act_dim,), dtype=np.float32)
         self.observation_space = spaces.Box(-np.inf, np.inf, shape=(obs_dim,), dtype=np.float32)
 
         self.render_mode = render_mode
@@ -379,6 +440,27 @@ class UmiusiPoseEnv(gym.Env):
             obs = obs + self.np_random.normal(0.0, self.dr["obs_noise"], size=obs.shape)
         return obs.astype(np.float32)
 
+    def apply_train_ctx(self, **kwargs):
+        """Set training-context attributes from a VecEnv callback.
+
+        MUST be called via ``venv.env_method("apply_train_ctx", ...)`` — attribute LOOKUP
+        forwards through gymnasium wrappers (Monitor), so the method binds to this env.
+        Plain ``venv.set_attr`` does NOT forward: it sets the attribute on the Monitor
+        wrapper while the env keeps its own — the silent bug that disabled every curriculum
+        (econ_ramp, cap range, cone/yaw/tilt) and the Lagrange multipliers up to av_mode9
+        (discovered 2026-08-27: mode9 trained bit-identically to mode8).
+        """
+        for k, v in kwargs.items():
+            if not hasattr(self, k):
+                raise AttributeError(f"apply_train_ctx: env has no attribute {k!r}")
+            setattr(self, k, v)
+
+    def _train_ctx_snapshot(self):
+        """Read back what apply_train_ctx set (tests / diagnostics; works across VecEnv workers)."""
+        return {"econ_ramp": self.econ_ramp, "lagrange": dict(self.lagrange),
+                "max_duty_range": self.dr.get("max_duty_range"),
+                "vel_cmd_cone_deg": self.vel_cmd_cone_deg}
+
     # -- lifecycle -------------------------------------------------------------
     def reset(self, *, seed=None, options=None):
         super().reset(seed=seed)
@@ -407,7 +489,13 @@ class UmiusiPoseEnv(gym.Env):
                     s_lim = np.sin(np.radians(np.clip(self.vel_cmd_elev_deg, 0.0, 90.0)))
                     elev = np.arcsin(self.np_random.uniform(-s_lim, s_lim))
                 dhat = np.array([np.cos(elev) * np.cos(ang), np.sin(elev), np.cos(elev) * np.sin(ang)])
-            speed_cmd = self.np_random.uniform(0.0, self.vel_cmd_max)
+            speed_hi = self.vel_cmd_max
+            if self.vel_cmd_cap_frac > 0.0:  # _apply_domain_rand already set this episode's cap
+                speed_hi = min(speed_hi, self.vel_cmd_cap_frac * VEL_PER_CAP * self.sim.max_duty)
+            if self.vel_cmd_hi_prob > 0.0 and self.np_random.uniform() < self.vel_cmd_hi_prob:
+                speed_cmd = self.np_random.uniform(0.9, 1.0) * speed_hi
+            else:
+                speed_cmd = self.np_random.uniform(0.0, speed_hi)
             if self.vel_cmd_zero_prob > 0.0 and self.np_random.uniform() < self.vel_cmd_zero_prob:
                 speed_cmd = 0.0  # explicit hold-station episodes (dry tests / narrow pools)
             self.v_cmd = dhat * speed_cmd
@@ -421,6 +509,8 @@ class UmiusiPoseEnv(gym.Env):
         self._act_latency = self.action_latency if self.dr.get("enabled", False) else 0
         self._act_buf = [np.zeros(ACT_DIM) for _ in range(self._act_latency)]
         self.prev_action = np.zeros(ACT_DIM)
+        self._mode_prev_servo = np.zeros(4)
+        self._mode_prev_modes = np.zeros(MODE_DIM)
         self.prev_servo = state["servo"].copy()  # from the post-reset state (avoid a step-1 servo-rate spike)
         self.step_count = 0
         self._place_marker(state)
@@ -429,6 +519,21 @@ class UmiusiPoseEnv(gym.Env):
 
     def step(self, action):
         action = np.clip(np.asarray(action, dtype=float), -1.0, 1.0)
+        mode_rate_mag = 0.0
+        if self._mixer is not None:  # wrench modes -> 8-D actuator command; downstream unchanged
+            raw = action                                   # already clipped to [-1, 1] above
+            if self._mode_rate_action:  # action = mode RATE: integrate (slew limit is inherent)
+                mode_rate_mag = float(np.mean(np.abs(raw)))
+                action = np.clip(self._mode_prev_modes + raw * self._mode_slew_step, -1.0, 1.0)
+                self._mode_prev_modes = action.copy()
+            elif self._mode_slew_step is not None:  # target form: rate-limit toward the target
+                action = self._mode_prev_modes + np.clip(
+                    raw - self._mode_prev_modes, -self._mode_slew_step, self._mode_slew_step)
+                self._mode_prev_modes = action.copy()
+            else:
+                action = raw
+            action = self._mixer.mix(action, self.sim.max_duty, self._mode_prev_servo)
+            self._mode_prev_servo = action[:4].copy()
         if self._act_latency > 0:  # sim2real: apply a delayed command (control->actuation lag)
             self._act_buf.append(action)
             action = self._act_buf.pop(0)
@@ -450,7 +555,7 @@ class UmiusiPoseEnv(gym.Env):
         speed = float(np.linalg.norm(state["lin_vel"]))
         # Velocity command is DIRECTION-only controllable without a velocity sensor: split the actual
         # velocity into the along-command speed and the perpendicular (sideways) drift.
-        v_along = v_perp = vcn = 0.0
+        v_along = v_perp = vcn = vel_over = vel_track = 0.0
         if self.track_velocity:
             v = state["lin_vel"]
             vcn = float(np.linalg.norm(self.v_cmd_world))  # world-frame command (norm == body command)
@@ -469,7 +574,7 @@ class UmiusiPoseEnv(gym.Env):
         # null_n = null-mode amplitude in units of the per-thruster cap force, null_frac = the null
         # share of vertical mode power (the 8/25 run: 41.2 %), roll_use = roll-mode amplitude over
         # its cap-limited maximum (8/25: 19 % of authority used).
-        null_n = null_frac = roll_use = 0.0
+        null_n = null_frac = roll_use = vert_power = 0.0
         if self._vert_modes is not None:
             v_vert = state["thrust_world"] @ R[:, 1]             # body-frame vertical force per unit [N]
             m_h, m_r, m_p, m_n = self._vert_modes @ v_vert
@@ -478,6 +583,7 @@ class UmiusiPoseEnv(gym.Env):
             mode_power = m_h * m_h + m_r * m_r + m_p * m_p + m_n * m_n
             null_frac = float(m_n * m_n / mode_power) if mode_power > 1e-12 else 0.0
             roll_use = abs(m_r) / max(2.0 * f_cap, 1e-9)
+            vert_power = float(mode_power)   # weight for the POWER-WEIGHTED null share (accept metric)
         action_rate = float(np.linalg.norm(action - self.prev_action))
         servo_rate = float(np.linalg.norm(state["servo"] - self.prev_servo))       # actual servo motion
         thrust_rate = float(np.linalg.norm(action[4:8] - self.prev_action[4:8]))   # thrust command change
@@ -499,6 +605,9 @@ class UmiusiPoseEnv(gym.Env):
         reward -= rw.get("w_servo_rate", 0.0) * servo_rate      # penalize servo chatter (smooth steering)
         reward -= rw.get("w_thrust_rate", 0.0) * thrust_rate    # penalize thrust command changes
         reward -= rw.get("w_cmd_gap", 0.0) * cmd_gap            # penalize unreachable servo commands
+        # mode_rate_action: penalize rate USE (0 = hold). Rides econ_ramp — from step 0 it is
+        # exactly the "strong effort penalty -> do-nothing local optimum" trap (see w_effort note).
+        reward -= self.econ_ramp * rw.get("w_mode_rate", 0.0) * mode_rate_mag
         # Near the target attitude, damp actuation. HOLD task: press both servo AND thrust to a stop
         # (kills limit cycles). CRUISE task: once the drift is small too (steadily on-course), damp the
         # SERVO (steering) chatter — but NOT the thrust, which may still modulate to hold speed. This is
@@ -512,7 +621,10 @@ class UmiusiPoseEnv(gym.Env):
         # Deadband: no orientation reward gradient once inside ori_deadband, so the policy has no
         # incentive to chatter for sub-deadband precision — it can settle and hold still.
         ori_eff = max(0.0, ori_err - self.ori_deadband)
-        reward -= rw["w_ori"] * ori_eff
+        # self.lagrange: adaptive constraint multipliers (LagrangeCallback in train.py updates
+        # them toward explicit targets, e.g. "mean ori_err <= 0.2 rad" — replaces hand-tuning
+        # the attitude-vs-cruise balance). Default 1.0 = the static config weights.
+        reward -= self.lagrange.get("ori", 1.0) * rw["w_ori"] * ori_eff
         reward += rw.get("w_ori_bonus", 0.0) * prox(ori_eff, rw.get("ori_scale", 0.35))
         if self.track_position:
             reward -= rw["w_pos"] * pos_err
@@ -525,7 +637,31 @@ class UmiusiPoseEnv(gym.Env):
             reward -= rw.get("w_depth", 1.0) * abs(depth_err)
             reward += rw.get("w_depth_bonus", 0.0) * prox(abs(depth_err), rw.get("depth_scale", 0.25))
         if self.track_velocity:  # aim propulsion in the commanded DIRECTION (speed is not observable)
-            reward += rw.get("w_vel_dir", 8.0) * min(max(v_along, 0.0), vcn)  # move toward goal, cap at desired
+            # w_vel_dir_ratio > 0 switches the cruise reward to TRACKING-RATIO units
+            # (full reward at v_along == commanded, independent of |v_cmd|): with cap-aware
+            # commands the absolute form w_vel_dir * v scales down with the cap and drowns in
+            # the attitude terms — av_mode2 rationally abandoned cruising for that reason.
+            # The 0.05 m/s floor keeps near-zero commands from amplifying velocity noise.
+            wvr = rw.get("w_vel_dir_ratio", 0.0)
+            if wvr > 0.0:
+                # TRACK the commanded speed, don't just reach it (av_mode5 cruised at 1.6x the
+                # command — the capped form min(v, vcn) gives overshoot for free, but FF
+                # deployment needs the commanded speed). The overshoot penalty must stay GENTLE:
+                # the av_mode6 1:1 ratio form blew up at small vcn (denominator 0.05 -> a 5 cm/s
+                # excess on a 6 cm/s command cost 3.3/step) and its gradient noise wrecked the
+                # shared trunk — attitude collapsed to 0.44-0.75 rad. Deadband 2 cm/s, slope
+                # 0.5, denominator floored at 0.10 m/s.
+                # SYMMETRIC tracking penalty (av_mode10 lesson: penalizing only overshoot left a
+                # monotonic but weak transfer curve, gain 0.5-0.6 — undershoot was free). |v - vcn|
+                # past a 2 cm/s deadband, clipped at 1.0 (bounded gradient), "track" multiplier
+                # adapted by the Lagrange callback toward mean <= track_target.
+                den = max(vcn, 0.10)
+                vel_track = min(1.0, max(0.0, abs(v_along - vcn) - 0.02) / den)
+                reward += wvr * (min(max(v_along, 0.0), vcn) / den
+                                 - self.lagrange.get("track", 1.0) * vel_track)
+                vel_over = min(1.0, max(0.0, v_along - vcn - 0.02) / den)  # diagnostics only
+            else:
+                reward += rw.get("w_vel_dir", 8.0) * min(max(v_along, 0.0), vcn)  # move toward goal, cap at desired
             # Deadband: no drift penalty below vel_deadband, so the policy has no incentive to chatter the
             # servos chasing sub-deadband drift precision (a root cause of the steady-state servo vibration).
             reward -= rw.get("w_vel_perp", 4.0) * max(0.0, v_perp - self.vel_deadband)  # no sideways drift
@@ -564,8 +700,13 @@ class UmiusiPoseEnv(gym.Env):
         info["esc_applied"] = self.sim.esc_current.copy()  # slew-limited applied esc (true thrust change)
         info["cmd_gap"] = cmd_gap                          # ||servo command - actual|| [rad] (reachability)
         info["null_frac"] = null_frac                      # null share of vertical mode power (accept: <= 5 %)
+        info["vert_power"] = vert_power                    # total vertical mode power [N^2] (null weighting)
         info["roll_use"] = roll_use                        # roll-mode amplitude / cap max (accept: >= 50 %)
         info["max_duty"] = self.sim.max_duty               # plant esc cap this episode (DR-sampled)
+        info["mode_rate_mag"] = mode_rate_mag              # mean |mode rate action| (limiter-riding diagnostic)
+        info["vel_over"] = vel_over                        # clipped overshoot ratio (diagnostics)
+        info["vel_track"] = vel_track                      # clipped |v-vcn| ratio (Lagrange constraint signal)
+        info["step_idx"] = self.step_count                 # for steady-state-only constraint accounting
         return self._get_obs(state, R, ori_err_vec), reward, terminated, truncated, info
 
     def _info(self, state, pos_err, ori_err, depth_err, success):

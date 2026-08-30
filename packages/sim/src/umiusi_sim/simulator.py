@@ -100,6 +100,10 @@ class UmiusiSimulator:
         # Per-thruster neutral thrust direction (thruster body frame), in ACTION order. The MJCF
         # servo hinge (about the mounting arm) rotates the body, so this axis tilts with the servo.
         self.thrust_axes = np.array([by_id[i]["thrust_axis"] for i in self.unit_ids], dtype=float)
+        # Mounting-pivot positions (CAD frame), in ACTION order. Static geometry, so this is the
+        # right source for consumers that need the fore/aft + port/starboard layout without
+        # stepping the model (umiusi_rl.envs.mode_mixer validates its sign table against it).
+        self.unit_pivots = np.array([by_id[i]["pivot"] for i in self.unit_ids], dtype=float)
 
         # Indices, all in ACTION order (MJCF entities keep the id-based names).
         self.base_id = self.model.body("base_link").id
