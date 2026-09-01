@@ -189,6 +189,7 @@ class UmiusiPoseEnv(gym.Env):
             "drag_quad": self.sim.drag_quad.copy(),
             "added_mass": self.sim.added_mass_diag.copy(),
             "servo_slew": self.sim.servo_slew_rad,
+            "thrust_slew": self.sim.thrust_slew,
             "servo_tau": self.sim.servo_tau,
             "thrust_exp": self.sim.thrust_curve_exp,
             "buoy_offset": self.sim.buoyancy_offset,
@@ -281,6 +282,7 @@ class UmiusiPoseEnv(gym.Env):
             self.sim.drag_quad = b["drag_quad"].copy()
             self.sim.added_mass_diag = b["added_mass"].copy()
             self.sim.servo_slew_rad = b["servo_slew"]
+            self.sim.thrust_slew = b["thrust_slew"]
             self.sim.servo_tau = b["servo_tau"]
             self.sim.thrust_curve_exp = b["thrust_exp"]
             self.sim.set_buoyancy_offset(b["buoy_offset"])
@@ -302,6 +304,15 @@ class UmiusiPoseEnv(gym.Env):
         slew_range = self.dr.get("servo_slew_range_deg_s")
         if slew_range:
             self.sim.servo_slew_rad = np.radians(u(float(slew_range[0]), float(slew_range[1])))
+        # Same argument for the ESC ramp [esc units/s]. The deploy node applies its own
+        # thrust_slew_per_s (runtime-settable), and the physical ESC/prop ramp is unmeasured and
+        # sits in series with it, so the true rate is min(node parameter, hardware) — not the sim
+        # value. Randomize INSIDE the plausible limiter band only: with the limiter effectively
+        # absent the plant itself is worse (fast duty reversals generate transient null), and
+        # training over that would optimize for a regime the deploy contract forbids.
+        t_slew_range = self.dr.get("thrust_slew_range")
+        if t_slew_range:
+            self.sim.thrust_slew = u(float(t_slew_range[0]), float(t_slew_range[1]))
         tau_frac = self.dr.get("servo_tau_frac", 0.0)
         if tau_frac > 0.0 and b["servo_tau"] > 0.0:
             self.sim.servo_tau = b["servo_tau"] * (1.0 + u(-1, 1) * tau_frac)

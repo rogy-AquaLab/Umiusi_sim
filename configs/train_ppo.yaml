@@ -146,6 +146,15 @@ domain_rand:
   servo_slew_range_deg_s: [100.0, 500.0]  # per-episode servo rate limit U(lo, hi) (real rate unknown;
                                   # the bag analysis showed any value in this range kills the flapping —
                                   # randomizing it makes the policy valid whatever the true rate is)
+  thrust_slew_range: [1.0, 10.0]  # per-episode ESC ramp U(lo, hi) [esc units/s]. Same argument as the
+                                  # servo rate: the deploy node's thrust_slew_per_s is runtime-settable
+                                  # and the physical ESC/prop ramp is UNMEASURED and in series with it,
+                                  # so the true rate is min(parameter, hardware). Measured sensitivity of
+                                  # a fixed-4.0 policy: attitude is flat across 1..inf, but null share and
+                                  # cruise degrade monotonically on the FAST side (null 6.1%->9.1%, cruise
+                                  # 83%->60% at 25/s), so a slower-than-expected real ramp is the benign
+                                  # direction. Bound deliberately EXCLUDES 'no limiter': there the plant
+                                  # itself is worse, and the deploy contract requires the limiter anyway.
   servo_tau_frac: 0.5             # servo small-signal tau *= 1 + U(-frac, frac)
   servo_offset_deg: 3.0           # per-thruster servo neutral offset U(-this, this) [deg] per episode
   thrust_exp_range: [1.5, 2.8]    # thrust-curve exponent U(lo, hi): low-duty thrust shape is only
