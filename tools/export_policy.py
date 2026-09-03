@@ -22,8 +22,8 @@ from stable_baselines3.common.vec_env import DummyVecEnv, VecNormalize
 import gymnasium as gym
 from gymnasium import spaces
 
-# 実機側で動く推論実装は sinsei_UMIUSI_autonomy/tools/policy_infer.py に一本化してある
-# (重複を避けるため、ここでは検証時にそこから import する)。
+# 素 torch の推論実装は tools/policy_infer.py に一本化してある (export_deploy_bundle.py も
+# そこを通る)。C++ 側 (sinsei_umiusi_control の logic::attitude::Rl) はそれを移植したもの。
 _ROOT = Path(__file__).resolve().parents[1]          # umiusi_sim repo root (config paths)
 AUTONOMY = Path("../ros2_ws/src/sinsei_UMIUSI_autonomy").resolve()
 # POL = 書き出す対象バンドル。argv[1] で上書きできる (既定は最初に書き出した cruise_policy)。
@@ -175,9 +175,7 @@ def main():
         print(f"  {k:46s} {tuple(v.shape)}")
 
     # --- 素 torch 実装で SB3 と一致するか検証 ---
-    # policy_infer は tools/ から umiusi_rl_control パッケージへ移動した (どちらでも動くよう両方通す)
-    sys.path.insert(0, str(AUTONOMY / 'tools'))
-    sys.path.insert(0, str(AUTONOMY / 'umiusi_rl_control' / 'umiusi_rl_control'))
+    sys.path.insert(0, str(Path(__file__).resolve().parent))
     import policy_infer as pi
     runner = pi.PolicyRunner(OUT)
     rng = np.random.default_rng(0)
