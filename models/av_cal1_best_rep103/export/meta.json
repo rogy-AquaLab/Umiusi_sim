@@ -1,0 +1,11 @@
+{
+ "obs_dim": 17,
+ "act_dim": 8,
+ "obs_frame": "rep103",
+ "task": "attitude_velocity",
+ "net_arch": [
+  256,
+  256
+ ],
+ "source": "av_cal1_best_rep103"
+}

@@ -1,0 +1,56 @@
+{
+ "obs_dim": 17,
+ "act_dim": 8,
+ "obs_frame": "rep103",
+ "task": "attitude_velocity",
+ "net_arch": [
+  256,
+  256
+ ],
+ "source": "av_cal5_3d_rep103",
+ "layers": [
+  [
+   "mlp_extractor.policy_net.0.weight",
+   [
+    256,
+    17
+   ]
+  ],
+  [
+   "mlp_extractor.policy_net.2.weight",
+   [
+    256,
+    256
+   ]
+  ],
+  [
+   "mlp_extractor.value_net.0.weight",
+   [
+    256,
+    17
+   ]
+  ],
+  [
+   "mlp_extractor.value_net.2.weight",
+   [
+    256,
+    256
+   ]
+  ],
+  [
+   "action_net.weight",
+   [
+    8,
+    256
+   ]
+  ],
+  [
+   "value_net.weight",
+   [
+    1,
+    256
+   ]
+  ]
+ ],
+ "vertical_ok": true
+}

@@ -11,7 +11,45 @@ install/
 log/
 
 # --- Training artifacts (checkpoints, tensorboard logs, videos) ---
-models/
+# 学習の生成物は基本的に版管理しない。ただし **配備候補のバンドルだけは例外** —
+# 実機に載る方策の重み・正規化統計・観測レイアウト・golden は、どこかに版が無いと
+# 「実機で動いているのはどの重みか」を後から辿れない (2026-09-04 に autonomy から
+# 配備経路を引き取った時点で、ここが唯一の正本になった)。
+#
+# 追跡するのは export/ (weights.pt + obs_norm.npz + meta.json) と golden.npz と
+# meta.yaml だけ。final.zip / checkpoints/ / tb/ / vecnormalize.pkl は追跡しない
+# (再学習の入力であって配備物ではなく、桁が違う)。
+# deploy.pt / golden.pt も追跡しない — export/ から機械的に作る派生物で、実機へは
+# sinsei_umiusi_control が同梱する。
+#
+# 候補を増やすときはこのブロックに 5 行足す。ワイルドカードにしないのは、
+# 「配備候補として選んだ」ことを明示的に残すため。
+models/*
+!models/av_mode13/
+models/av_mode13/*
+!models/av_mode13/export/
+!models/av_mode13/golden.npz
+!models/av_mode13/meta.yaml
+!models/av_cal1_best_rep103/
+models/av_cal1_best_rep103/*
+!models/av_cal1_best_rep103/export/
+!models/av_cal1_best_rep103/golden.npz
+!models/av_cal1_best_rep103/meta.yaml
+!models/att_cal1_best_rep103/
+models/att_cal1_best_rep103/*
+!models/att_cal1_best_rep103/export/
+!models/att_cal1_best_rep103/golden.npz
+!models/att_cal1_best_rep103/meta.yaml
+!models/av_cal5_3d_rep103/
+models/av_cal5_3d_rep103/*
+!models/av_cal5_3d_rep103/export/
+!models/av_cal5_3d_rep103/golden.npz
+!models/av_cal5_3d_rep103/meta.yaml
+!models/av_sim2real2_rep103/
+models/av_sim2real2_rep103/*
+!models/av_sim2real2_rep103/export/
+!models/av_sim2real2_rep103/golden.npz
+!models/av_sim2real2_rep103/meta.yaml
 
 # --- CAD raw meshes (huge: base_link.stl ~52M; sim uses primitives. Keep description/ text) ---
 umiusi_model/

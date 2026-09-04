@@ -1,0 +1,17 @@
+action_mode: modes
+algo: ppo
+config: configs/train_ppo_mode_ft.yaml
+disturbance: false
+domain_rand: true
+init_from: null
+obs_frame: rep103
+obs_mode: imu
+observe_max_duty: true
+proprio_mode: action
+seed: 0
+task: attitude_velocity
+tilt_target_deg: 45.0
+total_timesteps: 10000000
+vecnormalize: true
+vel_cmd_cone_deg: 180.0
+yaw_target_deg: 180.0

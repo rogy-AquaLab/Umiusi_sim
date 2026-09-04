@@ -1,0 +1,14 @@
+algo: ppo
+config: configs/train_ppo.yaml
+note: best checkpoint of av_cal1 (continued from av_sim2real2 on bag-calibrated physics - thrust_curve_exp
+  2.0, CoB offset 0.01; reward w_angvel 0.6, w_vel_perp 6, w_cmd_gap 0.1; wide DR incl. servo slew 100-500
+  deg/s + thrust exp 1.5-2.8). Selected by deterministic checkpoint sweep - hold 28.7%, wobble 0.55 rad/s,
+  drift 0.13 m/s, final-step success 62%; later checkpoints degraded.
+obs_frame: sim
+obs_mode: imu
+proprio_mode: action
+seed: 0
+task: attitude_velocity
+total_timesteps: 4214656
+vecnormalize: true
+obs_frame: rep103   # converted from av_cal1_best (sim frame) by tools/convert_policy_frame.py; consumes REP-103/NED body-frame obs directly

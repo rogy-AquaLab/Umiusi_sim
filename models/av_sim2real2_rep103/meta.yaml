@@ -1,0 +1,13 @@
+algo: ppo
+config: configs/train_ppo.yaml
+disturbance: false
+domain_rand: true
+obs_mode: imu
+seed: 0
+task: attitude_velocity
+tilt_target_deg: 45.0
+total_timesteps: 3000000
+vecnormalize: true
+vel_cmd_cone_deg: 180.0
+yaw_target_deg: 180.0
+obs_frame: rep103   # converted from av_sim2real2 (sim frame) by tools/convert_policy_frame.py; consumes REP-103/NED body-frame obs directly

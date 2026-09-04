@@ -1,0 +1,12 @@
+algo: ppo
+config: configs/train_ppo.yaml
+note: 'attitude-only fallback on bag-calibrated physics (thrust exp 2, CoB 0.01) with wide DR. Deterministic
+  sweep - hold 99.5%, ori 3.1 deg, wobble 0.05 rad/s. 14-D obs: ori_err(3) + gyro(3) + prev_action(8).'
+obs_frame: sim
+obs_mode: imu
+proprio_mode: action
+seed: 0
+task: attitude
+total_timesteps: 2400000
+vecnormalize: true
+obs_frame: rep103   # converted from att_cal1_best (sim frame) by tools/convert_policy_frame.py; consumes REP-103/NED body-frame obs directly

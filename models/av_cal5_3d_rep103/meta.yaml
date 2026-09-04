@@ -1,0 +1,15 @@
+algo: ppo
+config: configs/train_ppo.yaml
+note: "3-D vectoring, stabilized fine-tune from av_cal1_best: FROZEN obs norm, LR 1e-4, ent 0.003; elevation\
+  \ curriculum 0->60 over 60% + 35% horizontal floor; sphere-uniform elevation; calibrated physics + wide\
+  \ DR EXPERIMENTAL: horizontal row 7/8 PASS + pure vertical usable (UP ~5deg / DOWN ~15deg dir err),\
+  \ OBLIQUE elevations unreliable \u2014 command either horizontal or near-vertical, avoid 30-60 deg elevation\
+  \ commands."
+obs_frame: rep103
+obs_mode: imu
+obs_norm_frozen: true
+proprio_mode: action
+seed: 0
+task: attitude_velocity
+total_timesteps: 10214656
+vecnormalize: true

@@ -1,0 +1,151 @@
+{
+  "obs_dim": 18,
+  "act_dim": 6,
+  "net_arch": [
+    256,
+    256
+  ],
+  "layers": [
+    [
+      "mlp_extractor.policy_net.0.weight",
+      [
+        256,
+        18
+      ]
+    ],
+    [
+      "mlp_extractor.policy_net.2.weight",
+      [
+        256,
+        256
+      ]
+    ],
+    [
+      "mlp_extractor.value_net.0.weight",
+      [
+        256,
+        18
+      ]
+    ],
+    [
+      "mlp_extractor.value_net.2.weight",
+      [
+        256,
+        256
+      ]
+    ],
+    [
+      "action_net.weight",
+      [
+        6,
+        256
+      ]
+    ],
+    [
+      "value_net.weight",
+      [
+        1,
+        256
+      ]
+    ]
+  ],
+  "obs_frame": "rep103",
+  "task": "attitude_velocity",
+  "obs_mode": "imu",
+  "proprio_mode": "action",
+  "action_mode": "modes",
+  "action_contract": {
+    "action_mode": "modes",
+    "mode_names": [
+      "fx",
+      "fy",
+      "fz",
+      "tx",
+      "ty",
+      "tz"
+    ],
+    "note": "action = mode RATES in [-1,1] (REP-103 body wrench), NOT servo/esc",
+    "stages": [
+      {
+        "1_integrate": "m += a * mode_slew_per_s * dt, clipped to [-1, 1]; m persists across steps and resets to 0 on disarm"
+      },
+      {
+        "2_mix": "per unit: h = Sh @ (m.fx, m.fy, m.tz) * f_max, v = Sv @ (m.fz, m.tx, m.ty) * f_max, with f_max = thrust_per_cmd * max_duty**thrust_curve_exp"
+      },
+      {
+        "3_fold": "servo = atan2(v, h) folded into +/-90 deg by reversing the esc sign; esc = sign * (min(|f|, f_max)/thrust_per_cmd)**(1/thrust_curve_exp); a unit inside the deadband holds its previous servo angle and zeroes esc"
+      }
+    ],
+    "mode_signs": {
+      "lf": [
+        1,
+        -1,
+        -1,
+        1,
+        1,
+        -1
+      ],
+      "lb": [
+        1,
+        1,
+        -1,
+        1,
+        1,
+        1
+      ],
+      "rb": [
+        -1,
+        1,
+        -1,
+        1,
+        -1,
+        1
+      ],
+      "rf": [
+        -1,
+        -1,
+        -1,
+        1,
+        -1,
+        -1
+      ]
+    },
+    "mode_sign_columns": [
+      "fx",
+      "fy",
+      "tz",
+      "fz",
+      "tx",
+      "ty"
+    ],
+    "mode_slew_per_s": 2.0,
+    "deadband_frac": 0.02,
+    "thrust_per_cmd": 30.0,
+    "thrust_curve_exp": 2.0,
+    "servo_range_deg": 90.0,
+    "control_rate_hz": 50.0
+  },
+  "source": "av_mode13",
+  "obs_fields": [
+    [
+      "ori_err",
+      3
+    ],
+    [
+      "gyro",
+      3
+    ],
+    [
+      "v_cmd",
+      3
+    ],
+    [
+      "prev_action",
+      8
+    ],
+    [
+      "max_duty",
+      1
+    ]
+  ]
+}
