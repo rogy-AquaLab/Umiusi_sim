@@ -22,6 +22,7 @@ control は umiusi_sim の models/<name>/deploy.pt を直接指す。
   obs_dim / act_dim
   obs_field_names / obs_field_widths    観測レイアウト (meta.json の obs_fields。
                    古いバンドルで欠けていれば学習時 meta.yaml から導出する)
+  vertical_ok      鉛直の速度指令を受け付けてよい方策か
   action_mode      "direct" か "modes"
   action_contract の全項目 (レンチモードのとき):
     thrust_per_cmd / thrust_curve_exp / servo_range_deg / control_rate_hz
@@ -93,6 +94,9 @@ class _Deploy(torch.nn.Module):
         # 観測の座標系。読む側は rep103 以外を拒否する — 2026-08-21 のプール試験で
         # pitch/yaw が入れ替わった観測を食わせて姿勢制御不能になった再発防止ゲート
         self.obs_frame = str(meta.get("obs_frame", "unknown"))
+        # 鉛直の速度指令を受け付けてよい方策か。水平専用に鉛直指令が入ると姿勢が崩壊する
+        # ので、読む側は false のとき v_cmd の z 成分を 0 にクランプする
+        self.vertical_ok = bool(meta.get("vertical_ok", False))
 
         # 観測レイアウト。導出もできなければ空 (読む側は「照合できない」として警告する)
         self.obs_field_names = [str(n) for n, _ in obs_fields]
