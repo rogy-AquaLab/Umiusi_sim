@@ -97,6 +97,13 @@ class _Deploy(torch.nn.Module):
         # 鉛直の速度指令を受け付けてよい方策か。水平専用に鉛直指令が入ると姿勢が崩壊する
         # ので、読む側は false のとき v_cmd の z 成分を 0 にクランプする
         self.vertical_ok = bool(meta.get("vertical_ok", False))
+        # ホバリング (v_cmd=0) の実測 economy。**契約の一致ではなく振る舞いの良さ**を運ぶ唯一の
+        # 属性で、読む側は起動時に閾値と突き合わせる。-1.0 = 未測定で、読む側はそれを拒否する
+        # (「economy を一度も測っていないバンドルが実機に載る」ことを不可能にするのが目的)。
+        # 両方必要: duty だけ見ると姿勢を犠牲にして duty を下げた方策を通す (fy クランプ実験で
+        # duty -24% / ori +39% が実際に起きた)。
+        self.hover_median_esc_frac = float(meta.get("hover_median_esc_frac", -1.0))
+        self.hover_ori_err_rad = float(meta.get("hover_ori_err_rad", -1.0))
 
         # 観測レイアウト。導出もできなければ空 (読む側は「照合できない」として警告する)
         self.obs_field_names = [str(n) for n, _ in obs_fields]
