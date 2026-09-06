@@ -501,7 +501,7 @@ class UmiusiPoseEnv(gym.Env):
 
     def step(self, action):
         action = np.clip(np.asarray(action, dtype=float), -1.0, 1.0)
-        mode_rate_mag = 0.0
+        mode_rate_mag = cmd_perp = 0.0
         if self._mixer is not None:  # wrench modes -> 8-D actuator command; downstream unchanged
             raw = action                                   # already clipped to [-1, 1] above
             if self._mode_rate_action:  # action = mode RATE: integrate (slew limit is inherent)
@@ -514,6 +514,21 @@ class UmiusiPoseEnv(gym.Env):
                 self._mode_prev_modes = action.copy()
             else:
                 action = raw
+            # Translational wrench the policy commanded that nobody asked for. Same construction
+            # as v_perp, but on the COMMAND rather than the resulting velocity: the component of
+            # (fx, fy) perpendicular to the commanded direction, or its whole magnitude when
+            # v_cmd = 0. Sway is a legitimate DOF — this only bites when it is not commanded.
+            # Direct signal: w_vel_perp only sees the drift that eventually results, which is
+            # delayed and confounded by disturbances, so a self-sustaining sway survives it
+            # (measured on av_mode13 while holding station: |fy| 0.697 of full authority).
+            # fz is deliberately excluded — depth holding legitimately needs steady heave.
+            # mode fx/fy are REP-103 body axes (x fwd, y left); v_cmd is the sim/CAD frame
+            # (+Y up), so REP-103 y = -sim z.
+            f_cmd = np.array([self._mode_prev_modes[0], self._mode_prev_modes[1]])
+            d = np.array([self.v_cmd[0], -self.v_cmd[2]])
+            dn = float(np.linalg.norm(d))
+            cmd_perp = (float(np.linalg.norm(f_cmd - (f_cmd @ (d / dn)) * (d / dn))) if dn > 1e-6
+                        else float(np.linalg.norm(f_cmd)))
             action = self._mixer.mix(action, self.sim.max_duty, self._mode_prev_servo)
             self._mode_prev_servo = action[:4].copy()
         if self._act_latency > 0:  # sim2real: apply a delayed command (control->actuation lag)
@@ -596,6 +611,10 @@ class UmiusiPoseEnv(gym.Env):
         reward -= rw.get("w_servo_rate", 0.0) * servo_rate      # penalize servo chatter (smooth steering)
         reward -= rw.get("w_thrust_rate", 0.0) * thrust_rate    # penalize thrust command changes
         reward -= rw.get("w_cmd_gap", 0.0) * cmd_gap            # penalize unreachable servo commands
+        # Uncommanded translational wrench (see the note at its computation). NOT on econ_ramp:
+        # this is a tracking error, not an economy term — commanding sway nobody asked for is
+        # wrong from step 0, unlike using more duty than strictly necessary.
+        reward -= self.lagrange.get("cmd_perp", 1.0) * rw.get("w_cmd_perp", 0.0) * cmd_perp
         # Penalize rate USE (0 = hold); on econ_ramp, like every other effort term.
         reward -= self.econ_ramp * rw.get("w_mode_rate", 0.0) * mode_rate_mag
         # Near the target attitude, damp actuation. HOLD: stop servo AND thrust (kills limit
@@ -684,6 +703,7 @@ class UmiusiPoseEnv(gym.Env):
         info["vert_power"] = vert_power                    # total vertical mode power [N^2] (null weighting)
         info["roll_use"] = roll_use                        # roll-mode amplitude / cap max (accept: >= 50 %)
         info["max_duty"] = self.sim.max_duty               # plant esc cap this episode (DR-sampled)
+        info["cmd_perp"] = cmd_perp                        # 指令外の並進レンチ (診断/制約信号)
         info["mode_rate_mag"] = mode_rate_mag              # mean |mode rate action| (limiter-riding diagnostic)
         info["vel_over"] = vel_over                        # clipped overshoot ratio (diagnostics)
         info["vel_track"] = vel_track                      # clipped |v-vcn| ratio (Lagrange constraint signal)

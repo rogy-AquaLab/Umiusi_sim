@@ -2,6 +2,7 @@
 env actually applies the multipliers to the reward."""
 
 import numpy as np
+import pytest
 
 from umiusi_rl.envs.umiusi_pose_env import UmiusiPoseEnv, load_config
 from umiusi_rl.train import LagrangeCallback
@@ -147,3 +148,61 @@ def test_env_applies_the_effort_multiplier_to_the_reward():
     _o, r_high, *_ = env.step(action)
     env.close()
     assert r_high < r_base - 1e-9, (r_base, r_high)
+
+
+def _modes_env(**reward_overrides):
+    cfg = load_config("configs/train_ppo_mode_ft.yaml")
+    cfg["env"]["action_mode"] = "modes"
+    cfg["env"]["task"] = "attitude_velocity"
+    cfg.setdefault("domain_rand", {})["enabled"] = False
+    cfg.setdefault("disturbance", {})["enabled"] = False
+    cfg["reward"].update(reward_overrides)
+    return UmiusiPoseEnv(cfg)
+
+
+def _cmd_perp_after(env, v_cmd, rate):
+    """Drive one mode-rate step and read back the uncommanded-translation signal."""
+    env.reset(seed=0)
+    env.v_cmd = np.asarray(v_cmd, dtype=float)
+    _o, _r, _t, _tr, info = env.step(np.asarray(rate, dtype=float))
+    return info["cmd_perp"]
+
+
+def test_cmd_perp_ignores_wrench_along_the_commanded_direction():
+    """Sway is a legitimate DOF: commanding it must not be penalised (the user's requirement)."""
+    env = _modes_env()
+    # v_cmd along sim -z == REP-103 +y (left): a pure fy wrench is exactly what was asked for.
+    along = _cmd_perp_after(env, [0.0, 0.0, -0.3], [0.0, 1.0, 0.0, 0.0, 0.0, 0.0])
+    # the same fy wrench with the command pointing forward instead is entirely uncommanded
+    across = _cmd_perp_after(env, [0.3, 0.0, 0.0], [0.0, 1.0, 0.0, 0.0, 0.0, 0.0])
+    env.close()
+    assert along == pytest.approx(0.0, abs=1e-9), f"commanded sway must be free, got {along}"
+    assert across > 0.0, across
+
+
+def test_cmd_perp_penalises_any_translation_while_holding_station():
+    """v_cmd = 0 -> nothing is commanded, so the whole (fx, fy) magnitude counts."""
+    env = _modes_env()
+    hold = _cmd_perp_after(env, [0.0, 0.0, 0.0], [0.0, 1.0, 0.0, 0.0, 0.0, 0.0])
+    env.close()
+    assert hold > 0.0
+
+
+def test_cmd_perp_ignores_heave_and_attitude():
+    """fz must stay free (depth holding needs steady heave) and so must the moments."""
+    env = _modes_env()
+    for rate in ([0, 0, 1.0, 0, 0, 0], [0, 0, 0, 1.0, 0, 0], [0, 0, 0, 0, 1.0, 0], [0, 0, 0, 0, 0, 1.0]):
+        assert _cmd_perp_after(env, [0.0, 0.0, 0.0], rate) == pytest.approx(0.0, abs=1e-9), rate
+    env.close()
+
+
+def test_w_cmd_perp_is_off_by_default_and_lowers_reward_when_enabled():
+    off, on = _modes_env(), _modes_env(w_cmd_perp=5.0)
+    rate = np.array([0.0, 1.0, 0.0, 0.0, 0.0, 0.0])
+    for env in (off, on):
+        env.reset(seed=0)
+        env.v_cmd = np.zeros(3)
+    _o, r_off, *_ = off.step(rate)
+    _o, r_on, *_ = on.step(rate)
+    off.close(); on.close()
+    assert r_on < r_off - 1e-9, (r_off, r_on)
