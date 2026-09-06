@@ -19,7 +19,11 @@ water:
   # docs/calibration_plan.md): the old 0.05 predicted large righting oscillations the real
   # vehicle does not show (it held ~30 deg tilts almost silently); 0.005-0.01 m fits best.
   # 0.01 chosen (conservative side); the static-tilt experiment (calibration plan 4) pins it.
-  # CAVEAT: the bag has an unmodeled tether, which may mimic extra righting/damping.
+  # CAVEAT 1: the bag has an unmodeled tether, which may mimic extra righting/damping.
+  # CAVEAT 2 (PROVISIONAL): that replay fed the sim the bag's 50 Hz COMMANDS, but the vehicle's
+  # CAN stack only reached the hardware at 6.25 Hz then — the replay applied 7 of every 8
+  # commands the robot never received. Every coefficient from that fit is provisional until
+  # measured directly; for this one that is calibration plan §4 (static tilt, no commands).
   buoyancy_offset_above_com: 0.010
 
 # --- hull (base_link), measured in CAD -----------------------------------------
@@ -91,7 +95,11 @@ thrusters:
   # Thrust curve: F = sign(u) * |u|^thrust_curve_exp * thrust_per_cmd  (u = slewed esc command).
   # 2.0 = propeller law (duty -> rpm roughly linear, thrust ~ rpm^2); 1.0 = linear.
   # BOTH VALUES ARE UNCALIBRATED and confounded with each other: the only in-water data covers
-  # |u| <= 0.2. Bench-calibrate (docs/calibration_plan.md, plan 3) before trusting absolute speed,
+  # |u| <= 0.2. WORSE, exp 2.0 came from replaying that bag's 50 Hz commands into the sim while
+  # the real CAN stack only reached the hardware at 6.25 Hz — so the replay applied 7 of every 8
+  # commands the robot never received, against a policy that reversed sign every step. "Real
+  # thrust is ~1/10 of linear" may therefore be dropped commands rather than a quadratic curve.
+  # Bench-calibrate (docs/calibration_plan.md, plan 3) before trusting absolute speed,
   # and RE-EXPORT any deployed policy afterwards — tools/export_policy.py copies these into the
   # bundle's action_contract, and the robot reproduces the plant from that copy.
   thrust_per_cmd: 30.0         # N at FULL command (|u| = 1)
