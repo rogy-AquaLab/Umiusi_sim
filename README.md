@@ -350,6 +350,7 @@ reports **cruise vs reachable** and the **power-weighted** null share (the accep
 | tool | what it does |
 | --- | --- |
 | `preflight_policy.py` | generate / verify `golden.npz` — a loaded policy is provably the validated one |
+| `replay_obs.py` | drive a policy closed-loop through its own `prev_action` with NO plant — the bench check `golden.npz` cannot do (it replays obs open-loop, so it misses defects in the mode integrator and the mixer deadband, both of which carry state) |
 | `export_policy.py` | write the deploy bundle (weights, obs norm, `meta.json` incl. `action_contract`) |
 | `capsize_gate.py` | roll-deviation / capsize gate under DR + disturbance, per esc cap |
 | `attitude_speed_tradeoff.py` | is the attitude-vs-cruise seesaw physics or optimization? (speed at held attitudes) |
