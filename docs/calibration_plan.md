@@ -24,10 +24,19 @@
 **手順**: 1 基ずつ `duty=0.2` を 2 秒、順に 4 基。どの物理位置（前左/後左/前右/後右）が
 回ったかを目視記録。サーボも 1 基ずつ +45° を指令し、動いた個体を記録。
 
-**反映**: `configs/umiusi.yaml` の `units[].name` を実機の対応に合わせる（action
-順序 `action_order: [lf, lb, rb, rf]` は autonomy の POSITIONS 契約なので触らない）。
-sim 側の幾何命名は id1=lf, id2=lb, **id3=rf, id4=rb**（+Z=右舷）である点に注意 —
-旧 "3=rb, 4=rf" は右舷の前後が入れ替わっていた。
+**反映先は 2 リポある。片方だけ直すと roll/yaw が化ける。**
+
+1. **sim**: `configs/umiusi.yaml` の `units[].name`。sim の幾何命名は
+   id1=lf, id2=lb, **id3=rf, id4=rb**（+Z=右舷）。
+2. **control**: `params/controllers.yaml` の `thruster_controller_{lf,lb,rb,rf}.id`。
+   現在 lf=1 / lb=2 / **rb=3** / **rf=4** で、**右舷の前後が sim と逆**。
+   そこから `id` → URDF `thrusterN` → `launch_args.yaml` の `vescN_id`（124-127）と繋がる。
+
+id 番号そのものは 2 リポで別体系でよい（sim は CAD 由来、control は配線由来）。**名前が
+物理位置と一致していることが契約**で、action 順序 `action_order: [lf, lb, rb, rf]` は
+autonomy の POSITIONS 契約なので触らない。
+
+この確認は ff / rl のどちらの経路でも共通に効く（rl 固有の問題ではない）。
 
 ## 2. サーボ応答（ドライで可）
 
