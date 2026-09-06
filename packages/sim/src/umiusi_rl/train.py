@@ -148,8 +148,13 @@ class LagrangeCallback(BaseCallback):
         self.settle_steps = int(cfg.get("settle_steps", 150))
         self.probe_every = int(cfg.get("probe_every", 10))      # rollouts between probes
         self.probe_episodes = int(cfg.get("probe_episodes", 2))
+        self.hold_episodes = int(cfg.get("hold_episodes", 2))   # forced v_cmd = 0 probe episodes
         self.targets = {"ori": float(cfg.get("ori_target", 0.20)),
                         "track": float(cfg.get("track_target", 0.15))}
+        if cfg.get("effort_target") is not None:
+            # Hover duty as a fraction of the cap. The whole point of the constraint: "when the
+            # vehicle is not going anywhere, do not sit on the cap". av_mode13 measured 0.90.
+            self.targets["effort"] = float(cfg["effort_target"])
         lmax = cfg.get("lambda_max", 8.0)
         self.lmax = ({k: float(lmax.get(k, 8.0)) for k in self.targets}
                      if isinstance(lmax, dict) else {k: float(lmax) for k in self.targets})
@@ -162,13 +167,23 @@ class LagrangeCallback(BaseCallback):
         self._probe_cfg.setdefault("disturbance", {})["enabled"] = False
 
     def _probe(self):
-        """Greedy rollouts under eval conditions -> (mean steady ori_err, mean vel_track)."""
+        """Greedy rollouts under eval conditions -> (steady ori_err, vel_track, hover duty).
+
+        The last `hold_episodes` are forced hold-station (v_cmd = 0), because that is the regime
+        the `effort` constraint is about: measuring duty over cruising episodes would fight the
+        cruise reward instead of the waste. `vel_cmd_zero_prob` in the config only makes ~15 % of
+        episodes hold-station, which is too few to measure reliably at this episode count.
+        """
         if self._probe_env is None:
             self._probe_env = UmiusiPoseEnv(self._probe_cfg)
         env = self._probe_env
         vn = self.model.get_vec_normalize_env()
-        oris, tracks = [], []
-        for ep in range(self.probe_episodes):
+        oris, tracks, hovers = [], [], []
+        base_zero_prob = env.vel_cmd_zero_prob
+        total = self.probe_episodes + self.hold_episodes
+        for ep in range(total):
+            hold = ep >= self.probe_episodes
+            env.vel_cmd_zero_prob = 1.0 if hold else base_zero_prob
             obs, _ = env.reset(seed=90_000 + self._rollouts + ep)
             done = False
             while not done:
@@ -177,11 +192,18 @@ class LagrangeCallback(BaseCallback):
                 obs, _r, term, trunc, info = env.step(action)
                 if info.get("step_idx", 0) > self.settle_steps:
                     oris.append(float(info.get("ori_err", 0.0)))
-                if info.get("vel_cmd_speed", 0.0) > 0.02:
+                    if hold:
+                        # duty as a FRACTION OF THE CAP, so the target means the same at any cap
+                        # (the same normalization the effort penalty and null_n use).
+                        esc = np.abs(info["esc_applied"])
+                        hovers.append(float(np.median(esc) / max(env.sim.max_duty, 1e-9)))
+                if not hold and info.get("vel_cmd_speed", 0.0) > 0.02:
                     tracks.append(float(info.get("vel_track", 0.0)))
                 done = term or trunc
+        env.vel_cmd_zero_prob = base_zero_prob
         return (float(np.mean(oris)) if oris else None,
-                float(np.mean(tracks)) if tracks else None)
+                float(np.mean(tracks)) if tracks else None,
+                float(np.mean(hovers)) if hovers else None)
 
     def _on_step(self):
         return True
@@ -190,8 +212,10 @@ class LagrangeCallback(BaseCallback):
         self._rollouts += 1
         if self._rollouts % self.probe_every:
             return
-        ori_m, track_m = self._probe()
-        for k, measured in (("ori", ori_m), ("track", track_m)):
+        ori_m, track_m, hover_m = self._probe()
+        for k, measured in (("ori", ori_m), ("track", track_m), ("effort", hover_m)):
+            if k not in self.targets:
+                continue
             if measured is None:
                 continue
             tgt, lmax = self.targets[k], self.lmax[k]
@@ -206,7 +230,8 @@ class LagrangeCallback(BaseCallback):
         self.training_env.env_method("apply_train_ctx", lagrange=dict(self.lam))
         print("[lagrange] " + "  ".join(f"{k}={v:.2f}" for k, v in self.lam.items())
               + f"  | probe ori={ori_m if ori_m is None else round(ori_m, 3)} "
-                f"track={track_m if track_m is None else round(track_m, 3)}")
+                f"track={track_m if track_m is None else round(track_m, 3)} "
+                f"hover_duty={hover_m if hover_m is None else round(hover_m, 3)}")
 
     def _on_training_end(self):
         if self._probe_env is not None:   # release the probe's MuJoCo model with the run

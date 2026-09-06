@@ -15,11 +15,11 @@ class _StubVecEnv:
         self.calls.append((name, kwargs))
 
 
-def _cb(eta=0.5, probe=(0.4, 0.0)):
+def _cb(eta=0.5, probe=(0.4, 0.0, None), **cfg_extra):
     import types
 
     cb = LagrangeCallback({"eta": eta, "ori_target": 0.2, "track_target": 0.15, "lambda_max": 8.0,
-                           "probe_every": 1}, {})
+                           "probe_every": 1, **cfg_extra}, {})
     stub = _StubVecEnv()
     cb.model = types.SimpleNamespace(get_env=lambda: stub)  # training_env property reads this
     cb._stub = stub
@@ -31,7 +31,7 @@ _INFO = {"ori_err": 0.4, "vel_track": 0.0, "step_idx": 400, "vel_cmd_speed": 0.1
 
 
 def test_violation_grows_multiplier_and_satisfaction_shrinks_it():
-    cb = _cb(probe=(0.4, 0.0))         # ori 0.4 violates 0.2; track 0.0 satisfies 0.15
+    cb = _cb(probe=(0.4, 0.0, None))   # ori 0.4 violates 0.2; track 0.0 satisfies 0.15
     cb._on_rollout_end()
     # ori violated (0.4 > 0.2) -> lambda up; track satisfied (0.0 < 0.15) -> lambda down
     assert cb.lam["ori"] > 1.0
@@ -40,7 +40,7 @@ def test_violation_grows_multiplier_and_satisfaction_shrinks_it():
 
 
 def test_multiplier_is_clipped():
-    cb = _cb(eta=5.0, probe=(2.0, 1.0))
+    cb = _cb(eta=5.0, probe=(2.0, 1.0, None))
     for _ in range(20):
         cb._on_rollout_end()
     assert cb.lam["ori"] <= 8.0 + 1e-9
@@ -48,7 +48,7 @@ def test_multiplier_is_clipped():
 
 
 def test_probe_without_samples_leaves_multipliers_alone():
-    cb = _cb(probe=(None, None))       # e.g. an episode with no commanded velocity
+    cb = _cb(probe=(None, None, None))  # e.g. an episode with no commanded velocity
     lam_before = dict(cb.lam)
     cb._on_rollout_end()
     assert cb.lam == lam_before
@@ -112,3 +112,38 @@ def test_env_applies_ori_multiplier():
             env.close()
     # a larger ori multiplier makes the same (erring) state strictly worse
     assert rewards[5.0] < rewards[1.0]
+
+
+def test_effort_constraint_is_opt_in_and_tracks_hover_duty():
+    """The effort constraint only exists when a target is configured, and it responds to the
+    HOVER duty fraction — the signal the whole cap-normalization fix is about."""
+    off = _cb(probe=(0.1, 0.0, 0.9))
+    assert "effort" not in off.targets
+    off._on_rollout_end()
+    assert "effort" not in off.lam, "no effort_target configured -> no multiplier"
+
+    on = _cb(probe=(0.1, 0.0, 0.9), effort_target=0.25)   # hovering at 90 % of cap: violated
+    on._on_rollout_end()
+    assert on.lam["effort"] > 1.0
+
+    ok = _cb(probe=(0.1, 0.0, 0.1), effort_target=0.25)   # hovering at 10 % of cap: satisfied
+    ok._on_rollout_end()
+    assert ok.lam["effort"] < 1.0
+
+
+def test_env_applies_the_effort_multiplier_to_the_reward():
+    """A multiplier nobody multiplies by is worthless — pin that the env reads it."""
+    cfg = load_config("configs/train_ppo_mode_ft.yaml")
+    cfg["env"]["action_mode"] = "esc"
+    cfg.setdefault("domain_rand", {})["enabled"] = False
+    env = UmiusiPoseEnv(cfg)
+    action = np.zeros(env.action_space.shape[0])
+    action[4:] = env.sim.max_duty            # full duty -> a large effort penalty
+    env.reset(seed=0)
+    env.lagrange = {}
+    _o, r_base, *_ = env.step(action)
+    env.reset(seed=0)
+    env.lagrange = {"effort": 4.0}
+    _o, r_high, *_ = env.step(action)
+    env.close()
+    assert r_high < r_base - 1e-9, (r_base, r_high)

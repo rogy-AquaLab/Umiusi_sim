@@ -165,6 +165,9 @@ class UmiusiPoseEnv(gym.Env):
         # do-nothing local optimum, so new penalties belong on the ramp too. Default 1.0 leaves
         # eval and non-curriculum runs unaffected.
         self.effort_exp = float(self.rw.get("effort_exp", 0.0))   # 0 = legacy ||esc||_2
+        # Measure esc as a fraction of the cap so the penalty means the same at any max_duty.
+        # See the note at its use site; tests/test_reward_cap_invariance.py pins the property.
+        self.effort_cap_norm = bool(self.rw.get("effort_cap_normalized", False))
         self.w_null = float(self.rw.get("w_null", 0.0))
         self.econ_ramp = 1.0
         # Vertical mode decomposition (heave/roll/pitch/null), rows orthonormal over the 4 units in
@@ -546,7 +549,16 @@ class UmiusiPoseEnv(gym.Env):
         # Effort: legacy = L2 norm of the esc command; effort_exp > 0 = sum(|u|^exp), the POWER
         # dimension (exp 3) so the penalty tracks the real cost (heat / battery), not duty count.
         if self.effort_exp > 0.0:
-            effort = float(np.sum(np.abs(action[4:8]) ** self.effort_exp))
+            # effort_cap_normalized: measure the esc command as a FRACTION OF THE CAP, so full
+            # saturation costs the same at any max_duty. The absolute form scales as cap**exp and
+            # is worthless at deploy caps: at cap 0.25 with exp 3 it is 0.0625/step against task
+            # terms of O(1-10), i.e. ~1 % of the reward — the policy then has no reason to lower
+            # duty at all, and av_mode13 hovers at 90 % of the cap. This is the same defect the
+            # cruise term had (see w_vel_dir_ratio) and that null_n avoids by dividing by f_cap.
+            # Default False keeps every existing run's reward identical.
+            u = np.abs(action[4:8]) / max(self.sim.max_duty, 1e-9) if self.effort_cap_norm \
+                else np.abs(action[4:8])
+            effort = float(np.sum(u ** self.effort_exp))
         else:
             effort = float(np.linalg.norm(action[4:8]))          # thrust magnitude (legacy)
         # Vertical thrust mode decomposition, in the BODY frame (the allocation geometry lives
@@ -577,7 +589,8 @@ class UmiusiPoseEnv(gym.Env):
             return float(np.exp(-((err / scale) ** 2)))
 
         # Economy terms ride econ_ramp (0..1 curriculum): task first, then economize.
-        reward = -self.econ_ramp * rw["w_effort"] * effort - rw["w_action_rate"] * action_rate
+        reward = (-self.econ_ramp * self.lagrange.get("effort", 1.0) * rw["w_effort"] * effort
+                  - rw["w_action_rate"] * action_rate)
         if self.w_null > 0.0:
             reward -= self.econ_ramp * self.w_null * null_n
         reward -= rw.get("w_servo_rate", 0.0) * servo_rate      # penalize servo chatter (smooth steering)
