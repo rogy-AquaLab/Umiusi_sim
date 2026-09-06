@@ -204,5 +204,6 @@ def test_w_cmd_perp_is_off_by_default_and_lowers_reward_when_enabled():
         env.v_cmd = np.zeros(3)
     _o, r_off, *_ = off.step(rate)
     _o, r_on, *_ = on.step(rate)
-    off.close(); on.close()
+    off.close()
+    on.close()
     assert r_on < r_off - 1e-9, (r_off, r_on)
