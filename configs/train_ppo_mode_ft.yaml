@@ -24,6 +24,7 @@ lagrange:
   lambda_max:
     ori: 8.0
     track: 1.3
+    cmd_perp: 6.0                  # 姿勢と競合しないので高めで良い (fz/姿勢モードを罰さない)
     effort: 4.0                   # 姿勢と真っ向から競合するので ori より低く。ただし cap 正規化
                                   # 後は罰が実スケールに乗るので、track ほど絞る必要はない                    # attitude and tracking sit on a PARETO FRONTIER (a real trade,
                                   # not an optimization shortfall — longer runs do not dissolve
@@ -31,7 +32,12 @@ lagrange:
   # ホバリング (v_cmd=0) 中の median|esc| / max_duty。「動いていないなら cap に座るな」。
   # av_mode13 の実測は 0.90 だった。probe の最後の hold_episodes 本を v_cmd=0 に強制して測る
   # (config の vel_cmd_zero_prob 0.15 では本数が足りない)。
-  effort_target: 0.25
+  # ホバリング中の「指令されていない並進レンチ」。av_mode13 の実測は fy 定常バイアス +0.303
+  # (|m| 0.697)。これは economy ではなく追従の誤りなので econ_ramp には乗せない。
+  cmd_perp_target: 0.10
+  # effort 制約は今回オフ (null にすると targets に入らない)。cap 一律圧縮は fz (深度保持に
+  # 正当に要る heave) を巻き込む鈍器なので、まず cmd_perp 単独で効果を測る。
+  effort_target: null
   hold_episodes: 2
   ori_target: 0.20                # mean per-step ori_err [rad] (success tolerance)
   track_target: 0.35              # mean clipped |v-vcn| ratio, SYMMETRIC, in DETERMINISTIC-PROBE
@@ -129,6 +135,7 @@ reward:
   # and only THEN do these penalties teach the allocation within it. Penalties without the cap
   # teach "use more" instead. Both economy terms ride the econ_ramp curriculum: task first, then
   # economize, because a strong effort penalty from step 0 collapses into do-nothing.
+  w_cmd_perp: 1.0                 # -this * ||(fx,fy) の指令方向に垂直な成分|| (Lagrange 乗数付き)
   w_effort: 1.0                   # -w_effort * sum((|esc_i|/max_duty)^effort_exp)
   effort_cap_normalized: true     # esc を cap の割合で測る。絶対量だと cap^exp で潰れ、cap 0.25 では
                                   # 罰が報酬スケールの ~1% になって効かない (av_mode13 がホバリングで

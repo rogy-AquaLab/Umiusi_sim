@@ -151,6 +151,11 @@ class LagrangeCallback(BaseCallback):
         self.hold_episodes = int(cfg.get("hold_episodes", 2))   # forced v_cmd = 0 probe episodes
         self.targets = {"ori": float(cfg.get("ori_target", 0.20)),
                         "track": float(cfg.get("track_target", 0.15))}
+        if cfg.get("cmd_perp_target") is not None:
+            # Uncommanded translational wrench during hold-station. A TRACKING error, not an
+            # economy term, so it is measured on the same forced-hold episodes as effort but
+            # belongs to a different failure: av_mode13 held a steady +0.303 sway bias.
+            self.targets["cmd_perp"] = float(cfg["cmd_perp_target"])
         if cfg.get("effort_target") is not None:
             # Hover duty as a fraction of the cap. The whole point of the constraint: "when the
             # vehicle is not going anywhere, do not sit on the cap". av_mode13 measured 0.90.
@@ -178,7 +183,7 @@ class LagrangeCallback(BaseCallback):
             self._probe_env = UmiusiPoseEnv(self._probe_cfg)
         env = self._probe_env
         vn = self.model.get_vec_normalize_env()
-        oris, tracks, hovers = [], [], []
+        oris, tracks, hovers, perps = [], [], [], []
         base_zero_prob = env.vel_cmd_zero_prob
         total = self.probe_episodes + self.hold_episodes
         for ep in range(total):
@@ -197,13 +202,15 @@ class LagrangeCallback(BaseCallback):
                         # (the same normalization the effort penalty and null_n use).
                         esc = np.abs(info["esc_applied"])
                         hovers.append(float(np.median(esc) / max(env.sim.max_duty, 1e-9)))
+                        perps.append(float(info.get("cmd_perp", 0.0)))
                 if not hold and info.get("vel_cmd_speed", 0.0) > 0.02:
                     tracks.append(float(info.get("vel_track", 0.0)))
                 done = term or trunc
         env.vel_cmd_zero_prob = base_zero_prob
         return (float(np.mean(oris)) if oris else None,
                 float(np.mean(tracks)) if tracks else None,
-                float(np.mean(hovers)) if hovers else None)
+                float(np.mean(hovers)) if hovers else None,
+                float(np.mean(perps)) if perps else None)
 
     def _on_step(self):
         return True
@@ -212,8 +219,9 @@ class LagrangeCallback(BaseCallback):
         self._rollouts += 1
         if self._rollouts % self.probe_every:
             return
-        ori_m, track_m, hover_m = self._probe()
-        for k, measured in (("ori", ori_m), ("track", track_m), ("effort", hover_m)):
+        ori_m, track_m, hover_m, perp_m = self._probe()
+        for k, measured in (("ori", ori_m), ("track", track_m), ("effort", hover_m),
+                            ("cmd_perp", perp_m)):
             if k not in self.targets:
                 continue
             if measured is None:
@@ -231,7 +239,8 @@ class LagrangeCallback(BaseCallback):
         print("[lagrange] " + "  ".join(f"{k}={v:.2f}" for k, v in self.lam.items())
               + f"  | probe ori={ori_m if ori_m is None else round(ori_m, 3)} "
                 f"track={track_m if track_m is None else round(track_m, 3)} "
-                f"hover_duty={hover_m if hover_m is None else round(hover_m, 3)}")
+                f"hover_duty={hover_m if hover_m is None else round(hover_m, 3)} "
+                f"cmd_perp={perp_m if perp_m is None else round(perp_m, 3)}")
 
     def _on_training_end(self):
         if self._probe_env is not None:   # release the probe's MuJoCo model with the run

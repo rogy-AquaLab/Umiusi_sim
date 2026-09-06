@@ -16,7 +16,7 @@ class _StubVecEnv:
         self.calls.append((name, kwargs))
 
 
-def _cb(eta=0.5, probe=(0.4, 0.0, None), **cfg_extra):
+def _cb(eta=0.5, probe=(0.4, 0.0, None, None), **cfg_extra):
     import types
 
     cb = LagrangeCallback({"eta": eta, "ori_target": 0.2, "track_target": 0.15, "lambda_max": 8.0,
@@ -32,7 +32,7 @@ _INFO = {"ori_err": 0.4, "vel_track": 0.0, "step_idx": 400, "vel_cmd_speed": 0.1
 
 
 def test_violation_grows_multiplier_and_satisfaction_shrinks_it():
-    cb = _cb(probe=(0.4, 0.0, None))   # ori 0.4 violates 0.2; track 0.0 satisfies 0.15
+    cb = _cb(probe=(0.4, 0.0, None, None))   # ori 0.4 violates 0.2; track 0.0 satisfies 0.15
     cb._on_rollout_end()
     # ori violated (0.4 > 0.2) -> lambda up; track satisfied (0.0 < 0.15) -> lambda down
     assert cb.lam["ori"] > 1.0
@@ -41,7 +41,7 @@ def test_violation_grows_multiplier_and_satisfaction_shrinks_it():
 
 
 def test_multiplier_is_clipped():
-    cb = _cb(eta=5.0, probe=(2.0, 1.0, None))
+    cb = _cb(eta=5.0, probe=(2.0, 1.0, None, None))
     for _ in range(20):
         cb._on_rollout_end()
     assert cb.lam["ori"] <= 8.0 + 1e-9
@@ -49,7 +49,7 @@ def test_multiplier_is_clipped():
 
 
 def test_probe_without_samples_leaves_multipliers_alone():
-    cb = _cb(probe=(None, None, None))  # e.g. an episode with no commanded velocity
+    cb = _cb(probe=(None, None, None, None))  # e.g. an episode with no commanded velocity
     lam_before = dict(cb.lam)
     cb._on_rollout_end()
     assert cb.lam == lam_before
@@ -118,16 +118,16 @@ def test_env_applies_ori_multiplier():
 def test_effort_constraint_is_opt_in_and_tracks_hover_duty():
     """The effort constraint only exists when a target is configured, and it responds to the
     HOVER duty fraction — the signal the whole cap-normalization fix is about."""
-    off = _cb(probe=(0.1, 0.0, 0.9))
+    off = _cb(probe=(0.1, 0.0, 0.9, None))
     assert "effort" not in off.targets
     off._on_rollout_end()
     assert "effort" not in off.lam, "no effort_target configured -> no multiplier"
 
-    on = _cb(probe=(0.1, 0.0, 0.9), effort_target=0.25)   # hovering at 90 % of cap: violated
+    on = _cb(probe=(0.1, 0.0, 0.9, None), effort_target=0.25)   # hovering at 90 % of cap: violated
     on._on_rollout_end()
     assert on.lam["effort"] > 1.0
 
-    ok = _cb(probe=(0.1, 0.0, 0.1), effort_target=0.25)   # hovering at 10 % of cap: satisfied
+    ok = _cb(probe=(0.1, 0.0, 0.1, None), effort_target=0.25)   # hovering at 10 % of cap: satisfied
     ok._on_rollout_end()
     assert ok.lam["effort"] < 1.0
 
@@ -207,3 +207,15 @@ def test_w_cmd_perp_is_off_by_default_and_lowers_reward_when_enabled():
     off.close()
     on.close()
     assert r_on < r_off - 1e-9, (r_off, r_on)
+
+
+def test_cmd_perp_constraint_tracks_the_uncommanded_sway_signal():
+    """The constraint the retrain is actually driven by: hold-station translational wrench."""
+    off = _cb(probe=(0.1, 0.0, None, 0.5))
+    assert "cmd_perp" not in off.targets
+    on = _cb(probe=(0.1, 0.0, None, 0.5), cmd_perp_target=0.10)   # 0.5 >> 0.10: violated
+    on._on_rollout_end()
+    assert on.lam["cmd_perp"] > 1.0
+    ok = _cb(probe=(0.1, 0.0, None, 0.02), cmd_perp_target=0.10)  # satisfied
+    ok._on_rollout_end()
+    assert ok.lam["cmd_perp"] < 1.0
