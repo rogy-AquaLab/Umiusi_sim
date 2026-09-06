@@ -50,7 +50,13 @@ _ROOT = Path(__file__).resolve().parents[5]        # repo root (packages/sim/src
 
 ACT_DIM = 8
 # Open-loop terminal surge speed per unit of esc cap [m/s per max_duty]. Bounds the sampled
-# velocity command to something reachable; RE-MEASURE whenever thrust or drag is recalibrated.
+# velocity command to something reachable.
+# RE-MEASURE whenever thrust or drag is recalibrated (docs/calibration_plan.md §3 says so too),
+# and when you do, update everything that consumes it — this value is the ONLY definition, but it
+# has readers outside this file:
+#   * docs/rl.md 運用プロトコル — the v_cmd ceiling formula cap_frac * VEL_PER_CAP * max_duty,
+#     which the deploy node (or the UI) must clamp to. Stale here = silently wrong there.
+#   * eval.py — the "cruise vs reachable" acceptance metric.
 VEL_PER_CAP = 0.68
 # "full" feeds back the sim's servo angle and thrust state; "action" feeds back only the previous
 # action and is the sim2real-safe suite — the real vehicle cannot measure servo angle (RC servos
