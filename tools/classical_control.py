@@ -85,6 +85,76 @@ class VelocityObserver:
         return self.v.copy()
 
 
+class GeneralAllocator:
+    """Desired 6-D wrench -> [servo x4, esc x4], by pseudo-inverse of the real geometry.
+
+    ModeMixer uses a hardcoded Walsh sign table that assumes ALL FOUR units work. This solves the
+    allocation from the actual thruster positions instead, which buys two things the table cannot:
+
+      * FAULT TOLERANCE. Drop a unit's columns and re-solve. The reduced 6x6 has rank 6 and
+        condition 8.1 for any single failure, so the vehicle keeps FULL 6-DOF wrench authority on
+        three thrusters — it just has no margin left. A fixed table cannot express this: it keeps
+        commanding the dead unit and the realised wrench is silently wrong.
+      * SERVO BIAS COMPENSATION. A known per-unit angle offset rotates that unit's thrust; folding
+        it into the solve puts the intended force back where it belongs.
+
+    x = [h_1..h_4, v_1..v_4] are per-unit horizontal (along the unit tangent) and vertical (+Y)
+    force components; the minimum-norm pinv solution is also the null-free one, so this agrees
+    with ModeMixer when all four units are live.
+    """
+
+    def __init__(self, sim, servo_offset_rad=None, live=None):
+        mujoco.mj_forward(sim.model, sim.data)
+        com = sim.data.subtree_com[sim.base_id] - sim.data.xpos[sim.base_id]
+        com_local = sim.data.xmat[sim.base_id].reshape(3, 3).T @ com
+        self.r = sim.unit_pivots - com_local
+        self.sim = sim
+        self.offset = np.zeros(4) if servo_offset_rad is None else np.asarray(servo_offset_rad, float)
+        self.set_live(np.ones(4, dtype=bool) if live is None else np.asarray(live, dtype=bool))
+
+    def set_live(self, live):
+        self.live = np.asarray(live, dtype=bool)
+        y = np.array([0.0, 1.0, 0.0])
+        A = np.zeros((6, 8))
+        for k in range(4):
+            t = self.sim.thrust_axes[k]
+            A[0:3, k], A[3:6, k] = t, np.cross(self.r[k], t)
+            A[0:3, 4 + k], A[3:6, 4 + k] = y, np.cross(self.r[k], y)
+        cols = [k for k in range(4) if self.live[k]] + [4 + k for k in range(4) if self.live[k]]
+        self.cols, self.pinv = cols, np.linalg.pinv(A[:, cols])
+
+    def allocate(self, wrench, max_duty, preserve_direction=True):
+        x = np.zeros(8)
+        x[self.cols] = self.pinv @ np.asarray(wrench, dtype=float)
+        h, v = x[:4], x[4:]
+        f_max = self.sim.thrust_per_cmd * max_duty ** self.sim.thrust_curve_exp
+        # Saturation handling. pinv minimises ||x||, which is the wrong objective once the duty cap
+        # binds: clipping each unit independently changes the DIRECTION of the realised wrench, and
+        # for attitude control a wrench pointing the wrong way is worse than one that is too small.
+        # This matters most with a unit dead — three thrusters must each work harder, so the cap
+        # binds far sooner (measured: fault-AWARE allocation was worse than fault-unaware on
+        # attitude until this was added, purely because the naive solve saturated).
+        # Scale the whole solution instead: same direction, reduced magnitude.
+        if preserve_direction:
+            worst = np.max(np.hypot(h, v)) / max(f_max, 1e-9)
+            if worst > 1.0:
+                h, v = h / worst, v / worst
+        # a known servo bias rotates the (h, v) pair the other way before folding
+        c, s_ = np.cos(self.offset), np.sin(self.offset)
+        h, v = c * h + s_ * v, -s_ * h + c * v
+        h = np.where(np.abs(h) < 1e-9, 0.0, h)   # 折返し境界での符号ノイズを潰す
+        phi = np.arctan2(v, h)
+        rear = np.abs(phi) > np.pi / 2.0 + 1e-9
+        phi = np.where(rear, phi - np.sign(phi) * np.pi, phi)
+        mag = np.hypot(h, v)
+        u = np.where(rear, -1.0, 1.0) * (np.minimum(mag, f_max) / self.sim.thrust_per_cmd) \
+            ** (1.0 / self.sim.thrust_curve_exp)
+        dead = mag < 0.02 * f_max
+        servo = np.where(dead, 0.0, phi / self.sim.servo_range_rad)
+        u = np.where(dead | ~self.live, 0.0, u)
+        return np.concatenate([np.clip(servo, -1.0, 1.0), np.clip(u, -1.0, 1.0)])
+
+
 class ClassicalController:
     """obs -> 6-D wrench command. Attitude PD + exact buoyancy trim + observer-corrected cruise."""
 
