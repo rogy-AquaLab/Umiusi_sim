@@ -350,6 +350,7 @@ reports **cruise vs reachable** and the **power-weighted** null share (the accep
 | tool | what it does |
 | --- | --- |
 | `preflight_policy.py` | generate / verify `golden.npz` — a loaded policy is provably the validated one |
+| `classical_control.py` | non-learned baseline: geometric allocation (the existing ModeMixer) + PD attitude + a thrust-model velocity observer. The comparison RL had been missing — see `docs/rl.md` |
 | `replay_obs.py` | drive a policy closed-loop through its own `prev_action` with NO plant — the bench check `golden.npz` cannot do (it replays obs open-loop, so it misses defects in the mode integrator and the mixer deadband, both of which carry state) |
 | `export_policy.py` | write the deploy bundle (weights, obs norm, `meta.json` incl. `action_contract`) |
 | `capsize_gate.py` | roll-deviation / capsize gate under DR + disturbance, per esc cap |
