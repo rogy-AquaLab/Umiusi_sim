@@ -37,6 +37,7 @@ _ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(_ROOT / "packages" / "sim" / "src"))
 sys.path.insert(0, str(_ROOT / "tools"))
 
+from umiusi_perception.classical import cad_wrench_from_modes  # noqa: E402
 from classical_control import GeneralAllocator, _rep103, build_controller  # noqa: E402
 from umiusi_rl.envs.umiusi_pose_env import UmiusiPoseEnv, load_config  # noqa: E402
 from umiusi_rl.train import build_model  # noqa: E402
@@ -83,7 +84,7 @@ def rollout(cfg, steps, seed, gains, alloc_kw, label="esc", student=None, obs_rm
         v_hat = ctl.obs.update(obs[9:17], env.sim.get_state()["quat"], dt)
         m = ctl.wrench(obs[0:3], obs[3:6], obs[6:9], _rep103(v_hat), float(obs[17]))
         f_max_tot = ctl.f_max_total(ctl.cap)
-        w_des = np.array([m[0], m[2], -m[1], m[3], m[5], -m[4]]) * f_max_tot
+        w_des = cad_wrench_from_modes(m, f_max_tot)
         w += np.clip(w_des - w, -0.25 * f_max_tot, 0.25 * f_max_tot)
         a_teacher = alloc.allocate(w, ctl.cap)
         label_a = np.clip(alloc.hv_prev, -1.0, 1.0) if label == "forces" else a_teacher

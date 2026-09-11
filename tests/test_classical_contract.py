@@ -109,6 +109,17 @@ def test_the_robot_module_imports_with_neither_the_sim_wheel_nor_mujoco():
     assert r.returncode == 0, f"the deployable module needs the sim wheel:\n{r.stderr}"
 
 
+def test_mode_to_cad_wrench_matches_the_expression_it_replaced():
+    """`cad_wrench_from_modes` was open-coded in eight tools; it must agree with all of them."""
+    from umiusi_perception.classical import cad_wrench_from_modes
+
+    rng = np.random.default_rng(2)
+    for _ in range(20):
+        m, f = rng.normal(size=6), rng.uniform(1.0, 50.0)
+        old = np.array([m[0], m[2], -m[1], m[3], m[5], -m[4]]) * f
+        assert np.allclose(cad_wrench_from_modes(m, f), old, rtol=0, atol=0)
+
+
 def test_export_writes_a_loadable_bundle(tmp_path):
     out = tmp_path / "classical_bundle.json"
     r = subprocess.run([sys.executable, str(_ROOT / "tools" / "export_classical.py"),

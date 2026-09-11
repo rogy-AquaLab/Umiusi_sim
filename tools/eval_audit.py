@@ -30,6 +30,7 @@ _ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(_ROOT / "packages" / "sim" / "src"))
 sys.path.insert(0, str(_ROOT / "tools"))
 
+from umiusi_perception.classical import cad_wrench_from_modes  # noqa: E402
 from classical_control import GeneralAllocator, _rep103, build_controller  # noqa: E402
 from fault_compare import _env  # noqa: E402
 
@@ -53,7 +54,7 @@ def audit(episodes, dr, disturb, cruise, gains, alloc_kw, seed0=5000):
             v_hat = ctl.obs.update(obs[9:17], env.sim.get_state()["quat"], dt)
             mo = ctl.wrench(obs[0:3], obs[3:6], obs[6:9], _rep103(v_hat), float(obs[17]))
             f = ctl.f_max_total(ctl.cap)
-            w += np.clip(np.array([mo[0], mo[2], -mo[1], mo[3], mo[5], -mo[4]]) * f - w,
+            w += np.clip(cad_wrench_from_modes(mo, f) - w,
                          -0.25 * f, 0.25 * f)
             a = alloc.allocate(w, ctl.cap)
             obs, _r, term, trunc, info = env.step(a)

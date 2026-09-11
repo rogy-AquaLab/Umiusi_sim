@@ -36,6 +36,7 @@ sys.path.insert(0, str(_ROOT / "packages" / "sim" / "src"))
 sys.path.insert(0, str(_ROOT / "tools"))
 
 from bc_classical import make_cfg  # noqa: E402
+from umiusi_perception.classical import cad_wrench_from_modes  # noqa: E402
 from classical_control import GeneralAllocator, _rep103, build_controller  # noqa: E402
 from umiusi_rl.envs.umiusi_pose_env import UmiusiPoseEnv  # noqa: E402
 
@@ -66,7 +67,7 @@ def collect(cfg, steps, seed, gains, alloc_kw, label):
         v_hat = ctl.obs.update(obs[9:17], env.sim.get_state()["quat"], dt)
         m = ctl.wrench(obs[0:3], obs[3:6], obs[6:9], _rep103(v_hat), float(obs[17]))
         f = ctl.f_max_total(ctl.cap)
-        w += np.clip(np.array([m[0], m[2], -m[1], m[3], m[5], -m[4]]) * f - w, -0.25 * f, 0.25 * f)
+        w += np.clip(cad_wrench_from_modes(m, f) - w, -0.25 * f, 0.25 * f)
         a = alloc.allocate(w, ctl.cap)
         obs_buf[t] = obs
         act_buf[t] = np.clip(alloc.hv_prev, -1.0, 1.0) if label == "forces" else a
@@ -173,7 +174,7 @@ def teacher_reference(cfg, gains, alloc_kw, episodes=4, seed0=5000):
             v_hat = ctl.obs.update(obs[9:17], env.sim.get_state()["quat"], dt)
             m = ctl.wrench(obs[0:3], obs[3:6], obs[6:9], _rep103(v_hat), float(obs[17]))
             f = ctl.f_max_total(ctl.cap)
-            w += np.clip(np.array([m[0], m[2], -m[1], m[3], m[5], -m[4]]) * f - w, -0.25 * f, 0.25 * f)
+            w += np.clip(cad_wrench_from_modes(m, f) - w, -0.25 * f, 0.25 * f)
             obs, _r, term, trunc, info = env.step(alloc.allocate(w, ctl.cap))
             esc.append(np.median(np.abs(info["esc_applied"])))
             if info.get("step_idx", 0) > 150:

@@ -24,6 +24,7 @@ _ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(_ROOT / "packages" / "sim" / "src"))
 sys.path.insert(0, str(_ROOT / "tools"))
 
+from umiusi_perception.classical import cad_wrench_from_modes  # noqa: E402
 from classical_control import GeneralAllocator, _rep103, build_controller  # noqa: E402
 from umiusi_rl.envs.umiusi_pose_env import UmiusiPoseEnv, load_config  # noqa: E402
 
@@ -89,7 +90,7 @@ def run_classical(episodes, dead, bias_deg, aware, dr, disturb, gains=None, crui
             # the raw noisy obs, or the two disagree by the noise every step.
             cap = ctl.cap
             f_max_tot = ctl.f_max_total(cap)
-            w_des = np.array([m[0], m[2], -m[1], m[3], m[5], -m[4]]) * f_max_tot
+            w_des = cad_wrench_from_modes(m, f_max_tot)
             w += np.clip(w_des - w, -0.25 * f_max_tot, 0.25 * f_max_tot)   # wrench slew
             a = alloc.allocate(w, cap)
             obs, _r, term, trunc, info = env.step(

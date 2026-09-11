@@ -29,6 +29,7 @@ _ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(_ROOT / "packages" / "sim" / "src"))
 sys.path.insert(0, str(_ROOT / "tools"))
 
+from umiusi_perception.classical import cad_wrench_from_modes  # noqa: E402
 from classical_control import (ClassicalController, GeneralAllocator,  # noqa: E402
                                body_inertia_tensor)
 from fault_compare import _plant_fault  # noqa: E402
@@ -156,7 +157,7 @@ def main():
                 m = ctl.wrench(obs[0:3], obs[3:6], obs[6:9], _rep103(v_hat), float(obs[17]))
                 cap = ctl.cap                      # filtered; see ClassicalController.filter_cap
                 f_max_tot = ctl.f_max_total(cap)
-                w_des = np.array([m[0], m[2], -m[1], m[3], m[5], -m[4]]) * f_max_tot
+                w_des = cad_wrench_from_modes(m, f_max_tot)
                 w += np.clip(w_des - w, -0.25 * f_max_tot, 0.25 * f_max_tot)
                 a = alloc.allocate(w, cap)
                 st = env.sim.get_state()

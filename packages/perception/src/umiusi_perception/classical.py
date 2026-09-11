@@ -49,6 +49,23 @@ def cad_from_rep103(v):
     return np.array([v[0], v[2], -v[1]])
 
 
+def cad_wrench_from_modes(modes, f_max_total_n):
+    """[fx, fy, fz, tx, ty, tz] REP-103 modes in [-1,1] -> a 6-D CAD-frame wrench in N, N*m.
+
+    `ClassicalController.wrench` speaks REP-103 modes; `GeneralAllocator.allocate` takes newtons
+    in the CAD frame. THIS is the bridge, and it is a function because it was open-coded as
+    `[m[0], m[2], -m[1], m[3], m[5], -m[4]] * f_max` in eight different places — one of which is
+    where `fault_detect` came to feed a world-frame vector into a body-frame model. The deploy
+    node must call this, not write a ninth copy.
+
+    `f_max_total_n` is `ClassicalController.f_max_total(cap)` at the FILTERED cap (`ctl.cap`),
+    not the raw observed one — a mode means "this fraction of the full-cap wrench", so the two
+    have to be the same cap or the scaling is wrong by (cap_a/cap_b)**exp.
+    """
+    m = np.asarray(modes, dtype=float)
+    return np.concatenate([cad_from_rep103(m[0:3]), cad_from_rep103(m[3:6])]) * float(f_max_total_n)
+
+
 def quat_to_mat(quat):
     """[w, x, y, z] -> 3x3 rotation matrix. Here so the robot needs no MuJoCo for `mju_quat2Mat`."""
     w, x, y, z = (float(c) for c in quat)
