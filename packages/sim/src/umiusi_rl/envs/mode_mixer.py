@@ -87,6 +87,24 @@ class ModeMixer:
         h = self._Sh @ np.array([m[0], m[1], m[5]]) * f_max   # tangential force per unit [N]
         v = self._Sv @ np.array([m[2], m[3], m[4]]) * f_max   # vertical force per unit [N]
 
+        return self.forces_to_action(h, v, max_duty, prev_servo_cmd)
+
+    def forces_to_action(self, h, v, max_duty, prev_servo_cmd):
+        """Per-unit (tangential, vertical) force [N] -> action[8] = [servo x4, esc x4].
+
+        Factored out of `mix` because it is also the whole of `action_mode: "forces"`, where the
+        POLICY emits (h, v) directly. That action space exists because the map performed here is
+        DISCONTINUOUS: the servo range is +-90 deg, so |phi| > 90 folds by 180 deg with the esc
+        sign reversed, and holding station puts the required force right on that boundary
+        (|phi| median 84 deg). Measured consequence for a learned policy that emits the SERVO
+        ANGLE: behaviour cloning the classical controller plateaus with 93 % of its error on the
+        servo channels and 2.5x more of it near the fold, because a smooth network averages across
+        the branch cut; a unimodal Gaussian policy then cannot choose a side and thrashes between
+        them (3475 deg/s commanded, 14x the slew limit). In (h, v) the same behaviour is a
+        continuous function, and the fold happens here where it is exact.
+        """
+        h, v = np.asarray(h, dtype=float), np.asarray(v, dtype=float)
+        f_max = self.thrust_per_cmd * float(max_duty) ** self.thrust_curve_exp
         phi = np.arctan2(v, h)                                # (-pi, pi]
         rear = np.abs(phi) > np.pi / 2.0                      # unreachable half-plane ->
         phi = np.where(rear, phi - np.sign(phi) * np.pi, phi)  # fold and reverse the esc

@@ -320,6 +320,8 @@ def main():
     ap.add_argument("--curriculum-frac", type=float, default=None,
                     help="attitude_velocity: widen cone/yaw 0->config over this fraction of training (0=off)")
     ap.add_argument("--disturb", action="store_true", help="enable disturbances (water current + impulses)")
+    ap.add_argument("--dead-prob", type=float, default=None,
+                    help="P(one thruster is dead this episode) during training (domain_rand)")
     ap.add_argument("--domain-rand", action="store_true",
                     help="enable domain randomization (buoyancy/thrust/drag + obs noise + action latency; sim2real)")
     ap.add_argument("--timesteps", type=int, default=None, help="override total_timesteps")
@@ -327,13 +329,18 @@ def main():
                     help="warm-start from a previous run (dir with final.zip, or a .zip): copies the "
                          "policy weights (zero-padding first layers if the obs vector GREW, e.g. "
                          "observe_max_duty) and loads + FREEZES its VecNormalize stats")
+    ap.add_argument("--ent-coef", type=float, default=None,
+                    help="override ppo.ent_coef. The config value is tuned for FROM-SCRATCH "
+                         "plasticity; fine-tuning a good clone wants far less, or the entropy "
+                         "bonus inflates log_std and drags the policy off the cloned behaviour "
+                         "(measured: std 0.37 -> 1.25 over 10M steps, reward oscillating -104..129).")
     ap.add_argument("--learning-rate", type=float, default=None,
                     help="override ppo.learning_rate (use a reduced LR when continuing a run)")
     ap.add_argument("--cap-curriculum-frac", type=float, default=0.0,
                     help="ramp domain_rand.max_duty_range from [hi,hi] down to [lo,hi] over this "
                          "fraction of training (needs --domain-rand + max_duty_range): let cruise "
                          "form at the easy cap before exposing the barely-propelled low caps")
-    ap.add_argument("--action-mode", choices=["esc", "modes"], default=None,
+    ap.add_argument("--action-mode", choices=["esc", "modes", "forces"], default=None,
                     help="override env.action_mode: 'esc' = raw 8-D [servo x4, esc x4]; 'modes' = "
                          "6-D wrench modes [fx, fy, fz, tx, ty, tz] expanded by ModeMixer (the "
                          "null-space patterns are structurally unrepresentable — Umiusi_sim#3)")
@@ -373,6 +380,13 @@ def main():
         cfg.setdefault("disturbance", {})["enabled"] = True
     if args.domain_rand:
         cfg.setdefault("domain_rand", {})["enabled"] = True
+    if args.ent_coef is not None:
+        cfg["ppo"]["ent_coef"] = args.ent_coef
+    if args.dead_prob is not None:
+        # Train against thruster FAILURE. Without this the policy never meets a dead unit, so every
+        # fault comparison ran it on a failure absent from its training distribution while the
+        # geometric allocator was simply told which unit had died.
+        cfg.setdefault("domain_rand", {})["thrust_dead_prob"] = args.dead_prob
     if args.vel_cone is not None:
         cfg["env"]["vel_cmd_cone_deg"] = args.vel_cone
     if args.yaw_target is not None:
