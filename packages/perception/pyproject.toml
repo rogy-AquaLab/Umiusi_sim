@@ -12,6 +12,11 @@
 # perception, which inherently needs them. Heavy imports stay deferred to first-frame at the call sites so
 # `colcon build` / `--help` don't load torch.
 #
+# EXCEPT umiusi_perception.classical (the classical attitude/cruise controller): it imports NUMPY AND
+# NOTHING ELSE, on purpose, so a control-only deploy needs none of the above. The Pi has no internet, so
+# install it with `pip install --no-deps --no-index ./packages/perception` and let the declared deps be
+# satisfied (or not) by what is already on the image — a control-only node will run either way.
+#
 # FUTURE (reserved, not implemented): umiusi_perception.policy — load an EXPORTED RL policy (onnx/torchscript)
 # for on-robot inference. Training stays in umiusi_rl (dev); the robot only ever loads artifacts. See
 # ai/architecture.md. When added, onnxruntime moves into deps here.

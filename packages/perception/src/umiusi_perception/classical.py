@@ -414,8 +414,18 @@ class ClassicalController:
         self.cap_ref = float(plant.cap_ref)
         self.cap_tau, self.cap = cap_tau, None
 
-    def f_max_total(self, max_duty):
-        return f_max_total(self.plant, max_duty)
+    def f_max_total(self, max_duty=None):
+        """Full-cap wrench at this cap [N]. `None` means "the filtered cap", i.e. `self.cap`.
+
+        The deploy loop reads `ctl.f_max_total(ctl.cap)` to turn modes into newtons, and `reset()`
+        sets `self.cap = None` (the sentinel that makes the next `filter_cap` jump straight to the
+        observed cap instead of ramping from `cap_ref`). On the tick right after a disarm-reset,
+        before any `wrench()` call, that would hand this method a None. Fall back to `cap_ref`:
+        no wrench has been computed yet, so no scaling is being got wrong — and the alternative
+        is a TypeError in the control loop.
+        """
+        cap = self.cap if max_duty is None else max_duty
+        return f_max_total(self.plant, self.cap_ref if cap is None else cap)
 
     def reachable_speed(self, max_duty):
         """Terminal surge speed the CALIBRATED plant can hold at this cap [m/s].

@@ -120,6 +120,19 @@ def test_mode_to_cad_wrench_matches_the_expression_it_replaced():
         assert np.allclose(cad_wrench_from_modes(m, f), old, rtol=0, atol=0)
 
 
+def test_f_max_total_survives_the_tick_after_a_disarm_reset():
+    """`reset()` clears the filtered cap; the deploy loop still reads `ctl.f_max_total(ctl.cap)`."""
+    env = _env()
+    ctl = ClassicalController(contract_from_sim(env.sim), cap_tau=0.0)
+    env.close()
+    ctl.reset()
+    assert ctl.cap is None, "the sentinel that makes the next filter_cap jump, not ramp"
+    assert ctl.f_max_total(ctl.cap) == ctl.f_max_total(ctl.cap_ref)
+    # and once a wrench has run, it tracks the observed cap again
+    ctl.wrench(np.zeros(3), np.zeros(3), np.zeros(3), np.zeros(3), 0.4)
+    assert np.isclose(ctl.f_max_total(ctl.cap), ctl.f_max_total(0.4))
+
+
 def test_export_writes_a_loadable_bundle(tmp_path):
     out = tmp_path / "classical_bundle.json"
     r = subprocess.run([sys.executable, str(_ROOT / "tools" / "export_classical.py"),
