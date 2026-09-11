@@ -58,6 +58,27 @@ ACT_DIM = 8
 #     which the deploy node (or the UI) must clamp to. Stale here = silently wrong there.
 #   * eval.py — the "cruise vs reachable" acceptance metric.
 VEL_PER_CAP = 0.68
+
+
+def reachable_speed(thrust_per_cmd, thrust_curve_exp, drag_lin, drag_quad, max_duty):
+    """Terminal surge speed of this plant at this cap [m/s]: solve thrust = drag for v.
+
+    THE SINGLE DEFINITION. `VEL_PER_CAP * max_duty` is a straight line fitted near the deploy cap
+    0.25 and it is only right there, because thrust goes as cap**exp while drag goes as v**2:
+    at cap 0.5 the line says 0.340 m/s and the solve says 0.458 (41 % low), at cap 1.0 0.68 vs
+    0.961. Anything that scales a velocity by the cap — the env's command ceiling, the classical
+    controller's cruise feedforward — must use this, or it is quietly wrong at every cap but one.
+
+    Callers pass CALIBRATED constants (a deployed controller) or the episode's randomized ones
+    (the env); the solve does not care which, it just must not mix them.
+    """
+    f = 4.0 * float(thrust_per_cmd) * max(float(max_duty), 0.0) ** float(thrust_curve_exp)
+    lin, quad = float(drag_lin), float(drag_quad)
+    if quad <= 1e-9:
+        return f / max(lin, 1e-9)
+    return float((-lin + np.sqrt(lin * lin + 4.0 * quad * f)) / (2.0 * quad))
+
+
 # "full" feeds back the sim's servo angle and thrust state; "action" feeds back only the previous
 # action and is the sim2real-safe suite — the real vehicle cannot measure servo angle (RC servos
 # have no position feedback) and its rpm telemetry is partly dead, so do NOT add plant state to a
@@ -128,6 +149,9 @@ class UmiusiPoseEnv(gym.Env):
         # Cap-aware ceiling (0 = off): |v_cmd| <= frac * VEL_PER_CAP * max_duty, the episode's
         # physically reachable speed. Commands above it are unsatisfiable by any policy.
         self.vel_cmd_cap_frac = float(e.get("vel_cmd_cap_frac", 0.0))
+        # Compute the ceiling from the EPISODE's plant instead of the nominal VEL_PER_CAP constant.
+        # Default False keeps every pre-2026-09-08 run's command distribution identical.
+        self.vel_cmd_cap_from_plant = bool(e.get("vel_cmd_cap_from_plant", False))
         # P(high-speed episode): U(0.9, 1.0) * ceiling instead of U(0, ceiling), so near-top-speed
         # cruise is in the training distribution at all (a flat draw averages half the ceiling).
         self.vel_cmd_hi_prob = float(e.get("vel_cmd_hi_prob", 0.0))
@@ -215,8 +239,9 @@ class UmiusiPoseEnv(gym.Env):
         # Under "modes" everything downstream (latency buffer, DR, reward, prev_action and thus
         # the OBS CONTRACT) still sees the mixed 8-D command — keep it that way.
         self.action_mode = e.get("action_mode", "esc")
-        if self.action_mode not in ("esc", "modes"):
-            raise ValueError(f"unknown action_mode {self.action_mode!r}; expected 'esc' or 'modes'")
+        if self.action_mode not in ("esc", "modes", "forces"):
+            raise ValueError(f"unknown action_mode {self.action_mode!r}; "
+                             "expected 'esc', 'modes' or 'forces'")
         if self.action_mode == "modes":
             # NOMINAL plant constants (not the DR-perturbed episode values): the deployed mixer
             # runs with the same nominals, and the mismatch is the policy's feedback problem.
@@ -240,6 +265,14 @@ class UmiusiPoseEnv(gym.Env):
             self.w_null = 0.0
         else:
             self._mixer = None
+        # 8-D per-unit (tangential, vertical) force, each in [-1, 1] of the cap force. Same actuator
+        # DOF as "esc" — including the 2-D null space "modes" cannot reach — but CONTINUOUS: the
+        # 180 deg servo fold is done exactly by the mixer instead of having to be represented by the
+        # network. See ModeMixer.forces_to_action for the measurement that motivates it.
+        self._force_mixer = (ModeMixer(self.sim.unit_names, self.sim.thrust_axes,
+                                       self.sim.unit_pivots, self.sim.servo_range_rad,
+                                       self.sim.thrust_per_cmd, self.sim.thrust_curve_exp)
+                             if self.action_mode == "forces" else None)
         self._mode_prev_servo = np.zeros(4)
         self._mode_prev_modes = np.zeros(MODE_DIM)
         # Adaptive constraint multipliers (name -> lambda, default 1.0), set from outside by
@@ -346,6 +379,32 @@ class UmiusiPoseEnv(gym.Env):
         self._servo_offset = np.radians(u(-off, off, size=4)) if off > 0.0 else np.zeros(4)
         tuf = self.dr.get("thrust_unit_frac", 0.0)
         self._thrust_gain = 1.0 + u(-1, 1, size=4) * tuf if tuf > 0.0 else np.ones(4)
+        # A DEAD unit is just gain 0 on the path above, so failure needs no new plant code — but
+        # without this knob the policy never meets one, and every fault comparison so far tested it
+        # on a failure absent from its training distribution while the geometric allocator was
+        # simply TOLD which unit died. Default 0.0 keeps every existing run bit-identical.
+        dead_p = self.dr.get("thrust_dead_prob", 0.0)
+        if dead_p > 0.0 and u(0.0, 1.0) < dead_p:
+            self._thrust_gain[int(u(0.0, 4.0)) % 4] = 0.0
+
+    def _reachable_speed(self):
+        """Terminal surge speed THIS EPISODE's plant can actually hold [m/s].
+
+        `VEL_PER_CAP * max_duty` tracks the esc cap but not the plant, and domain_rand moves the
+        plant far more than the cap: the thrust exponent alone spans 1.5-2.8, which at cap 0.25 is
+        a 5x range in thrust. Measured over 60 DR episodes, the true reachable speed spans 4.8x
+        (0.133-0.377 m/s) while the nominal formula spans 1.75x — so the command was both
+        UNREACHABLE in the thin tail and, far more often, far too EASY: the median command was only
+        0.34 of what the vehicle could do, which is why near-limit cruise barely appears in
+        training at all. Solving thrust = drag against the episode's own constants fixes both ends.
+
+        VEL_PER_CAP stays the DEPLOY-side constant (docs/rl.md, eval.py): the real vehicle has one
+        plant, and the operator needs a number, not a solve.
+        """
+        if not self.vel_cmd_cap_from_plant:
+            return VEL_PER_CAP * self.sim.max_duty
+        return reachable_speed(self.sim.thrust_per_cmd, self.sim.thrust_curve_exp,
+                               self.sim.drag_lin[0], self.sim.drag_quad[0], self.sim.max_duty)
 
     def _place_marker(self, state):
         """Move the visual target marker to show the commanded pose (rendering only)."""
@@ -472,8 +531,8 @@ class UmiusiPoseEnv(gym.Env):
                     elev = np.arcsin(self.np_random.uniform(-s_lim, s_lim))
                 dhat = np.array([np.cos(elev) * np.cos(ang), np.sin(elev), np.cos(elev) * np.sin(ang)])
             speed_hi = self.vel_cmd_max
-            if self.vel_cmd_cap_frac > 0.0:  # _apply_domain_rand already set this episode's cap
-                speed_hi = min(speed_hi, self.vel_cmd_cap_frac * VEL_PER_CAP * self.sim.max_duty)
+            if self.vel_cmd_cap_frac > 0.0:  # _apply_domain_rand already set this episode's plant
+                speed_hi = min(speed_hi, self.vel_cmd_cap_frac * self._reachable_speed())
             if self.vel_cmd_hi_prob > 0.0 and self.np_random.uniform() < self.vel_cmd_hi_prob:
                 speed_cmd = self.np_random.uniform(0.9, 1.0) * speed_hi
             else:
@@ -530,6 +589,12 @@ class UmiusiPoseEnv(gym.Env):
             cmd_perp = (float(np.linalg.norm(f_cmd - (f_cmd @ (d / dn)) * (d / dn))) if dn > 1e-6
                         else float(np.linalg.norm(f_cmd)))
             action = self._mixer.mix(action, self.sim.max_duty, self._mode_prev_servo)
+            self._mode_prev_servo = action[:4].copy()
+        elif self._force_mixer is not None:     # 8-D (h, v) forces -> actuator command
+            f_max = (self.sim.thrust_per_cmd
+                     * float(self.sim.max_duty) ** self.sim.thrust_curve_exp)
+            action = self._force_mixer.forces_to_action(
+                action[:4] * f_max, action[4:8] * f_max, self.sim.max_duty, self._mode_prev_servo)
             self._mode_prev_servo = action[:4].copy()
         if self._act_latency > 0:  # sim2real: apply a delayed command (control->actuation lag)
             self._act_buf.append(action)

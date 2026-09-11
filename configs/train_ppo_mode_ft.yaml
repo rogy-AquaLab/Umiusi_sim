@@ -69,10 +69,25 @@ env:
   vel_cmd_horizontal_prob: 0.35   # 3-D only: floor of pure-horizontal episodes (multimodality guard —
                                   # the drone-mode vertical basin otherwise swallows horizontal cruise)
   vel_cmd_cone_deg: 180.0         # v_cmd direction within +/- this of +X (0 = fixed +X; curriculum widens it)
-  vel_cmd_cap_frac: 0.8           # sample |v_cmd| <= this * (0.68 * max_duty), the episode's physically
-                                  # reachable speed (open-loop ceiling measured 2026-08-26: 0.171 m/s at cap
-                                  # 0.25). The base config's flat U(0, 0.4) commands speeds no policy can
-                                  # reach at low caps — cruise never forms chasing them (Umiusi_sim#3)
+  vel_cmd_cap_from_plant: true    # ceiling from THIS episode's randomized plant (thrust curve,
+                                  # gain, drag), not the nominal VEL_PER_CAP. DR moves the plant
+                                  # 4.8x while the nominal formula moves 1.75x, so the old ceiling
+                                  # was unreachable in the thin tail and — far more often — much
+                                  # too easy: the median command was 0.34 of capability, and
+                                  # near-limit cruise was effectively absent from training.
+  vel_cmd_cap_frac: 0.6           # WAS 0.8, which commanded speeds the vehicle cannot hold while
+                                  # also controlling attitude: 0.68*max_duty is the OPEN-LOOP
+                                  # terminal speed with every thruster on surge, so 0.8 of it costs
+                                  # ~64 % of the thrust to drag alone. Measured at cap 0.25 (
+                                  # tools/eval_audit.py): esc saturated 19.5 % of cruise steps
+                                  # (30 % with singularity avoidance). At 0.6 that falls to ~5 %
+                                  # AND attitude improves (ori 0.045 -> 0.038) AND the vehicle
+                                  # actually reaches the command (101 % -> 109 % of it). Every RL
+                                  # run before 2026-09-08 trained against the unreachable 0.8.
+                                  # |v_cmd| <= this * (VEL_PER_CAP * max_duty). The base config's
+                                  # flat U(0, 0.4) is worse still: it commands speeds no policy can
+                                  # reach at low caps, and cruise never forms chasing them
+                                  # (Umiusi_sim#3).
   # Mode-command slew (modes action mode only; 0 = off). Null diagnosis (2026-08-26): the
   # policy settled into a permanent bang-bang thrash (servo cmd jumps > 65 deg median, esc sign
   # flips near-every step) whose byproduct is the ~14% realized null. Rate-limiting the 6-D MODE

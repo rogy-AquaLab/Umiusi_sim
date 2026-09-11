@@ -19,7 +19,7 @@ import yaml
 from stable_baselines3 import PPO, SAC, TD3
 from stable_baselines3.common.vec_env import DummyVecEnv, VecNormalize
 
-from umiusi_rl.envs.umiusi_pose_env import VEL_PER_CAP, UmiusiPoseEnv, load_config
+from umiusi_rl.envs.umiusi_pose_env import UmiusiPoseEnv, load_config, reachable_speed
 
 ALGOS = {"ppo": PPO, "sac": SAC, "td3": TD3}
 
@@ -159,7 +159,13 @@ def main():
         vel_errs.append(info.get("vel_err", 0.0))
         vel_alongs.append(info.get("vel_along", 0.0))
         vel_cmds.append(info.get("vel_cmd_speed", 0.0))
-        vel_reach.append(min(info.get("vel_cmd_speed", 0.0), VEL_PER_CAP * env.sim.max_duty))
+        # The ceiling is a question about THIS episode's plant, not about how the command was
+        # sampled, so solve thrust = drag against the episode's own constants. VEL_PER_CAP * cap
+        # is a line fitted at cap 0.25 and reads ~18 % low even there, which inflated this metric
+        # past 100 % — an "achievement rate" above 1 was the denominator, not the policy.
+        reach = reachable_speed(env.sim.thrust_per_cmd, env.sim.thrust_curve_exp,
+                                env.sim.drag_lin[0], env.sim.drag_quad[0], env.sim.max_duty)
+        vel_reach.append(min(info.get("vel_cmd_speed", 0.0), reach))
         hold_fracs.append(in_tol / max(steps, 1))
         successes.append(info.get("is_success", False))
         thrust_uses.append(thrust_sum / max(steps, 1))
@@ -185,12 +191,12 @@ def main():
     print(f"mean final depth err: {np.mean(depth_errs):.3f} m")
     print(f"attitude_velocity  : speed along cmd {np.mean(vel_alongs):.3f} / desired {np.mean(vel_cmds):.3f} m/s"
           f"   sideways drift {np.mean(vel_errs):.3f} m/s")
-    # "Cruise formed" acceptance is judged against the PHYSICALLY REACHABLE speed at the episode's
-    # cap (open-loop ceiling ~ VEL_PER_CAP * max_duty), not the raw command — commands above the
-    # ceiling are unsatisfiable by any policy (measured 2026-08-26, Umiusi_sim#3).
+    # "Cruise formed" acceptance is judged against the PHYSICALLY REACHABLE speed of the episode's
+    # plant at its cap, not the raw command — commands above the ceiling are unsatisfiable by any
+    # policy (measured 2026-08-26, Umiusi_sim#3).
     if np.mean(vel_reach) > 1e-9:
         print(f"cruise vs reachable: {np.mean(vel_alongs) / np.mean(vel_reach) * 100:.0f}%   "
-              f"(along / min(desired, {VEL_PER_CAP:.2f}*cap); ACCEPT >= 70%)")
+              f"(along / min(desired, thrust=drag solve at cap); ACCEPT >= 70%)")
     print(f"mean hold fraction : {np.mean(hold_fracs) * 100:.0f}%   (steps within tolerance)")
     print(f"final-step success : {np.mean(successes) * 100:.0f}%")
     print(f"mean thrust use    : {np.mean(thrust_uses):.3f}   (mean |esc|, 0..1 -> minimize)")
