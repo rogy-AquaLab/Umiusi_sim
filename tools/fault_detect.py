@@ -21,6 +21,7 @@ import argparse
 import sys
 from pathlib import Path
 
+import mujoco
 import numpy as np
 import yaml
 
@@ -28,7 +29,8 @@ _ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(_ROOT / "packages" / "sim" / "src"))
 sys.path.insert(0, str(_ROOT / "tools"))
 
-from classical_control import ClassicalController, GeneralAllocator  # noqa: E402
+from classical_control import (ClassicalController, GeneralAllocator,  # noqa: E402
+                               body_inertia_tensor)
 from fault_compare import _plant_fault  # noqa: E402
 from classical_control import _rep103  # noqa: E402
 from umiusi_rl.envs.umiusi_pose_env import UmiusiPoseEnv, load_config  # noqa: E402
@@ -41,13 +43,13 @@ class FaultBank:
         self.sim, self.r, self.window = sim, r, window
         # 系の慣性: base_link 単体ではなくスラスタ 4 基を含めた合成 (平行軸)。
         # 共通の誤差でも仮説間の識別性を鈍らせるので、ここは合わせておく。
-        inertia = np.array([sim.model.body_inertia[sim.base_id][i] for i in range(3)], dtype=float)
-        m_t = float(sim.model.body_mass[sim.thr_ids[0]])
-        for k in range(4):
-            d = np.asarray(r[k], dtype=float)
-            inertia += m_t * (np.dot(d, d) - d * d)
-        self.I = inertia
+        self.I = body_inertia_tensor(sim, r)
+        self.Iinv = np.linalg.inv(self.I)
         self.drag_ang = sim.drag_lin[3:6], sim.drag_quad[3:6]
+        c = sim.cfg           # buoyancy righting couple: the CoB sits above the CoM and the task
+        self.f_buoy = float(c["water"]["density"] * c["water"]["displaced_volume"]   # commands
+                            * abs(c["sim"]["gravity"][1]))                           # 45 deg tilts
+        self.h_cob = float(sim.buoyancy_offset)
         self.buf = []                      # (per-unit force vectors, omega)
 
     def reset(self):
@@ -61,15 +63,26 @@ class FaultBank:
             m += np.cross(self.r[k], f_units[k])
         return m
 
-    def push(self, action, omega):
-        """action = the command AS ISSUED; omega = measured body angular rate (sim frame)."""
+    def push(self, action, omega_world, quat):
+        """action = the command AS ISSUED; omega_world = sim.get_state()["ang_vel"].
+
+        That vector is in the WORLD frame (mj_objectVelocity with flg_local=0), while r,
+        thrust_axes and the inertia below are body-local. Until this rotation was added the bank
+        was scoring a body-frame prediction against a world-frame measurement, which is what the
+        recorded "identification is excitation-limited, 12-52 % in hold" conclusion was based on.
+        """
+        Rm = np.zeros(9)
+        mujoco.mju_quat2Mat(Rm, np.asarray(quat, dtype=float))
+        omega = Rm.reshape(3, 3).T @ np.asarray(omega_world, dtype=float)
         servo = np.asarray(action[:4]) * self.sim.servo_range_rad
         u = np.asarray(action[4:8])
         th = np.sign(u) * np.abs(u) ** self.sim.thrust_curve_exp * self.sim.thrust_per_cmd
         y = np.array([0.0, 1.0, 0.0])
         f = np.array([np.cos(servo[k]) * th[k] * self.sim.thrust_axes[k] + np.sin(servo[k]) * th[k] * y
                       for k in range(4)])
-        self.buf.append((f, np.asarray(omega, dtype=float).copy()))
+        f_body = Rm.reshape(3, 3).T @ np.array([0.0, self.f_buoy, 0.0])
+        restore = np.cross(np.array([0.0, self.h_cob, 0.0]), f_body)
+        self.buf.append((f, np.asarray(omega, dtype=float).copy(), restore))
         if len(self.buf) > self.window:
             self.buf.pop(0)
 
@@ -82,9 +95,9 @@ class FaultBank:
         scores = []
         for drop in (None, 0, 1, 2, 3):
             pred = np.zeros(3)
-            for f, w in self.buf[:-1]:
-                m = self._moment(f, drop) - (lin * w + quad * np.abs(w) * w)
-                pred += m / self.I * dt
+            for f, w, restore in self.buf[:-1]:
+                m = self._moment(f, drop) + restore - (lin * w + quad * np.abs(w) * w)
+                pred += self.Iinv @ m * dt
             scores.append(float(np.sum((pred - d_omega) ** 2)))
         order = np.argsort(scores)
         best = order[0]
@@ -96,6 +109,12 @@ def main():
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     ap.add_argument("--episodes", type=int, default=6)
     ap.add_argument("--window", type=int, default=25)
+    ap.add_argument("--prefer-deg", type=float, default=None,
+                    help="azimuth-singularity avoidance. The old allocator chattered the servos "
+                         "(15 %% of steps past the slew limit), which is noise in the very residual "
+                         "the hypothesis bank reads — so identification may be excitation-limited "
+                         "OR just drowned. This separates the two.")
+    ap.add_argument("--w-move", type=float, default=3.0)
     ap.add_argument("--dr", action="store_true")
     ap.add_argument("--cruise", action="store_true",
                     help="速度指令あり = 励振あり。同定には persistent excitation が要る")
@@ -119,14 +138,15 @@ def main():
         if not args.cruise:
             env.vel_cmd_zero_prob = 1.0
         ctl = ClassicalController(env.sim, mass, net_buoy)
-        alloc = GeneralAllocator(env.sim)
+        alloc = GeneralAllocator(env.sim, **({} if args.prefer_deg is None else
+                                 {'prefer_deg': args.prefer_deg, 'w_move': args.w_move}))
         bank = FaultBank(env.sim, alloc.r, window=args.window)
-        f_max_tot = 4.0 * env.sim.thrust_per_cmd * env.sim.max_duty ** env.sim.thrust_curve_exp
         dt = 1.0 / env.sim.cfg["sim"]["control_rate_hz"]
         hits, tot, first, margins = 0, 0, [], []
         for ep in range(args.episodes):
             obs, _ = env.reset(seed=5000 + ep)
             ctl.reset()
+            alloc.reset()
             bank.reset()
             w = np.zeros(6)
             step, detected_at = 0, None
@@ -134,10 +154,13 @@ def main():
             while not done:
                 v_hat = ctl.obs.update(obs[9:17], env.sim.get_state()["quat"], dt)
                 m = ctl.wrench(obs[0:3], obs[3:6], obs[6:9], _rep103(v_hat), float(obs[17]))
+                cap = ctl.cap                      # filtered; see ClassicalController.filter_cap
+                f_max_tot = ctl.f_max_total(cap)
                 w_des = np.array([m[0], m[2], -m[1], m[3], m[5], -m[4]]) * f_max_tot
                 w += np.clip(w_des - w, -0.25 * f_max_tot, 0.25 * f_max_tot)
-                a = alloc.allocate(w, env.sim.max_duty)
-                bank.push(a, env.sim.get_state()["ang_vel"])
+                a = alloc.allocate(w, cap)
+                st = env.sim.get_state()
+                bank.push(a, st["ang_vel"], st["quat"])
                 obs, _r, term, trunc, _i = env.step(_plant_fault(a, truth, 0.0, env.sim.servo_range_rad))
                 guess, margin = bank.identify(dt)
                 if step >= args.window:

@@ -230,6 +230,12 @@ domain_rand:
                                   # bag-fitted (exp/max confounded below |u|=0.2) — bench test pins it
   buoyancy_offset_frac: 0.6       # CoB height *= 1 + U(-frac, frac): bag fit says 5-10 mm (was 50!)
   thrust_unit_frac: 0.10          # per-thruster thrust gain *= 1 + U(-frac, frac) (unit asymmetry)
+  thrust_dead_prob: 0.0           # P(one unit produces NO thrust this episode). 0 = the historical
+                                  # behaviour: the policy never meets a failure, so it cannot learn
+                                  # to fly on three units the way the geometric allocator can be
+                                  # told to. Raise it (0.2-0.3) to train a fault-tolerant policy —
+                                  # that is the only way the RL-vs-classical fault comparison is
+                                  # fair, since the allocator IS given the failure.
   max_duty_range: [0.2, 0.4]      # plant esc cap U(lo, hi) per episode: the operator raises the
                                   # deploy clamp 0.25 -> 0.4 as trust builds; sampled (and observed,
                                   # env.observe_max_duty) so ONE policy stays valid at any cap
