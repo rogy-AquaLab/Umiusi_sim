@@ -396,8 +396,14 @@ class ClassicalController:
     """
 
     def __init__(self, plant, kp=2.2, kd=0.45, k_ff=1.0, k_v=1.2,
-                 ki=0.0, i_max=0.35, cap_norm=True, cap_tau=1.0):
+                 ki=0.0, i_max=0.35, cap_norm=True, cap_tau=1.0, k_v_vert=0.0):
         self.kp, self.kd, self.k_ff, self.k_v = kp, kd, k_ff, k_v
+        # 鉛直の速度フィードバック。**既定 0 は「今までどおり」を意味する** — 従来この軸は
+        # 浮力トリム (定数) しか持たず、v_cmd の z 成分は捨てられていた。前進 (feed-forward)
+        # 側は v_cmd_z に比例するので指令 0 なら寄与 0、つまり**指令を出さない限り挙動は
+        # 従来とビット単位で同じ**。上げるのは鉛直の観測 (VelocityObserver の z) を信用して
+        # からにすること — 深度センサではなく指令からの推測なので、水平ほど当てにならない。
+        self.k_v_vert = k_v_vert
         self.ki, self.i_max = ki, i_max
         self.plant = plant
         self.net_buoy_up = plant.net_buoy_up
@@ -437,6 +443,16 @@ class ClassicalController:
         p = self.plant
         return reachable_speed(p.thrust_per_cmd, p.thrust_curve_exp,
                                p.drag_lin[0], p.drag_quad[0], max_duty)
+
+    def reachable_speed_vert(self, max_duty):
+        """鉛直 (heave) の到達速度 [m/s]。水平とは抗力が違うので別に解く。
+
+        **FRAME TRAP**: 抗力の配列は CAD 系で +Y が上なので、鉛直は行 1。行 0/2 が水平
+        (surge / sway)。`reachable_speed` に行 0 を渡すのが水平版で、ここは行 1。
+        """
+        p = self.plant
+        return reachable_speed(p.thrust_per_cmd, p.thrust_curve_exp,
+                               p.drag_lin[1], p.drag_quad[1], max_duty)
 
     def reset(self):
         self.obs.reset()
@@ -502,4 +518,21 @@ class ClassicalController:
         # max_duty — and the cap is a runtime parameter the operator raises (0.25 -> 0.4). Fixing
         # the trim at the nominal cap left a standing heave error at every other cap.
         fz_trim = -self.net_buoy_up / f_max_total(self.plant, cap)
-        return np.clip([f_xy[0], f_xy[1], fz_trim, tau[0], tau[1], tau[2]], -1.0, 1.0)
+        # Heave. Same shape as the horizontal pair, one axis over: hold the commanded vertical
+        # speed against its own drag and add the buoyancy trim on top. Until this existed the z
+        # channel carried ONLY the trim, so a commanded descent/climb was silently dropped — the
+        # deploy path had no way to reach the 1.5 m balloons (the FSM's heave went nowhere).
+        # FRAME TRAP again: v_cmd is REP-103 (z up) but the drag arrays are CAD (+Y up), so the
+        # vertical drag is row 1, NOT row 2 (row 2 is sway).
+        v_cmd_z = float(np.asarray(v_cmd_body)[2])
+        v_ref_z = self.reachable_speed_vert(cap)
+        if v_ref_z > 0.0 and abs(v_cmd_z) > v_ref_z:
+            v_cmd_z = float(np.copysign(v_ref_z, v_cmd_z))  # 到達できない指令は誤差が閉じない
+        drag_z = (self.plant.drag_lin[1] * v_cmd_z
+                  + self.plant.drag_quad[1] * abs(v_cmd_z) * v_cmd_z)
+        # k_v_vert の既定は 0 なので、指令 0 かつ既定ゲインなら fz は fz_trim のまま =
+        # 従来と完全に同じ。前進項は v_cmd_z に比例するので指令 0 で消える
+        fz = (fz_trim + self.k_ff * drag_z / self.f_max_total(cap)
+              + self.k_v_vert * (v_cmd_z - float(np.asarray(v_hat_body)[2]))
+              / max(v_ref_z, 1e-9))
+        return np.clip([f_xy[0], f_xy[1], fz, tau[0], tau[1], tau[2]], -1.0, 1.0)
