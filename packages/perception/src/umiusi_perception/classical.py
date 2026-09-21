@@ -66,6 +66,16 @@ def cad_wrench_from_modes(modes, f_max_total_n):
     return np.concatenate([cad_from_rep103(m[0:3]), cad_from_rep103(m[3:6])]) * float(f_max_total_n)
 
 
+def _folded_abs(phi):
+    """|servo angle| the +-90 deg fold actually produces, for an unfolded force azimuth phi.
+
+    Past 90 deg the allocator folds by 180 and reverses the esc, so |phi| = 103 deg reaches the
+    servo as 77 deg. Distance to the azimuth singularity has to be judged on THIS number.
+    """
+    a = np.abs(phi)
+    return np.where(a > np.pi / 2.0, np.pi - a, a)
+
+
 def quat_to_mat(quat):
     """[w, x, y, z] -> 3x3 rotation matrix. Here so the robot needs no MuJoCo for `mju_quat2Mat`."""
     w, x, y, z = (float(c) for c in quat)
@@ -293,7 +303,7 @@ class GeneralAllocator:
         # against 84 deg in hold), so the search is skipped and costs nothing.
         x0 = np.zeros(8)
         x0[self.cols] = xr
-        if np.max(np.abs(np.arctan2(x0[4:], x0[:4]))) <= self.prefer:
+        if np.max(_folded_abs(np.arctan2(x0[4:], x0[:4]))) <= self.prefer:
             self.z_prev = None
             return xr
         prefer = self.prefer
@@ -307,9 +317,21 @@ class GeneralAllocator:
         h, v = x[:, :4], x[:, 4:]
         mag = np.hypot(h, v)
         phi = np.arctan2(v, h)
-        into = np.maximum(0.0, np.abs(phi) - prefer)               # rad past the preferred angle
-        # the servo angle is the FOLDED one, and that is what has to move smoothly
+        # Distance to the singularity is measured on the FOLDED angle, because that is where the
+        # servo physically sits: an unfolded 103 deg IS a folded 77 deg, i.e. 13 deg clear of the
+        # limit, but scoring it unfolded charged it 43 deg of violation. That over-charge had a
+        # sharp consequence rather than a cosmetic one. Holding station the minimum-norm solution
+        # is EXACTLY vertical (h = 0 for every unit), and every null direction produces h with
+        # ALTERNATING signs across units — so any escape puts half the units past 90 deg, the
+        # unfolded cost punished them, and argmin refused to move at all. The whole feature was
+        # inert in the regime it was built for: the vehicle parked on the fold at |servo| = 90 deg,
+        # where the sign of the next horizontal demand decides a 180 deg servo command.
+        # Measured (8 ep, DR + disturbance, cap 0.25), unfolded -> folded:
+        #   hold    ori 0.1026 -> 0.0910, servo rate p95 2987 -> 1608 deg/s, |servo| med 63 -> 39 deg
+        #   cruise  ori 0.0937 -> 0.0937, servo rate p95 2581 -> 1662 deg/s, |servo| med 53 -> 35 deg
+        # Still 6x over the 250 deg/s slew limit, so this is an improvement, not a cure.
         phi_s = np.where(np.abs(phi) > np.pi / 2.0, phi - np.sign(phi) * np.pi, phi)
+        into = np.maximum(0.0, np.abs(phi_s) - prefer)             # rad past the preferred angle
         move = np.zeros_like(phi_s) if self.phi_prev is None else phi_s - self.phi_prev[None, :]
         # price approaching the cap, not only exceeding it: a candidate that sits AT the cap has no
         # margin left for the next disturbance, and `preserve_direction` will then shrink the whole

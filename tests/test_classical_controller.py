@@ -165,6 +165,38 @@ def test_cruise_feedforward_is_the_drag_model_at_every_cap():
     env.close()
 
 
+def test_singularity_avoidance_actually_leaves_the_fold_at_hold_station():
+    """The regime the feature exists for, and the one where it was silently inert.
+
+    Holding station the required wrench is pure buoyancy trim, so the minimum-norm solution has
+    h = 0 for every unit and every servo sits at EXACTLY +-90 deg — on the fold, where the sign of
+    the next horizontal demand decides a 180 deg servo command. Scoring distance-to-singularity on
+    the unfolded angle made every escape look worse than staying (each null direction gives h with
+    alternating signs, so half the units land past 90 deg), and argmin never moved. Anything that
+    re-introduces that will leave these servos pinned at the limit again.
+    """
+    from classical_control import GeneralAllocator
+    from umiusi_perception.classical import cad_wrench_from_modes
+
+    env = _env(dr=False)
+    ctl = build_controller(env, cap_tau=0.0, kp=1.0, kd=0.35)
+    plain = GeneralAllocator(env.sim)
+    avoid = GeneralAllocator(env.sim, prefer_deg=60.0, w_move=3.0, dead_hold=True)
+    cap = 0.25
+    for _ in range(8):                        # let the warm-started search settle
+        m = ctl.wrench(np.zeros(3), np.zeros(3), np.zeros(3), np.zeros(3), cap)
+        w = cad_wrench_from_modes(m, ctl.f_max_total(ctl.cap))
+        a_plain, a_avoid = plain.allocate(w, cap), avoid.allocate(w, cap)
+    env.close()
+
+    # without avoidance the solution is exactly vertical: every servo on the fold
+    assert np.allclose(np.abs(a_plain[:4]), 1.0, atol=1e-6), \
+        f"expected the minimum-norm hold solution to sit on the fold, got {a_plain[:4]}"
+    # with it, every servo must be clear of the limit — this is the assertion that was failing
+    deg = np.degrees(a_avoid[:4] * env.sim.servo_range_rad)
+    assert np.max(np.abs(deg)) < 60.0, f"avoidance left a servo on the fold: {np.round(deg, 1)}"
+
+
 def test_singularity_avoidance_does_not_change_the_wrench():
     """The null space is the whole licence for `prefer_deg`: moving in it must be wrench-neutral.
 
