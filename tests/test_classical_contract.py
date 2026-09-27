@@ -145,3 +145,34 @@ def test_export_writes_a_loadable_bundle(tmp_path):
     m = ctl.wrench(np.zeros(3), np.zeros(3), np.zeros(3), np.zeros(3), 0.25)
     assert m[2] < 0.0, f"buoyancy trim should push down, got {m[2]}"
     assert set(bundle) >= {"contract", "gains", "allocator", "frames", "uncalibrated"}
+
+
+def test_the_bundle_pins_every_knob_and_leaves_no_library_default(tmp_path):
+    """A bundle that omits a parameter inherits whatever the library defaults to THAT day.
+
+    That is the A-11 failure one level down: edit a default in `umiusi_perception.classical` and
+    every already-exported bundle silently means something new, with nothing in the file to show it.
+    The deployed robot must be reproducible from the bundle alone, so the bundle names every
+    constructor parameter — including the ones nobody tuned. `live` is excluded on purpose: which
+    thrusters are alive is decided on the robot, not weeks earlier at export time.
+    """
+    import inspect
+
+    from umiusi_perception.classical import GeneralAllocator
+
+    out = tmp_path / "classical_bundle.json"
+    r = subprocess.run([sys.executable, str(_ROOT / "tools" / "export_classical.py"),
+                        "--out", str(out)], capture_output=True, text=True, cwd=_ROOT)
+    assert r.returncode == 0, r.stderr
+    bundle = json.loads(out.read_text())
+
+    for cls, key in ((ClassicalController, "gains"), (GeneralAllocator, "allocator")):
+        want = {n for n, p in inspect.signature(cls.__init__).parameters.items()
+                if n not in ("self", "plant", "live") and p.kind is not p.VAR_KEYWORD}
+        missing = want - set(bundle[key])
+        assert not missing, (f"{cls.__name__} parameter(s) {sorted(missing)} are not in the "
+                             f"bundle's '{key}' — the robot would inherit a library default")
+    # and the whole thing still constructs from the file alone
+    plant = PlantContract.from_dict(bundle["contract"])
+    ClassicalController(plant, **bundle["gains"])
+    GeneralAllocator(plant, **bundle["allocator"])

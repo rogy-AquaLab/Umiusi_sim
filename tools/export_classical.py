@@ -34,6 +34,7 @@ _ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(_ROOT / "tools"))
 
 from classical_control import contract_from_sim  # noqa: E402
+from umiusi_perception.classical import ClassicalController, GeneralAllocator  # noqa: E402
 from umiusi_rl.envs.umiusi_pose_env import UmiusiPoseEnv, load_config  # noqa: E402
 
 # The tuned operating point (tools/classical_tune.py --stage confirm, DR + disturbance).
@@ -48,9 +49,47 @@ from umiusi_rl.envs.umiusi_pose_env import UmiusiPoseEnv, load_config  # noqa: E
 # direction (autonomy's tools/navigator_sim.py, and MuJoCo here). LEFT AT 0.35 ANYWAY because the
 # difference is small next to the damage (ori 0.503 vs 0.482 rad at cap 0.30 — 4 %, against an 8x
 # degradation from the dead time itself) and 0.5 has never been tried on the vehicle. The deploy
-# side carries 0.5 as a documented recommendation (autonomy docs/field_card.md), not as a default.
+# side carries 0.5 as a documented recommendation (autonomy docs/field_card.md), not as a default,
+# and `kp`/`kd` are ROS params there, so trying it in the field is `ros2 param set` — it does not
+# need a re-export. Everything else in this bundle does.
 HOLD_GAINS = {"kp": 1.0, "kd": 0.35, "k_v": 1.2, "ki": 0.0}
 ALLOCATOR = {"prefer_deg": 60.0, "w_move": 3.0, "dead_hold": True}
+
+# Runtime state, not configuration: which units are alive is decided on the robot (a dead BLDC), so
+# it must not be frozen into a bundle exported weeks earlier.
+_RUNTIME_ONLY = ("plant", "live")
+
+
+def _effective(cls, chosen):
+    """Every constructor parameter with the value the robot will actually use.
+
+    The bundle used to carry only the tuned subset and let the rest fall through to the library
+    defaults — so `cap_norm`, `cap_tau`, `k_ff`, `i_max`, `cap_margin`, `w_cap`, `w_flip` and
+    `k_v_vert` reached the robot as whatever `umiusi_perception.classical` happened to default to
+    that day. That is exactly the A-11 failure this bundle exists to prevent, just one level down:
+    edit a default in the library and every already-exported bundle silently means something new,
+    with nothing in the file to show it. Writing the full effective set makes such a change appear
+    as a diff in the bundle instead.
+
+    Derived from the signature rather than hand-listed, so a NEW knob cannot be forgotten —
+    tests/test_classical_contract.py pins that the bundle names them all.
+    """
+    import inspect
+
+    out = {}
+    for name, prm in inspect.signature(cls.__init__).parameters.items():
+        if name in ("self", *_RUNTIME_ONLY) or prm.kind is prm.VAR_KEYWORD:
+            continue
+        if name in chosen:
+            out[name] = chosen[name]
+        elif prm.default is inspect.Parameter.empty:
+            raise SystemExit(f"{cls.__name__}.{name} has no default and no value chosen here")
+        else:
+            out[name] = prm.default
+    unknown = set(chosen) - set(out)
+    if unknown:
+        raise SystemExit(f"{cls.__name__} has no parameter(s) {sorted(unknown)} — stale tuning?")
+    return out
 
 
 def main():
@@ -72,8 +111,8 @@ def main():
 
     bundle = {
         "contract": contract.to_dict(),
-        "gains": HOLD_GAINS,
-        "allocator": ALLOCATOR,
+        "gains": _effective(ClassicalController, HOLD_GAINS),
+        "allocator": _effective(GeneralAllocator, ALLOCATOR),
         "source_config": args.config,
         "frames": {
             "controller_io": "REP-103 body (x fwd, y left, z up)",
