@@ -253,19 +253,39 @@ class GeneralAllocator:
     """
 
     def __init__(self, plant, servo_offset_rad=None, live=None, prefer_deg=None, dead_hold=False,
-                 w_move=1.0, cap_margin=0.85, w_cap=50.0):
+                 w_move=1.0, cap_margin=0.85, w_cap=50.0, w_flip=0.0):
         self.plant = plant
         self.r = np.asarray(plant.pivots_from_com, dtype=float)
         self.offset = np.zeros(4) if servo_offset_rad is None else np.asarray(servo_offset_rad, float)
         self.prefer = None if prefer_deg is None else np.radians(float(prefer_deg))
         self.w_move = float(w_move)
         self.cap_margin, self.w_cap = float(cap_margin), float(w_cap)
+        # Price an ESC SIGN REVERSAL. Crossing the |phi| = 90 fold reverses the esc, and on the real
+        # vehicle a reversal is not free: the BLDC has to spin the prop back up. Measured on the
+        # vehicle 2026-09-13 — a start from REST costs 2.5-3.2 s of no thrust, and a reversal while
+        # spinning costs 0.23-0.89 s at the median but p90 reaches ~3 s, because a reversal at low
+        # duty really does stop the prop. In sim the fold only ever cost a 180 deg servo sweep, so
+        # nothing in this cost function knew about it.
+        # This is the hysteresis the fold itself denies us: for a GIVEN force direction the branch
+        # is forced, but the null space lets us pick a force direction that keeps the sign.
+        #
+        # MEASURED NOT TO HELP — keep the default 0.0. It does cut reversals (1.90 -> 1.03 per
+        # second at w_flip=20 with no dead time, 1.85 -> 1.37 with it), but attitude gets slightly
+        # WORSE in every regime tested (no dead time 0.0636 -> 0.0696 rad; 2.7 s dead time
+        # 0.5030 -> 0.5072). Fewer reversals bought nothing, because the damage is not the reversal
+        # event: a reversal happens exactly when a unit's force crosses zero, so |duty| is 0.086 at
+        # the median against 0.219 in normal operation — the thrust thrown away is already small.
+        # What hurts is the unit being UNAVAILABLE for seconds afterwards, and halving the number of
+        # such windows still leaves the vehicle short of thrusters. The knob stays because the
+        # reduction is real and a different fix may want it; do not switch it on expecting attitude.
+        self.w_flip = float(w_flip)
         self.dead_hold, self.phi_prev, self.z_prev = dead_hold, None, None
+        self.rear_prev = None
         self.hv_prev = np.zeros(8)
         self.set_live(np.ones(4, dtype=bool) if live is None else np.asarray(live, dtype=bool))
 
     def reset(self):
-        self.phi_prev, self.z_prev = None, None
+        self.phi_prev, self.z_prev, self.rear_prev = None, None, None
 
     def set_live(self, live):
         self.live = np.asarray(live, dtype=bool)
@@ -339,6 +359,13 @@ class GeneralAllocator:
         over = np.maximum(0.0, mag - self.cap_margin * f_max) / max(f_max, 1e-9)
         cost = (np.sum(mag * (into ** 2 + self.w_move * move ** 2), axis=1)
                 + self.w_cap * np.sum(over ** 2, axis=1))
+        if self.w_flip > 0.0 and self.rear_prev is not None:
+            # Weight the flip by the thrust being reversed: reversing a unit that is barely pushing
+            # is cheap (and is also the case the vehicle recovers from SLOWEST, but it is producing
+            # nothing either way), while reversing a loaded unit throws away real thrust for as long
+            # as the prop takes to come back.
+            flip = (np.abs(phi) > np.pi / 2.0) != self.rear_prev[None, :]
+            cost = cost + self.w_flip * np.sum(mag * flip, axis=1) / max(f_max, 1e-9)
         i = int(np.argmin(cost))
         self.z_prev = z[i]
         return cand[i]
@@ -386,6 +413,10 @@ class GeneralAllocator:
         # the angle actually COMMANDED, which is what the next warm start must aim at (post fold,
         # post clip, post the dead-zone snap to 0 — all of them move the servo)
         self.phi_prev = servo * p.servo_range_rad
+        # ...and which side of the fold each unit ended on, so the next search can price a reversal.
+        # A unit inside the dead zone makes no thrust, so its sign is meaningless: carry the
+        # previous side rather than letting the deadband inject a spurious flip next step.
+        self.rear_prev = rear if self.rear_prev is None else np.where(dead, self.rear_prev, rear)
         # The (h, v) this solved for, normalised by the cap force. This IS the action of the env's
         # "forces" mode, so it is the label to clone when the student works in that space — a
         # continuous target, unlike the folded servo angle above.
