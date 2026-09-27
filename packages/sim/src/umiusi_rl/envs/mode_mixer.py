@@ -22,11 +22,18 @@ import numpy as np
 
 # Per-unit mode signs in action order, keyed by unit name (configs/umiusi.yaml `units[].name`).
 # __init__ re-derives every column from the config geometry and rejects a mismatch.
+# 2026-09-21: the three HORIZONTAL columns (fx, fy, tz) are negated relative to the pre-2026-09-21
+# table, together with `thrust_axis` in configs/umiusi.yaml, because the config was the mirror of
+# the real vehicle (measured in the pool 2026-09-13). Both flips together leave the sim plant
+# BIT-IDENTICAL — h -> -h and t -> -t, so every realised force is unchanged — which is exactly why
+# the mirror was invisible here for months, and also why trained `modes` policies stay valid.
+# (`esc` and `forces` policies do NOT survive it: they command the actuator directly.) The fix
+# reaches the robot through the exported geometry and `mode_signs`, which is where it was wrong.
 _MODE_SIGNS = {  # name: (fx, fy, tz, fz, tx, ty)
-    "lf": (+1, -1, -1, +1, +1, -1),
-    "lb": (+1, +1, -1, +1, +1, +1),
-    "rb": (-1, +1, -1, +1, -1, +1),
-    "rf": (-1, -1, -1, +1, -1, -1),
+    "lf": (-1, +1, +1, +1, +1, -1),
+    "lb": (-1, -1, +1, +1, +1, +1),
+    "rb": (+1, -1, +1, +1, -1, +1),
+    "rf": (+1, +1, +1, +1, -1, -1),
 }
 MODE_DIM = 6
 MODE_NAMES = ("fx", "fy", "fz", "tx", "ty", "tz")
@@ -75,6 +82,19 @@ class ModeMixer:
                 and np.all(roll_sign == self._Sv[:, 1])
                 and np.all(pitch_sign == self._Sv[:, 2])):
             raise ValueError("unit_pivots do not match the mode sign table (geometry changed?)")
+        # Yaw (tz), which the two checks above do NOT cover — and that is the gap the 2026-09-13
+        # mirror lived in. fx/fy are checked per unit against the tangent, so a GLOBAL sign error in
+        # thrust_axis passes them as long as the table was flipped to match; only the absolute
+        # direction of the yaw couple pins the convention down. The contract in this module's
+        # docstring is "tz + = counter-clockwise seen from above", i.e. a positive moment about
+        # CAD +Y, which is what the vehicle and feed_forward.hpp do.
+        yaw = float(sum(np.cross(pv[k] - pv.mean(axis=0), self._Sh[k, 2] * ax[k])[1]
+                        for k in range(4)))
+        if yaw <= 0.0:
+            raise ValueError(
+                f"mode tz does not yaw counter-clockwise (moment about CAD +Y = {yaw:+.4f}). "
+                "Either thrust_axes or the tz column is mirrored — this is the 2026-09-13 bug "
+                "that made attitude control POSITIVE feedback on the robot.")
 
     def mix(self, modes, max_duty, prev_servo_cmd):
         """Return action[8] = [servo x4, esc x4], each channel in [-1, 1].

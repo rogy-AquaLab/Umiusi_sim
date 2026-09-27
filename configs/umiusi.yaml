@@ -120,11 +120,23 @@ thrusters:
   # x=-0.023 is the front pair, x=-0.397 the back pair. The `action_order` below — NOT the id
   # numbering — is the interface contract shared with the robot. If the id->position wiring is
   # ever found to differ on the real vehicle, fix it HERE by editing the names.
+  #
+  # 2026-09-21: `thrust_axis` NEGATED (all four) to match the REAL VEHICLE. Measured in the pool
+  # 2026-09-13: driving all four horizontal components positive turns the vehicle COUNTER-
+  # clockwise, which is also what sinsei_umiusi_control's feed_forward.hpp documents ("z 軸まわり
+  # に反時計回りを horizontal の正の方向とする"). This config said clockwise. In sim the plant and
+  # the mixer both used the same mirrored array so it cancelled and nothing was observable; on the
+  # robot it did not, and attitude control ran as POSITIVE feedback (yaw settled at 180 deg error).
+  # The horizontal columns of `_MODE_SIGNS` were negated in the same commit, which leaves the sim
+  # plant bit-identical — so the fix reaches the robot through the exported geometry only.
+  # Independently checked two other candidate corrections (z-component-only flip kills the yaw
+  # couple entirely; a port/starboard naming swap is a physical no-op for this test): only the
+  # global negation reproduces the measurement.
   units:
-    - {id: 1, name: lf, pivot: [-0.022777, 0.09815, -0.187224], thrust_axis: [ 0.7081, 0.0,  0.7061]}
-    - {id: 2, name: lb, pivot: [-0.397223, 0.09815, -0.187224], thrust_axis: [ 0.7081, 0.0, -0.7061]}
-    - {id: 3, name: rf, pivot: [-0.022777, 0.09815,  0.187224], thrust_axis: [-0.7081, 0.0,  0.7061]}
-    - {id: 4, name: rb, pivot: [-0.397223, 0.09815,  0.187224], thrust_axis: [-0.7081, 0.0, -0.7061]}
+    - {id: 1, name: lf, pivot: [-0.022777, 0.09815, -0.187224], thrust_axis: [-0.7081, 0.0, -0.7061]}
+    - {id: 2, name: lb, pivot: [-0.397223, 0.09815, -0.187224], thrust_axis: [-0.7081, 0.0,  0.7061]}
+    - {id: 3, name: rf, pivot: [-0.022777, 0.09815,  0.187224], thrust_axis: [ 0.7081, 0.0, -0.7061]}
+    - {id: 4, name: rb, pivot: [-0.397223, 0.09815,  0.187224], thrust_axis: [ 0.7081, 0.0,  0.7061]}
   # action[k] (both servo_k and esc_k) drives the unit NAMED action_order[k]. This MUST stay equal
   # to sinsei_UMIUSI_autonomy's POSITIONS, or a policy channel means a different thruster on the
   # robot than in sim — and nothing on either side can detect that. Note it is NOT id order:
