@@ -26,6 +26,7 @@ node, and do not let the node's clamp and the controller's cap disagree — pass
 """
 
 import argparse
+import hashlib
 import json
 import sys
 from pathlib import Path
@@ -125,11 +126,19 @@ def main():
                 "(docs/physics.md)。較正したら再 export すること — config だけ直しても "
                 "このファイルは古いまま実機に残る。",
     }
+    # Fingerprint of everything above, so a measurement can be tied back to the configuration it
+    # was taken with. The 2026-09-13 pool run is the reason this exists: the bundle of the day left
+    # 9 knobs to fall through to library defaults, and NOTHING in the bundle or the bag records what
+    # those were — so the reversal frequency measured that day is not reproducible. The deploy node
+    # should log this string at startup; then any bag says which plant and which gains produced it.
+    bundle["fingerprint"] = hashlib.sha256(
+        json.dumps(bundle, sort_keys=True, ensure_ascii=False).encode()).hexdigest()[:16]
     out = Path(args.out)
     out = out if out.is_absolute() else _ROOT / out
     out.parent.mkdir(parents=True, exist_ok=True)
     out.write_text(json.dumps(bundle, indent=2, ensure_ascii=False))
     print("書き出し先:", out)
+    print("  fingerprint:", bundle["fingerprint"], " (実機の起動ログに残すこと)")
     print(f"  cap_ref {contract.cap_ref}  control_rate {contract.control_rate_hz} Hz")
     for cap in (0.2, 0.25, 0.3, 0.4, 0.5):
         from umiusi_perception.classical import reachable_speed
