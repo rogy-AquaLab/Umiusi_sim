@@ -24,6 +24,19 @@ water:
   # CAN stack only reached the hardware at 6.25 Hz then — the replay applied 7 of every 8
   # commands the robot never received. Every coefficient from that fit is provisional until
   # measured directly; for this one that is calibration plan §4 (static tilt, no commands).
+  # CAVEAT 3 (2026-09-27, VEHICLE DATA): this value is ~3x too large. The pool regression
+  # (autonomy, 3 runs, restoring separated from control torque) gives a restoring angular
+  # acceleration of roll 1.1-1.5 and pitch 0.48-0.58 rad/s^2 per rad; this sim gives 3.46 and 2.25.
+  # Back-solving d = coef * I / B against the inertia below: roll wants 3.2-4.3 mm, pitch 2.1-2.6.
+  # So the honest range is 2-4 mm, NOT 10. WORSE, domain_rand's buoyancy_offset_frac: 0.6 spans
+  # 4-16 mm, so the real vehicle sits at or below the bottom edge of the training distribution —
+  # every DR robustness claim so far excluded the actual hull. NOT CHANGED YET: it moves the plant,
+  # so the tuned gains (kp 1.0 / kd 0.35) have to be re-confirmed with it. Measure it properly
+  # first — a disarmed free-decay (tilt 15-20 deg and release, roll and pitch separately) gives the
+  # restoring coefficient directly with no control torque to separate out, in about a minute.
+  # ACCEPTANCE for that measurement: roll and pitch must show DIFFERENT dominant periods and a
+  # DECAYING amplitude. Existing bags fail both (some quiet stretches show roll and pitch sharing
+  # one 6.9-12.8 s peak with no decay — that is the tether or waves, not the hull).
   buoyancy_offset_above_com: 0.010
 
 # --- hull (base_link), measured in CAD -----------------------------------------
@@ -49,6 +62,19 @@ added_mass:
   # Lamb's ellipsoid x per-axis solidity, calibrated against BlueROV2 published values; residual
   # ~±30 % translational, ~x2 rotational, which domain-rand covers. Do NOT zero these: heave added
   # mass is 57 % of vehicle mass and dropping it badly overpredicts the vertical/pitch transient.
+  #
+  # 2026-09-27: THE ROTATIONAL PAIR DISAGREES WITH THE VEHICLE, and it is the ratio that says so.
+  # Restoring stiffness is B*offset in BOTH tilt axes, so d_roll/d_pitch = I_pitch/I_roll with the
+  # buoyancy and the offset cancelling out — a test of the inertia alone. The vehicle regression
+  # gives 1.90-3.12; this model gives 1.54 (I_roll 0.357, I_pitch 0.550 including these terms).
+  # Where it can and cannot come from: the thruster square is 0.374 m fore-aft by 0.374 m athwart,
+  # so its parallel-axis contribution is almost equal on the two axes (ratio 1.02) and cannot move
+  # this; the hull tensor is CAD; so the discrepancy has to live in these two numbers. Closing it
+  # needs rz UP ~2.1-5.6x on its own (the "~x2" above only reaches the bottom of that), or rz up
+  # ~2x AND rx down ~2x together — i.e. the whole stated error budget, spent on both sides.
+  # DELIBERATELY NOT CHANGED: picking a value inside 2.1-5.6x would bake in a number nothing
+  # measured. The free-decay test noted on buoyancy_offset_above_com settles roll and pitch
+  # separately and therefore settles this ratio too.
   diag: [2.69, 7.10, 3.16, 0.082, 0.165, 0.122]
 
 # --- LIFT: force perpendicular to the body-frame flow, growing with angle of attack -----------

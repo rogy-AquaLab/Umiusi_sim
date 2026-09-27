@@ -40,6 +40,15 @@ from umiusi_rl.envs.umiusi_pose_env import UmiusiPoseEnv, load_config  # noqa: E
 # `prefer_deg` spends the allocator's null space on staying off the azimuth singularity, which is
 # worth ori 0.332 -> 0.092 holding station — and is skipped automatically while cruising, where
 # the required force already points away from the fold.
+#
+# kd: 0.35 is the optimum WITHOUT the BLDC startup dead time. With it (measured on the vehicle
+# 2026-09-13: 2.5-3.2 s from rest, and a reversal while spinning is 0.23-0.89 s at the median but
+# p90 ~3 s) the optimum moves UP to ~0.5 — the dead time makes overshoot far worse and kd is what
+# suppresses it, so if you are unsure, go UP, never down. Two independent rigs agree on that
+# direction (autonomy's tools/navigator_sim.py, and MuJoCo here). LEFT AT 0.35 ANYWAY because the
+# difference is small next to the damage (ori 0.503 vs 0.482 rad at cap 0.30 — 4 %, against an 8x
+# degradation from the dead time itself) and 0.5 has never been tried on the vehicle. The deploy
+# side carries 0.5 as a documented recommendation (autonomy docs/field_card.md), not as a default.
 HOLD_GAINS = {"kp": 1.0, "kd": 0.35, "k_v": 1.2, "ki": 0.0}
 ALLOCATOR = {"prefer_deg": 60.0, "w_move": 3.0, "dead_hold": True}
 
