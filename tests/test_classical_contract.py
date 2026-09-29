@@ -141,9 +141,10 @@ def test_export_writes_a_loadable_bundle(tmp_path):
     bundle = json.loads(out.read_text())
     plant = PlantContract.from_dict(bundle["contract"])
     ctl = ClassicalController(plant, **bundle["gains"])
-    # the exported gains must actually be usable, and the trim must push DOWN on a buoyant hull
+    # the exported gains must be usable, and the shipped default must burn nothing when idle
     m = ctl.wrench(np.zeros(3), np.zeros(3), np.zeros(3), np.zeros(3), 0.25)
-    assert m[2] < 0.0, f"buoyancy trim should push down, got {m[2]}"
+    assert bundle["gains"]["buoy_trim"] is False, "the deployed default is mechanical ballast"
+    assert m[2] == 0.0, f"idle heave must be 0 with the trim off, got {m[2]}"
     assert set(bundle) >= {"contract", "gains", "allocator", "frames", "uncalibrated"}
 
 

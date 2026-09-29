@@ -81,9 +81,13 @@ def test_attitude_torque_is_cap_invariant():
 
 
 def test_buoyancy_trim_holds_the_same_force_at_every_cap():
-    """Same argument for the heave trim: net buoyancy is a constant, so the mode must move."""
+    """Same argument for the heave trim: net buoyancy is a constant, so the mode must move.
+
+    OFF by default since 2026-09-30 (the hull is ballasted instead), so this asks for it — the
+    term still has to be correct for anyone comparing against the pre-2026-09-30 results.
+    """
     env = _env(dr=False)
-    ctl = build_controller(env, cap_tau=0.0)
+    ctl = build_controller(env, cap_tau=0.0, buoy_trim=True)
     force = []
     for cap in CAPS:
         ctl.reset()
@@ -179,7 +183,11 @@ def test_singularity_avoidance_actually_leaves_the_fold_at_hold_station():
     from umiusi_perception.classical import cad_wrench_from_modes
 
     env = _env(dr=False)
-    ctl = build_controller(env, cap_tau=0.0, kp=1.0, kd=0.35)
+    # buoy_trim=True ON PURPOSE: the fold problem at hold station is CREATED by the trim. Holding a
+    # buoyant hull down needs a near-vertical force, which is what parks every servo at +-90 deg.
+    # With the trim off (the default since 2026-09-30) the hold wrench is zero and there is nothing
+    # to avoid — see test_hold_station_costs_nothing_without_the_trim below.
+    ctl = build_controller(env, cap_tau=0.0, kp=1.0, kd=0.35, buoy_trim=True)
     plain = GeneralAllocator(env.sim)
     avoid = GeneralAllocator(env.sim, prefer_deg=60.0, w_move=3.0, dead_hold=True)
     cap = 0.25
@@ -195,6 +203,35 @@ def test_singularity_avoidance_actually_leaves_the_fold_at_hold_station():
     # with it, every servo must be clear of the limit — this is the assertion that was failing
     deg = np.degrees(a_avoid[:4] * env.sim.servo_range_rad)
     assert np.max(np.abs(deg)) < 60.0, f"avoidance left a servo on the fold: {np.round(deg, 1)}"
+
+
+def test_hold_station_costs_nothing_without_the_trim():
+    """With `buoy_trim=False` the z channel means commanded heave and nothing else: 0 in, 0 out.
+
+    This is the whole point of dropping the trim. On the vehicle, idle duty decomposed as
+    0.107 constant + 0.25*cap, and the constant was the trim — roughly 63 % of idle duty at cap
+    0.25, spent continuously just to stay level. It also created the azimuth problem: the required
+    force was near-vertical, which is exactly the fold. Both go away together, and the hull gets
+    ballasted near neutral instead.
+    """
+    from classical_control import GeneralAllocator
+    from umiusi_perception.classical import cad_wrench_from_modes
+
+    env = _env(dr=False)
+    ctl = build_controller(env, cap_tau=0.0, kp=1.0, kd=0.35)          # default: no trim
+    alloc = GeneralAllocator(env.sim, prefer_deg=60.0, w_move=3.0, dead_hold=True)
+    for _ in range(8):
+        m = ctl.wrench(np.zeros(3), np.zeros(3), np.zeros(3), np.zeros(3), 0.25)
+        act = alloc.allocate(cad_wrench_from_modes(m, ctl.f_max_total(ctl.cap)), 0.25)
+    env.close()
+    assert m[2] == 0.0, f"no command and no trim must give no heave mode, got {m[2]}"
+    assert np.allclose(act[4:], 0.0), f"idle must burn no duty at all, got {act[4:]}"
+    # ...and a commanded heave still reaches the channel (the trim is gone, the command is not)
+    ctl2_env = _env(dr=False)
+    ctl2 = build_controller(ctl2_env, cap_tau=0.0)
+    up = ctl2.wrench(np.zeros(3), np.zeros(3), np.array([0.0, 0.0, 0.05]), np.zeros(3), 0.25)
+    ctl2_env.close()
+    assert up[2] > 0.0, f"commanded ascent must still produce upward heave, got {up[2]}"
 
 
 def test_singularity_avoidance_does_not_change_the_wrench():
