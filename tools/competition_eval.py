@@ -28,6 +28,7 @@ set the PLANT only; the controller keeps the bundle's plant, as on the robot. `-
 from __future__ import annotations
 
 import argparse
+import json
 import math
 import tempfile
 from pathlib import Path
@@ -44,6 +45,99 @@ from tools.ram_eval import (CAM_H, CAM_W, FOVY_DEG, degrade_projection, false_po
 
 START = (0.0, 1.0, 0.0)
 SURFACE_BAND = 0.15   # [m] from the water surface / the floor counts as "stuck there"
+
+
+class _Tracer:
+    """JSONL event log for diagnosing RAM misses and wire under-passes (`--trace-events FILE`).
+
+    Events: "state" (every FSM transition), "ram" (one per RAM segment: geometry at entry, closest
+    approach of the pin tip to the balloon the FSM is locked on, why it ended), "wire" (an under-pass:
+    which balloon, FSM state, whether it was the locked target). Geometry is ground truth in the
+    vehicle's body frame (x fwd, y up, z starboard) so a miss reads as "passed 12 cm low / 8 cm right".
+    The locked target is identified as the un-popped balloon of the locked colour whose TRUE camera
+    bearing is closest to the FSM's track bearing.
+    """
+
+    def __init__(self, path, ep_seed):
+        self.f = open(path, "a")
+        self.ep = ep_seed
+        self.prev_state, self.ram = None, None
+
+    def _emit(self, **kw):
+        self.f.write(json.dumps({"ep": self.ep, **kw}) + "\n")
+
+    @staticmethod
+    def _target(fsm, sim, balloons, popped, cam_id):
+        if not fsm.trk.colour:
+            return None
+        R = sim.data.xmat[sim.base_id].reshape(3, 3)
+        cam = sim.data.cam_xpos[cam_id]
+        best, best_d = None, float("inf")
+        for b in balloons:
+            if b["name"] in popped or b["colour"] != fsm.trk.colour:
+                continue
+            pr = project_balloon(R.T @ (b["pos"] - cam))
+            if pr is None:
+                continue
+            d = math.hypot(pr[0] - fsm.trk.az, pr[1] - fsm.trk.el)
+            if d < best_d:
+                best, best_d = b, d
+        return best
+
+    @staticmethod
+    def _body(sim, v):
+        return (sim.data.xmat[sim.base_id].reshape(3, 3).T @ np.asarray(v)).round(3).tolist()
+
+    def tick(self, t, fsm, sim, balloons, popped, cam_id, pin_sid, held, fresh):
+        st = fsm.state
+        if st != self.prev_state:
+            tgt = self._target(fsm, sim, balloons, popped, cam_id)
+            tip = sim.data.site_xpos[pin_sid]
+            self._emit(ev="state", t=round(t, 2), frm=self.prev_state, to=st, colour=fsm.trk.colour,
+                       trk=[round(fsm.trk.az, 3), round(fsm.trk.el, 3), round(fsm.trk.range_m, 2),
+                            round(fsm.trk.bbox_frac, 3)], misses=fsm.trk.misses, fresh=fresh,
+                       tgt=None if tgt is None else tgt["name"],
+                       tip_to_tgt=None if tgt is None else self._body(sim, tgt["pos"] - tip))
+            if st == "RAM" and self.prev_state != "RAM":
+                self.ram = {"t0": t, "tgt": None if tgt is None else tgt["name"], "best": None,
+                            "entry": None if tgt is None else self._body(sim, tgt["pos"] - tip),
+                            "entry_trk": [round(fsm.trk.az, 3), round(fsm.trk.el, 3), round(fsm.trk.bbox_frac, 3)]}
+            if self.prev_state == "RAM" and st != "RAM" and self.ram is not None:
+                self._close_ram(t, st, popped)
+            self.prev_state = st
+
+    def step(self, t, fsm, sim, balloons, popped, pin_sid, vel, new_snags):
+        if self.ram is not None and self.ram["tgt"] is not None:
+            b = next(x for x in balloons if x["name"] == self.ram["tgt"])
+            tip = sim.data.site_xpos[pin_sid]
+            d = float(np.linalg.norm(b["pos"] - tip))
+            if self.ram["best"] is None or d < self.ram["best"][0]:
+                delta = b["pos"] - tip
+                closing = float(np.dot(vel, delta / max(d, 1e-6)))
+                axis = sim.data.xmat[sim.base_id].reshape(3, 3) @ np.array([1.0, 0, 0])
+                ang = math.degrees(math.acos(float(np.clip(np.dot(axis, delta / max(d, 1e-6)), -1, 1))))
+                self.ram["best"] = (d, self._body(sim, delta), round(closing, 3), round(ang, 1), round(t, 2))
+            if self.ram["tgt"] in popped and "popped_t" not in self.ram:
+                self.ram["popped_t"] = round(t, 2)
+        for name in new_snags:
+            b = next(x for x in balloons if x["name"] == name)
+            self._emit(ev="wire", t=round(t, 2), balloon=name, colour=b["colour"], state=fsm.state,
+                       locked=fsm.trk.colour, rel=self._body(sim, b["pos"] - sim.data.xpos[sim.base_id]))
+
+    def _close_ram(self, t, next_state, popped):
+        r = self.ram
+        best = r["best"]
+        self._emit(ev="ram", t0=round(r["t0"], 2), dur=round(t - r["t0"], 2), tgt=r["tgt"], to=next_state,
+                   popped=r["tgt"] in popped if r["tgt"] else False, entry=r["entry"], entry_trk=r["entry_trk"],
+                   min_dist=None if best is None else round(best[0], 3),
+                   at_min=None if best is None else best[1], closing=None if best is None else best[2],
+                   angle=None if best is None else best[3])
+        self.ram = None
+
+    def close(self, t, popped):
+        if self.ram is not None:
+            self._close_ram(t, "END", popped)
+        self.f.close()
 
 
 def run_episode(rng, args, xml_path):
@@ -109,6 +203,7 @@ def run_episode(rng, args, xml_path):
     snag_prev, wire_events, t_clear = set(), 0, None
     heights, first_pop, occ = [], None, {}
     t_ctl, action, cmd = ctl_period, np.zeros(8), {"surge": 0.0, "heave": 0.0, "yaw": 0.0}
+    tracer = _Tracer(args.trace_events, ep_seed=args._ep_seed) if args.trace_events else None
     for k in range(n_steps):
         st = sim.get_state()
         R = sim.data.xmat[sim.base_id].reshape(3, 3)
@@ -149,6 +244,8 @@ def run_episode(rng, args, xml_path):
             heading = float(math.atan2((R @ [1.0, 0, 0])[2], (R @ [1.0, 0, 0])[0]))
             cmd, info = fsm.step(held, float(st["ang_vel"][1]), heading=heading, dt=ctl_period, fresh=fresh)
             occ[fsm.state] = occ.get(fsm.state, 0) + 1
+            if tracer is not None:
+                tracer.tick(k * dt, fsm, sim, balloons, popped, cam_id, pin_sid, held, fresh)
             action = (feedforward_allocation([0, 0, cmd["yaw"]], [-cmd["surge"], 0, cmd["heave"]])
                       if drv is None else drv.step(cmd))
         sim.step(action)
@@ -160,18 +257,23 @@ def run_episode(rng, args, xml_path):
         prev_pin = pin_tip
         for b in balloons:
             if b["name"] not in popped and scn.popped(pin_tip, b["pos"], axis, vel,
-                                                      min_speed=args.min_pop_speed):
+                                                      min_speed=args.min_pop_speed,
+                                                      angle_tol_deg=args.pop_angle_tol):
                 popped.add(b["name"])
                 score += b["points"]
                 if first_pop is None:
                     first_pop = (k + 1) * dt
         snag = set(scn.entanglement(sim.data.xpos[sim.base_id], balloons, popped))
         wire_events += len(snag - snag_prev)
+        if tracer is not None:
+            tracer.step(k * dt, fsm, sim, balloons, popped, pin_sid, vel, snag - snag_prev)
         snag_prev = snag
         if positive <= popped:  # all positive cleared
             t_clear = (k + 1) * dt
             break
 
+    if tracer is not None:
+        tracer.close(n_steps * dt, popped)
     blue_popped = sum(1 for b in balloons if b["name"] in popped and b["points"] < 0)
     h = np.asarray(heights)
     return {"cleared": t_clear is not None, "t_clear": t_clear, "score": score,
@@ -219,6 +321,10 @@ def main():
                     help="EXPERIMENT: override behavior.RAM_MAX_STEPS (control steps before a ram counts as a miss)")
     ap.add_argument("--propagate-bearing", action="store_true",
                     help="FSM advances held detections' azimuth by the gyro yaw since the frame")
+    ap.add_argument("--pop-angle-tol", type=float, default=scn.POP_ANGLE_TOL_DEG,
+                    help="max pin-axis vs tip->centre angle for a pop [deg]. UNMEASURED: 20 is a guess; it is "
+                         "evaluated when the tip first enters radius+margin, where 4 cm off-centre is already ~18-24 deg")
+    ap.add_argument("--trace-events", default=None, help="append JSONL diagnostic events (state/ram/wire) here")
     ap.add_argument("--servo-aware", action="store_true",
                     help="EXPERIMENT: esc from the angle the servo has REACHED, not the target (deploy_driver)")
     ap.add_argument("--bundle-exp", type=float, default=None, help="thrust-curve exponent the CONTROLLER assumes")
@@ -269,7 +375,8 @@ def main():
 def run_set(args, xml_path):
     rows = []
     for e in range(args.episodes):
-        r = run_episode(np.random.default_rng(1000 + args.seed + e), args, xml_path)
+        args._ep_seed = 1000 + args.seed + e
+        r = run_episode(np.random.default_rng(args._ep_seed), args, xml_path)
         rows.append(r)
         if args.verbose:
             tc = f"{r['t_clear']:.1f}s" if r["cleared"] else "TIMEOUT"
