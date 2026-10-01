@@ -132,6 +132,39 @@ class UmiusiSimulator:
         self.cob_local = self.cob_local + np.array([0.0, float(offset) - self.buoyancy_offset, 0.0])
         self.buoyancy_offset = float(offset)
 
+    def set_cob_horizontal(self, fwd=0.0, lateral=0.0):
+        """Shift the CoB horizontally off the system CoM [m] (CAD +X fwd, +Z starboard).
+
+        `__init__` always places the CoB exactly over the CoM, so a static pitch/roll trim moment
+        never exists unless this is called. The real hull's fore/aft balance is set by where the
+        ballast sits and is NOT measured — this is for running the same scenario on a few plausible
+        variants (bow-heavy / stern-heavy), not a calibrated value. Absolute: repeated calls do not
+        accumulate. Survives `reset()` (it is a plant property, like the volume).
+        """
+        mujoco.mj_forward(self.model, self.data)
+        R = self.data.xmat[self.base_id].reshape(3, 3)
+        com = R.T @ (self.data.subtree_com[self.base_id] - self.data.xpos[self.base_id])
+        self.cob_local = np.array([com[0] + float(fwd), self.cob_local[1], com[2] + float(lateral)])
+
+    def total_mass(self):
+        """Whole-vehicle mass [kg] (hull + thrusters) from the model, i.e. what gravity acts on."""
+        return float(self.model.body_subtreemass[self.base_id])
+
+    def set_net_buoyancy(self, newtons):
+        """Set the displaced volume so that buoyancy - weight = `newtons` (+ = floats up).
+
+        The config volume is deliberately ~1.2 N positive (pre-ballast hull). The competition hull
+        is ballasted "roughly neutral", and how rough is unknown, so scenarios sweep this instead of
+        trusting one number.
+        """
+        g = float(np.linalg.norm(self.gravity))
+        self.volume = (float(newtons) + self.total_mass() * g) / (self.density * g)
+
+    def net_buoyancy(self):
+        """Current buoyancy - weight [N] (+ = floats up)."""
+        g = float(np.linalg.norm(self.gravity))
+        return self.density * self.volume * g - self.total_mass() * g
+
     # -- lifecycle -------------------------------------------------------------
     def reset(self, pos=(0.0, 0.0, 0.0), quat=(1.0, 0.0, 0.0, 0.0)):
         mujoco.mj_resetData(self.model, self.data)
