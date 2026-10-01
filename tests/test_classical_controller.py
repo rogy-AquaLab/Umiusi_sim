@@ -276,3 +276,44 @@ def test_singularity_avoidance_does_not_change_the_wrench():
         f"the null-space offset moved the realised wrench: {ra} vs {rp}"
     assert np.allclose(ra, w, atol=0.03 * np.linalg.norm(w)), f"realised {ra} != commanded {w}"
     env.close()
+
+
+def test_null_space_circulation_does_not_creep_to_the_cap():
+    """A tiny vertical demand must not cost the duty cap.
+
+    `_away_from_singularity` re-centres its search window on the previous choice every step, and
+    once every unit is inside `prefer_deg` nothing in the cost grows with the circulation's size —
+    so it creeps until the cap term stops it at `cap_margin * f_max`. Measured 2026-10-01 in the
+    deploy chain (neutral hull, CoB 0.5 mm ahead of the CoM): the units pushed +-2.1 N against each
+    other to hold a 0.06 N/unit pitch torque, mean |duty| 0.265 = 88 % of cap 0.3, standing still.
+    `w_effort` prices the circulation; 0.0 (the default) keeps the old behaviour, which this test
+    also pins so the defect stays visible until the bundle is re-exported with it on.
+    """
+    from classical_control import GeneralAllocator
+
+    env = _env(dr=False)
+    cap = 0.3
+    # a small pure pitch torque (CAD rot+Z) — what a slightly bow-heavy hull asks for at hold
+    w = np.array([0.0, 0.0, 0.0, 0.0, 0.0, 0.25])
+    kw = dict(prefer_deg=60.0, w_move=3.0, dead_hold=True, cap_margin=0.85, w_cap=50.0)
+    old = GeneralAllocator(env.sim, **kw)
+    new = GeneralAllocator(env.sim, **kw, w_effort=2.0)
+    for _ in range(200):                      # the creep is a drift over many steps
+        a_old, a_new = old.allocate(w, cap), new.allocate(w, cap)
+    env.close()
+
+    def per_unit_force(alloc, act):
+        p = alloc.plant
+        return np.abs(act[4:]) ** p.thrust_curve_exp * p.thrust_per_cmd
+
+    plain = GeneralAllocator(env.sim)         # minimum norm = exactly the force the wrench needs
+    f_need = per_unit_force(plain, plain.allocate(w, cap)).max()
+    f_old, f_new = per_unit_force(old, a_old).max(), per_unit_force(new, a_new).max()
+    # static input creeps "only" ~5-15x (to ~1 N); in the closed loop it reached cap_margin * f_max
+    assert f_old > 2.0 * f_need, \
+        "the creep is gone with w_effort=0 — if that is intended, flip the default and drop this half"
+    assert f_new < 0.5 * f_old, f"w_effort did not stop the circulation: {f_new:.3f} vs old {f_old:.3f} N"
+    assert f_new < 2.0 * f_need, f"w_effort still spends {f_new:.3f} N/unit for a {f_need:.3f} N demand"
+    # NOTE: for a near-zero demand w_effort lets the servos sit on the fold again. That is the
+    # intended trade — reversing a unit that is barely pushing costs almost nothing — and the
+    # closed-loop check (tools/competition_eval.py --w-effort) showed no esc reversals at hold.

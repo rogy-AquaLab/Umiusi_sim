@@ -253,7 +253,7 @@ class GeneralAllocator:
     """
 
     def __init__(self, plant, servo_offset_rad=None, live=None, prefer_deg=None, dead_hold=False,
-                 w_move=1.0, cap_margin=0.85, w_cap=50.0, w_flip=0.0):
+                 w_move=1.0, cap_margin=0.85, w_cap=50.0, w_flip=0.0, w_effort=0.0):
         self.plant = plant
         self.r = np.asarray(plant.pivots_from_com, dtype=float)
         self.offset = np.zeros(4) if servo_offset_rad is None else np.asarray(servo_offset_rad, float)
@@ -279,6 +279,13 @@ class GeneralAllocator:
         # such windows still leaves the vehicle short of thrusters. The knob stays because the
         # reduction is real and a different fix may want it; do not switch it on expecting attitude.
         self.w_flip = float(w_flip)
+        # Price the circulation's SIZE. Without this nothing in the cost grows with it once every
+        # unit is inside `prefer_deg`, and the search window recentres on the last choice every
+        # step, so the circulation creeps until the cap term stops it at `cap_margin * f_max`.
+        # Measured 2026-10-01 (sim, neutral hull, CoB 0.5 mm ahead): the units pushed +-2.1 N
+        # against each other to deliver 0.06 N, mean |duty| 0.265 = 88 % of cap 0.3 standing
+        # still, with or without a real torque to hold. 0.0 keeps the old behaviour bit-for-bit.
+        self.w_effort = float(w_effort)
         self.dead_hold, self.phi_prev, self.z_prev = dead_hold, None, None
         self.rear_prev = None
         self.hv_prev = np.zeros(8)
@@ -359,6 +366,8 @@ class GeneralAllocator:
         over = np.maximum(0.0, mag - self.cap_margin * f_max) / max(f_max, 1e-9)
         cost = (np.sum(mag * (into ** 2 + self.w_move * move ** 2), axis=1)
                 + self.w_cap * np.sum(over ** 2, axis=1))
+        if self.w_effort > 0.0:
+            cost = cost + self.w_effort * np.sum(mag, axis=1) / max(f_max, 1e-9)
         if self.w_flip > 0.0 and self.rear_prev is not None:
             # Weight the flip by the thrust being reversed: reversing a unit that is barely pushing
             # is cheap (and is also the case the vehicle recovers from SLOWEST, but it is producing
