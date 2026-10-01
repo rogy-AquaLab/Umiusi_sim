@@ -226,6 +226,27 @@ class BalloonBehavior:
     # (not the camera optic axis) onto the balloon — decoupling where the pin is mounted (choose it for
     # camera FOV) from how it is aimed. None = legacy camera-centring (unchanged behaviour).
     pin_offset: tuple | None = None
+    # HEAVE BIAS LEARNED FROM THE CAMERA (2026-10-01). With no depth sensor and no software buoyancy
+    # trim (D-3), a hull that is only "roughly" neutral meets every balloon with a standing vertical
+    # error: the heave loop is P-only on the target's elevation, the vertical axis is an open-loop
+    # force, so holding against a residual buoyancy NEEDS a standing elevation error. Measured in
+    # tools/competition_eval (+1 N hull): the pin parked 13-29 cm above the yellow and never rammed.
+    # This integrates the aim-point elevation error while a locked target is tracked on a FRESH frame
+    # and adds the result to EVERY heave command — including SEARCH, so once learned it also holds
+    # depth between targets (the residual buoyancy is a property of the hull, not of one balloon).
+    # It is the camera closing the loop, not a trim constant. 0.0 = off = the previous behaviour.
+    ki_heave: float = 0.0            # [heave units / (rad*s)]
+    heave_bias_max: float = 0.25     # clamp, in heave units (SPEED_CAP is 0.35)
+    _heave_bias: float = 0.0
+    # GYRO-PROPAGATED BEARINGS (2026-10-01). The detector runs at ~5 Hz on the robot (full stack,
+    # performance_tuning.md §5) and the caller re-presents the same detections on the held steps in
+    # between, so the tracker's bearing freezes for ~200 ms while the hull keeps turning — the FSM
+    # steers on a stale angle and overshoots. Measured in tools/competition_eval: 50 -> 10 Hz detection
+    # cost ~half the score and 10 -> 5 Hz cost nothing more, the signature of staleness, not of
+    # information. With this on, a held detection's azimuth is advanced by the yaw the GYRO has measured
+    # since that frame (+yaw_rate about +Y moves a fixed target toward +az). False = previous behaviour.
+    propagate_bearing: bool = False
+    _yaw_since_frame: float = 0.0
     state: str = "SEARCH"
     trk: _Track = field(default_factory=_Track)
     tracker: Tracker = field(default_factory=Tracker)  # the ONE multi-frame tracker
@@ -421,6 +442,32 @@ class BalloonBehavior:
     # -- main tick -----------------------------------------------------------------------------
     def step(self, detections, yaw_rate, heading=0.0, dt=None, fresh=True):
         """Return (command, info). command = {surge, heave, yaw}. Camera-only decisions.
+
+        Wraps the FSM with the camera-learned heave bias (see ``ki_heave``) and the gyro-propagated
+        bearings (see ``propagate_bearing``)."""
+        step_dt = self.dt if dt is None else dt
+        if fresh:
+            self._yaw_since_frame = 0.0
+        else:
+            self._yaw_since_frame += float(yaw_rate) * step_dt
+            if self.propagate_bearing and self._yaw_since_frame != 0.0:
+                acc = self._yaw_since_frame
+                detections = [replace(d, bearing=(d.bearing[0] + acc, d.bearing[1])) for d in detections]
+        cmd, info = self._step(detections, yaw_rate, heading=heading, dt=dt, fresh=fresh)
+        if self.ki_heave > 0.0:
+            # misses == 0: the target was OBSERVED this frame. The tracker keeps a locked target alive
+            # through dropouts with its last bearing, and integrating that stale elevation would
+            # charge the bias with an error nobody measured.
+            if (fresh and self._alive and self.trk.misses == 0 and self.trk.colour
+                    and self.state in ("APPROACH", "ALIGN", "RAM")):
+                err = self.trk.el + _aim_bias(self.trk.colour)
+                self._heave_bias = _clip(self._heave_bias + self.ki_heave * err * (self.dt if dt is None else dt),
+                                         -self.heave_bias_max, self.heave_bias_max)
+            cmd = {**cmd, "heave": _clip(cmd["heave"] + self._heave_bias, -SPEED_CAP, SPEED_CAP)}
+        return cmd, info
+
+    def _step(self, detections, yaw_rate, heading=0.0, dt=None, fresh=True):
+        """The FSM proper. See ``step``.
 
         ``fresh`` is True on a fresh perception frame and False when the caller is re-driving on the
         HELD detections between detector ticks — confirmation votes advance only on fresh frames."""
