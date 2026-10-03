@@ -44,6 +44,7 @@ present after `uv sync` except where `--extra learn` / `--extra viz` is called o
 | `gen_sim_dataset` | synthesize a labelled balloon dataset from the sim | sim + perception |
 | `perception_train` | train the learned TinyBalloonNet detector | perception + `--extra learn` |
 | `perception_bench` | benchmark + ONNX/int8 export (Pi 4 projection) | perception + `--extra learn` |
+| `export_detector_onnx` | 配備する検出器 .pt を onnxruntime 用 .onnx に書き出し、torch と出力一致を確かめる (重みの隣に `<名前>_<input_size>.onnx`) | perception + onnx/onnxruntime (`--extra learn`) |
 
 ### Autonomy (perception-in-loop, no RL)
 | tool | what it does | needs |

@@ -30,6 +30,9 @@ Nothing in this module changes the classical detectors; it only imports their ge
 
 from __future__ import annotations
 
+import hashlib
+import os
+
 import numpy as np
 import torch
 import torch.nn as nn
@@ -123,7 +126,11 @@ def preprocess(rgb: np.ndarray, input_size: int) -> torch.Tensor:
         arr = np.stack([arr] * 3, axis=-1)
     if arr.shape[2] == 4:
         arr = arr[:, :, :3]
-    t = torch.from_numpy(arr).float().permute(2, 0, 1).unsqueeze(0) / 255.0
+    # その場で割る (全画面の float を 1 枚減らす)。値を変えないこと:
+    # tests/test_learned_onnx.py::test_preprocess_is_bit_identical_to_the_old_one
+    t = torch.from_numpy(arr).float()
+    t.div_(255.0)
+    t = t.permute(2, 0, 1).unsqueeze(0)
     return F.interpolate(t, size=(input_size, input_size), mode="bilinear", align_corners=False)
 
 
@@ -198,14 +205,86 @@ def detect_learned(rgb: np.ndarray, model: TinyBalloonNet, input_size: int = 256
     return decode(hm[0], wh[0], H, W, input_size, conf_thresh=conf_thresh, fovy_deg=fovy_deg)
 
 
+class OnnxBalloonNet:
+    """onnxruntime の推論を ``TinyBalloonNet`` と同じ呼び出し形 ``model(x) -> (hm, wh)`` で包む。
+
+    呼び出し側の義務: ``x`` は書き出し時と同じ ``input_size`` の ``preprocess()`` 出力であること
+    (ONNX は固定サイズで書き出している)。
+    """
+
+    def __init__(self, onnx_path: str):
+        import onnxruntime as ort
+
+        opts = ort.SessionOptions()
+        opts.intra_op_num_threads = 1
+        opts.inter_op_num_threads = 1
+        opts.graph_optimization_level = ort.GraphOptimizationLevel.ORT_ENABLE_ALL
+        self.session = ort.InferenceSession(onnx_path, opts, providers=["CPUExecutionProvider"])
+
+    def eval(self):
+        return self
+
+    def __call__(self, x: torch.Tensor):
+        hm, wh = self.session.run(None, {"x": np.ascontiguousarray(x.numpy())})
+        return torch.from_numpy(hm), torch.from_numpy(wh)
+
+
+def export_onnx(model: TinyBalloonNet, input_size: int, path: str) -> str:
+    model.eval()
+    torch.onnx.export(model, torch.zeros(1, 3, input_size, input_size), path, opset_version=13,
+                      dynamo=False, input_names=["x"], output_names=["hm", "wh"],
+                      do_constant_folding=True)
+    return path
+
+
+ONNX_ATOL = 1e-4  # torch と onnx の hm / wh の許容差。tools/export_detector_onnx.py も同じ値で確かめる
+
+
+@torch.no_grad()
+def onnx_max_abs_diff(model: TinyBalloonNet, runner: OnnxBalloonNet, input_size: int, n: int = 2) -> float:
+    """固定の乱数入力 n 枚で torch と onnx の出力 (hm, wh) の最大絶対差。"""
+    g = torch.Generator().manual_seed(0)
+    diff = 0.0
+    for _ in range(n):
+        x = torch.rand(1, 3, input_size, input_size, generator=g)
+        for a, b in zip(model(x), runner(x)):
+            diff = max(diff, float((a - b).abs().max()))
+    return diff
+
+
+def bundled_onnx_path(weights_path: str, input_size: int) -> str:
+    """重みの隣に置く .onnx の名前 (tools/export_detector_onnx.py の出力先)。"""
+    return f"{os.path.splitext(weights_path)[0]}_{input_size}.onnx"
+
+
+def _onnx_cache_path(weights_path: str, input_size: int) -> str:
+    """重みの中身と入力サイズで決まるキャッシュ先。重みを差し替えると別ファイルになる。"""
+    with open(weights_path, "rb") as f:
+        digest = hashlib.sha256(f.read()).hexdigest()[:16]
+    root = os.environ.get("UMIUSI_ONNX_CACHE",
+                          os.path.join(os.path.expanduser("~"), ".cache", "umiusi_perception"))
+    os.makedirs(root, exist_ok=True)
+    return os.path.join(root, f"{digest}_s{input_size}.onnx")
+
+
 def load_learned_detector(weights_path: str, input_size: int | None = None, width: int = 16,
-                          conf_thresh: float | None = None, fovy_deg: float = 60.0):
+                          conf_thresh: float | None = None, fovy_deg: float = 60.0,
+                          backend: str = "torch"):
     """Load trained weights and return a ``rgb -> [Detection]`` callable for ``perception_eval``.
 
     ``input_size`` and ``conf_thresh`` are caller-overridable: an explicit arg WINS, else the
     checkpoint's stored value, else the default. ``width`` comes from the checkpoint when present
     (it must match the saved weights) and the ``width=`` arg is only the fallback for bare state_dicts.
+
+    ``backend="onnx"`` runs the same weights through onnxruntime. It uses the bundled
+    ``<weights>_<input_size>.onnx`` next to the weights when its outputs match torch (checked at load),
+    else exports on first use and caches under ``~/.cache/umiusi_perception`` or ``$UMIUSI_ONNX_CACHE``.
+    It raises if onnxruntime or the export is unavailable; falling back is the caller's decision.
+    The returned callable carries ``backend`` / ``input_size`` / ``width`` / ``conf_thresh`` /
+    ``onnx_path`` (None for torch) / ``model`` (the ``model(x) -> (hm, wh)`` runner, for benchmarks).
     """
+    if backend not in ("torch", "onnx"):
+        raise ValueError(f"backend must be 'torch' or 'onnx', got {backend!r}")
     ckpt = torch.load(weights_path, map_location="cpu")
     if isinstance(ckpt, dict) and "state_dict" in ckpt:
         cfg = ckpt.get("cfg", {})
@@ -223,10 +302,32 @@ def load_learned_detector(weights_path: str, input_size: int | None = None, widt
     model.load_state_dict(state)
     model.eval()
 
+    runner, path = model, None
+    if backend == "onnx":
+        # 照合を外さないこと: tests/test_learned_onnx.py::test_stale_bundled_onnx_is_ignored
+        bundled = bundled_onnx_path(weights_path, input_size)
+        if os.path.exists(bundled):
+            cand = OnnxBalloonNet(bundled)
+            if onnx_max_abs_diff(model, cand, input_size) <= ONNX_ATOL:
+                runner, path = cand, bundled
+        if path is None:
+            path = _onnx_cache_path(weights_path, input_size)
+            if not os.path.exists(path):
+                tmp = f"{path}.{os.getpid()}.tmp"  # 途中で落ちても壊れたファイルを残さない
+                export_onnx(model, input_size, tmp)
+                os.replace(tmp, path)
+            runner = OnnxBalloonNet(path)
+
     def _fn(rgb: np.ndarray) -> list[Detection]:
-        return detect_learned(rgb, model, input_size=input_size, conf_thresh=conf_thresh,
+        return detect_learned(rgb, runner, input_size=input_size, conf_thresh=conf_thresh,
                               fovy_deg=fovy_deg)
 
+    _fn.backend = backend
+    _fn.input_size = input_size
+    _fn.width = width
+    _fn.conf_thresh = conf_thresh
+    _fn.onnx_path = path
+    _fn.model = runner
     return _fn
 
 
@@ -235,4 +336,5 @@ def load_learned_detector(weights_path: str, input_size: int | None = None, widt
 __all__ = [
     "COLOURS", "STRIDE", "TinyBalloonNet", "PatchVerifierNet",
     "preprocess", "decode", "detect_learned", "load_learned_detector", "rgb_to_hsv",
+    "OnnxBalloonNet", "export_onnx", "onnx_max_abs_diff", "bundled_onnx_path", "ONNX_ATOL",
 ]
