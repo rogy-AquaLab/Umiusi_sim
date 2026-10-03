@@ -34,6 +34,10 @@ dependencies = [
     "opencv-python-headless>=4.8",
 ]
 
+[project.optional-dependencies]
+# load_learned_detector(backend="onnx") 用。無ければ呼び出し側 (autonomy の perception_node) が torch に戻る
+onnx = ["onnxruntime>=1.16"]
+
 [build-system]
 requires = ["setuptools>=61"]
 build-backend = "setuptools.build_meta"
