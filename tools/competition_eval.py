@@ -181,6 +181,8 @@ def run_episode(rng, args, xml_path):
         drv.ctl.dt = ctl_period
     # LATENCY. A detection describes the frame it was computed from, not the moment it arrives.
     lat_steps = int(round(args.perception_latency / dt))
+    recall_curve = ([tuple(float(v) for v in kv.split(":")) for kv in args.recall_curve.split(",")]
+                    if args.recall_curve else None)
     pending = []   # [(deliver_step, dets)]
     # PERSISTENT FALSE POSITIVES. Real ones are not uniform noise: a surface reflection or a patch of
     # floor looks the same every frame, so the tracker CONFIRMS it and the FSM chases it. Model them as
@@ -220,8 +222,19 @@ def run_episode(rng, args, xml_path):
                 if dproj is None:
                     continue
                 d = make_detection(*dproj, b["colour"], b["points"])
+                if d is not None and recall_curve:
+                    # MEASURED detector: recall by apparent size (box width / image width), e.g. the
+                    # 2026-10-03 F320 model on held-out JAMSTEC frames. Drop the detection with 1 - recall.
+                    frac = (d.bbox[2] - d.bbox[0]) / CAM_W
+                    rc = next((r for f, r in recall_curve if frac < f), recall_curve[-1][1])
+                    if rng.random() >= rc:
+                        d = None
                 if d is not None:
                     dets.append(d)
+            for _ in range(int(args.fp_per_frame) + (rng.random() < args.fp_per_frame % 1)):
+                fp = false_positive(rng)
+                if fp is not None:
+                    dets.append(fp)
             if args.fp_rate > 0 and rng.random() < args.fp_rate:
                 fp = false_positive(rng)
                 if fp is not None:
@@ -324,6 +337,11 @@ def main():
     ap.add_argument("--pop-angle-tol", type=float, default=scn.POP_ANGLE_TOL_DEG,
                     help="max pin-axis vs tip->centre angle for a pop [deg]. UNMEASURED: 20 is a guess; it is "
                          "evaluated when the tip first enters radius+margin, where 4 cm off-centre is already ~18-24 deg")
+    ap.add_argument("--recall-curve", default=None,
+                    help="measured recall by box width / image width, 'frac:recall,...' ascending, e.g. "
+                         "'0.025:0.24,0.05:0.64,1.0:1.0' (F320 on JAMSTEC, 2026-10-03)")
+    ap.add_argument("--fp-per-frame", type=float, default=0.0,
+                    help="mean random false positives per detector frame (F320 on JAMSTEC: ~1.0)")
     ap.add_argument("--trace-events", default=None, help="append JSONL diagnostic events (state/ram/wire) here")
     ap.add_argument("--servo-aware", action="store_true",
                     help="EXPERIMENT: esc from the angle the servo has REACHED, not the target (deploy_driver)")
