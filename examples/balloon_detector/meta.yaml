@@ -8,3 +8,14 @@ train: sim-pretrain + colour-invariant domain randomisation (campaign round-3 "m
 source_checkpoint: camp3_mix.pt
 metrics: near-4m recall ~0.88 on sim_eval (operating range); colour-invariant, hardened on look-up/far/murk
 load: load_learned_detector("examples/balloon_detector/model.pt")   # cfg (width/input/conf) is baked in
+
+# --- 2026-10-03: JAMSTEC（本番会場）向け。上の model.pt（camp3_mix）は残してある ---------------
+# 本命 balloon_F320_20261003.pt（入力 320、cfg 埋め込み済み）/ 予備 balloon_F256_20261003.pt（入力 256）。
+# ONNX 版 *_320.onnx / *_256.onnx は PyTorch と 40/40 枚で検出一致。
+# 学習: 既存実画像 380 + 自チームプール 720（9/13・10/01、Claude ラベル）+ 他チーム JAMSTEC/マリーナ 248
+#   = 1348 枚 / 2306 箱、model.pt から微調整（F320 90 epoch / F256 120 epoch、lr 5e-4）。
+# 成績（F1、学習に未使用）: JAMSTEC 50 枚 F320 0.48 / F256 0.40 / 自チームのみ 0.11、real0825_val 0.74 / 0.70。
+# 使い方: perception_node の model_path にこの .pt の絶対パス。詳細 docs/otherteam_balloon_data.md。
+models_20261003:
+  primary: balloon_F320_20261003.pt
+  fallback: balloon_F256_20261003.pt
