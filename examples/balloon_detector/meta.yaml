@@ -19,3 +19,15 @@ load: load_learned_detector("examples/balloon_detector/model.pt")   # cfg (width
 models_20261003:
   primary: balloon_F320_20261003.pt
   fallback: balloon_F256_20261003.pt
+
+# --- 2026-10-05: 10/03 プール（強い濁り・紫/緑かぶり・ピンぼけ）向けの候補。既定は上の F320_20261003 のまま ----
+# balloon_F320_20261005.pt / _320.onnx（ONNX は torch と 112/112 枚で検出一致）。
+# 学習: final_all_train 1348 枚 + 10/03 の 267 枚（青 134 / 黄 99 / 赤 0 箱、Claude 目視ラベル、重りは箱なし）
+#   = 1615 枚、F320_20261003 から 40 epoch、lr 2.5e-4。データ ai/balloon/pool1003/（labeling_notes.txt）。
+# 成績（conf 0.40 / 0.30 の F1）: JAMSTEC 50 枚 0.40 / 0.47（現行 0.37 / 0.48）、real0825_val 0.78 / 0.74（0.76 / 0.74）。
+# 10/03 は全部学習に使ったので未見 run の成績は run 単位の交差学習で推定:
+#   151920 を未見に: F1@0.30 0.10 → 0.29、青 recall@0.40 0/91 → 11/91、黄 0/99 → 0/99、重り→赤 (>=0.40) 7 → 5 枚
+#   144510 を未見に: F1@0.30 0.29 → 0.52、F1@0.40 0.20 → 0.39
+#   同じ手順で 10/03 抜き（対照）だと JAMSTEC F1@0.30 は 0.42（学習のゆらぎ ±0.05 程度）。
+models_20261005:
+  candidate: balloon_F320_20261005.pt
