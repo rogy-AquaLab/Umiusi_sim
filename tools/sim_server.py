@@ -15,7 +15,9 @@ server waits for the next connection.
 Wire protocol (little-endian, every message length-prefixed with a uint32 byte count):
 
   request  (relay -> server), 80-byte payload ``<8d8Bd``:
-      servo_angle_deg[0..3]  (4 x float64, degrees, as the ROS command interface carries)
+      servo_angle[0..3]      (4 x float64, RADIANS — the ``thrusterN/servo/angle`` command
+                              interface carries rad: the mixer clamps at +/-pi/2 and the CAN
+                              VescModel takes rad. ``--servo-unit deg`` restores the old decode)
       esc_duty[0..3]         (4 x float64, [-1, 1])
       servo_allowed[0..3]    (4 x uint8, gate bit)
       esc_allowed[0..3]      (4 x uint8, gate bit)
@@ -23,17 +25,20 @@ Wire protocol (little-endian, every message length-prefixed with a uint32 byte c
 
   reply    (server -> relay) payload:
       nq                     (uint32)
-      quat[w,x,y,z]          (4 x float64, MuJoCo order)
-      gyro[x,y,z]            (3 x float64, body frame)
-      accel[x,y,z]           (3 x float64, specific force a - R^T g, body frame)
+      quat[w,x,y,z]          (4 x float64, MuJoCo order, IMU/REP-103 frame — see below)
+      gyro[x,y,z]            (3 x float64, body frame, IMU/REP-103 axes)
+      accel[x,y,z]           (3 x float64, specific force a - R^T g, body frame, IMU axes)
       servo_angle[0..3]      (4 x float64, radians)
       esc_rpm[0..3]          (4 x float64)
       qpos[0..nq-1]          (nq x float64, full MuJoCo qpos, for the viewer)
 
-The command decode (deg->normalized, ``allowed`` gating, clamp) and the state encode
-(quaternion order, body-frame gyro, specific-force accel, ESC rpm) reproduce EXACTLY what
-the old C++ ``MujocoSystem::read()/write()`` produced, so the controllers see identical
-state whether the physics runs in C++ (old) or here (now).
+Frames (2026-10-08): the controllers are written for the BNO055 as mounted — REP-103 body axes
+(x fwd, y left, z up) in a z-up world — while the sim's CAD frame is +X fwd, +Y up, +Z starboard.
+State is therefore converted with P = ``tools.bag_replay.FRAME_P`` (cad = P @ imu):
+R_imu = P^T R_cad P, w_imu = P^T w_cad, f_imu = P^T f_cad. Before this the quaternion went out in
+the CAD frame (body-up on y) and the gyro came from ``mj_objectVelocity(flg_local=1)``, which is
+the body's INERTIAL-PRINCIPAL-AXES frame, not the body frame — yaw showed up as "x" — so the
+feedback controller could not close the loop in sim (docs/closed_loop_replay_20261003.md).
 
 Usage
 -----
@@ -54,6 +59,9 @@ import mujoco
 import numpy as np
 
 from umiusi_sim.simulator import UmiusiSimulator
+
+# IMU (REP-103) <-> CAD frame rotation shared with the bag replay tools: cad = FRAME_P @ imu.
+FRAME_P = np.array([[1, 0, 0], [0, 0, 1], [0, -1, 0]], dtype=float)
 
 DEFAULT_SOCK = os.environ.get("UMIUSI_SIM_SOCK", "/tmp/umiusi_sim.sock")
 
@@ -95,7 +103,8 @@ def _send_msg(conn: socket.socket, payload: bytes) -> None:
 class SimServer:
     """Wraps ONE ``UmiusiSimulator`` and steps it one control period per request."""
 
-    def __init__(self, sim: UmiusiSimulator | None = None):
+    def __init__(self, sim: UmiusiSimulator | None = None, servo_unit: str = "rad"):
+        self.servo_unit = servo_unit
         self.sim = sim if sim is not None else UmiusiSimulator()
         self._reset_integration()
 
@@ -104,12 +113,13 @@ class SimServer:
         self._prev_lin_world = np.zeros(3)
         self._have_prev = False
 
-    def step_command(self, servo_deg, esc_duty, servo_allowed, esc_allowed, dt) -> bytes:
+    def step_command(self, servo_angle, esc_duty, servo_allowed, esc_allowed, dt) -> bytes:
         """Decode the command, advance the sim one control period, encode the reply payload.
 
         Mirrors the old C++ write()+read(): ``allowed`` gates each channel to zero, servo angle
-        (deg) is clamped to +/- range and normalized, ESC duty is clamped to [-1, 1]; substeps =
-        round(dt / physics_dt) so the physics rate matches the ROS update_rate (100 Hz -> 5).
+        (rad; deg if ``servo_unit == "deg"``) is clamped to +/- range and normalized, ESC duty is
+        clamped to [-1, 1]; substeps = round(dt / physics_dt) so the physics rate matches the ROS
+        update_rate (100 Hz -> 5).
         """
         sim = self.sim
         srange = sim.servo_range_rad
@@ -117,7 +127,8 @@ class SimServer:
         action = np.zeros(8)
         for k in range(4):
             if servo_allowed[k]:
-                ang = float(np.clip(np.radians(servo_deg[k]), -srange, srange))
+                a_rad = np.radians(servo_angle[k]) if self.servo_unit == "deg" else servo_angle[k]
+                ang = float(np.clip(a_rad, -srange, srange))
                 action[k] = ang / srange if srange > 0.0 else 0.0
             else:
                 action[k] = 0.0
@@ -135,18 +146,20 @@ class SimServer:
         d = sim.data
         base = sim.base_id
 
-        # Quaternion — MuJoCo order [w, x, y, z] (unchanged from the C++ read()).
-        quat = d.xquat[base].copy()
+        R = d.xmat[base].reshape(3, 3)
+        # Quaternion — MuJoCo order [w, x, y, z], rotated into the IMU (REP-103) frame.
+        quat = np.zeros(4)
+        mujoco.mju_mat2Quat(quat, (FRAME_P.T @ R @ FRAME_P).flatten())
 
-        # Gyro — angular velocity in the BODY frame (mj_objectVelocity local flag).
-        vloc = np.zeros(6)
-        mujoco.mj_objectVelocity(sim.model, d, mujoco.mjtObj.mjOBJ_BODY, base, vloc, 1)
-        gyro = vloc[:3].copy()
+        # Gyro — world angular velocity rotated into the BODY frame (flg_local=1 would give the
+        # inertial-principal-axes frame instead), then into IMU axes.
+        vglob = np.zeros(6)
+        mujoco.mj_objectVelocity(sim.model, d, mujoco.mjtObj.mjOBJ_BODY, base, vglob, 0)
+        gyro = FRAME_P.T @ (R.T @ vglob[:3])
 
         # Accel — specific force f = a_body - R^T g. a is the finite difference of the world CoM
         # velocity (subtree_linvel, left over from the last apply_external_forces, exactly as the
         # C++ read() sampled it), rotated into the body frame; then subtract body-frame gravity.
-        R = d.xmat[base].reshape(3, 3)
         lin_world = d.subtree_linvel[base].copy()
         if self._have_prev:
             acc_world = (lin_world - self._prev_lin_world) / ctrl_dt
@@ -154,7 +167,7 @@ class SimServer:
             acc_world = np.zeros(3)
         acc_body = R.T @ acc_world
         g_body = R.T @ sim.gravity
-        accel = acc_body - g_body
+        accel = FRAME_P.T @ (acc_body - g_body)
         self._prev_lin_world = lin_world
         self._have_prev = True
 
@@ -295,7 +308,7 @@ def _selftest(sock_path: str) -> int:
     # qpos layout: [x, y, z, qw, qx, qy, qz, servo1..4]
     up = st["qpos"][1]
     quat = st["quat"]
-    level = abs(quat[1]) < 0.1 and abs(quat[3]) < 0.1  # small roll/pitch components
+    level = abs(quat[1]) < 0.1 and abs(quat[2]) < 0.1  # small roll/pitch (IMU frame: x, y)
     print(f"[zero cmd]    rose to y={up:+.3f} m, quat={np.round(quat, 3)}  level={level}")
     ok &= up > 0.0 and level
     client.close()
@@ -305,20 +318,20 @@ def _selftest(sock_path: str) -> int:
     # Forward surge via the feed-forward allocation (servo ~0, all ESC forward).
     from umiusi_perception.control import feedforward_allocation
     act = feedforward_allocation([0, 0, 0], [1, 0, 0])
-    servo_deg = list(np.degrees(act[:4] * server.sim.servo_range_rad))
+    servo_cmd = list(act[:4] * server.sim.servo_range_rad)   # rad, as the interface carries
     esc = list(act[4:8])
     prev_y = None
     speed = 0.0
     for i in range(400):
         t0 = time.perf_counter()
-        st = client.step(servo_deg, esc, allowed, allowed, dt)
+        st = client.step(servo_cmd, esc, allowed, allowed, dt)
         latencies.append((time.perf_counter() - t0) * 1e3)
         if prev_y is not None:
             speed = abs(st["qpos"][0] - prev_y) / dt
         prev_y = st["qpos"][0]
     horiz = np.array([st["qpos"][0], st["qpos"][2]])
     print(f"[forward cmd] cruise speed ~{speed:.3f} m/s (last-step), horiz pos={np.round(horiz, 2)} m")
-    ok &= speed > 0.3  # clearly cruising
+    ok &= speed > 0.1  # clearly cruising (0.17 m/s with the 2026-09 propeller-law thrust curve)
     client.close()
 
     lat = np.array(latencies)
@@ -336,10 +349,12 @@ def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
     ap.add_argument("--sock", default=DEFAULT_SOCK, help=f"Unix socket path (default {DEFAULT_SOCK})")
     ap.add_argument("--selftest", action="store_true", help="run a standalone client round-trip check")
+    ap.add_argument("--servo-unit", choices=("rad", "deg"), default="rad",
+                    help="unit of the incoming servo angle (the ros2_control interface carries rad)")
     args = ap.parse_args()
     if args.selftest:
         return _selftest(args.sock)
-    SimServer().serve_forever(args.sock)
+    SimServer(servo_unit=args.servo_unit).serve_forever(args.sock)
     return 0
 
 
