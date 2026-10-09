@@ -101,11 +101,36 @@ def _underwater(image: np.ndarray, **kwargs) -> np.ndarray:
     return np.clip(img, 0, 255).astype(np.uint8)
 
 
-def build_aug(input_size: int, train: bool) -> A.Compose:
-    """albumentations pipeline (image + COCO boxes). Heavy for train, resize-only for val."""
+def build_aug(input_size: int, train: bool, env_filter=None, filter_prob: float = 0.0) -> A.Compose:
+    """albumentations pipeline (image + COCO boxes). Heavy for train, resize-only for val.
+
+    ``env_filter`` (tools.env_filter.EnvFilter) を渡すと、確率 ``filter_prob`` で水色かぶり
+    (_underwater) の代わりに実映像由来の会場フィルタを掛ける。None なら従来どおり。"""
     bbox = A.BboxParams(format="coco", label_fields=["labels"], min_visibility=0.25, min_area=16)
     if not train:
         return A.Compose([A.Resize(input_size, input_size)], bbox_params=bbox)
+    if env_filter is not None:
+        def _cast(image: np.ndarray, **kwargs) -> np.ndarray:
+            if np.random.rand() < filter_prob:
+                return env_filter(image)
+            return _underwater(image) if np.random.rand() < 0.85 else image
+
+        return A.Compose([
+            A.HorizontalFlip(p=0.5),
+            A.Affine(scale=(0.7, 1.3), translate_percent=(-0.1, 0.1), rotate=(-12, 12), p=0.6),
+            A.RandomResizedCrop(size=(input_size, input_size), scale=(0.5, 1.0), ratio=(0.75, 1.33),
+                                p=0.5),
+            A.RandomBrightnessContrast(brightness_limit=0.4, contrast_limit=0.4, p=0.7),
+            A.HueSaturationValue(hue_shift_limit=25, sat_shift_limit=45, val_shift_limit=30, p=0.6),
+            A.RGBShift(r_shift_limit=30, g_shift_limit=30, b_shift_limit=30, p=0.5),
+            A.OneOf([A.GaussianBlur(blur_limit=(3, 7)), A.MotionBlur(blur_limit=(3, 9)),
+                     A.MedianBlur(blur_limit=5)], p=0.5),
+            A.Resize(input_size, input_size),
+            # 会場フィルタは検出器の入力解像度で測っているので Resize の後に掛ける。
+            A.Lambda(image=_cast, p=1.0, name="env_filter_or_underwater"),
+            A.Downscale(scale_range=(0.25, 0.6), p=0.5),
+            A.ImageCompression(quality_range=(28, 75), p=0.5),
+        ], bbox_params=bbox)
     return A.Compose([
         A.HorizontalFlip(p=0.5),
         A.Affine(scale=(0.7, 1.3), translate_percent=(-0.1, 0.1), rotate=(-12, 12), p=0.6),
@@ -187,11 +212,14 @@ class BalloonDataset(Dataset):
     """COCO balloon set -> (image tensor, hm, wh, reg_mask). Parameterised path so more data drops in."""
 
     def __init__(self, root: pathlib.Path, json_name: str, img_subdir: str, input_size: int,
-                 train: bool):
+                 train: bool, env_filter=None, filter_prob: float = 0.0, sim_prefix: str | None = None):
         self.root = pathlib.Path(root)
         self.img_dir = self.root / img_subdir
         self.input_size = input_size
-        self.aug = build_aug(input_size, train)
+        self.aug = build_aug(input_size, train, env_filter, filter_prob)
+        # sim 画像は必ず会場フィルタを通す（_underwater に色を崩させない）。
+        self.sim_prefix = sim_prefix if env_filter is not None else None
+        self.aug_sim = build_aug(input_size, train, env_filter, 1.0) if self.sim_prefix else None
         d = json.load(open(self.root / "annotations" / json_name))
         id2file = {im["id"]: im["file_name"] for im in d["images"]}
         per_img: dict[int, list] = {im["id"]: [] for im in d["images"]}
@@ -217,8 +245,9 @@ class BalloonDataset(Dataset):
             if w > 1 and h > 1:
                 boxes.append([x, y, w, h])
                 labels.append(col)
+        aug = self.aug_sim if self.sim_prefix and fname.startswith(self.sim_prefix) else self.aug
         try:
-            out = self.aug(image=img, bboxes=boxes, labels=labels)
+            out = aug(image=img, bboxes=boxes, labels=labels)
             img_a, boxes_a, labels_a = out["image"], out["bboxes"], out["labels"]
         except Exception:  # noqa: BLE001 -- an aug that drops all boxes: fall back to plain resize
             out = A.Compose([A.Resize(self.input_size, self.input_size)],
@@ -257,10 +286,16 @@ def wh_loss(pred_wh: torch.Tensor, gt_wh: torch.Tensor, mask: torch.Tensor) -> t
 # Train
 # ----------------------------------------------------------------------------------------------
 def train(args) -> pathlib.Path:
-    torch.manual_seed(0)
-    np.random.seed(0)
+    torch.manual_seed(args.seed)
+    np.random.seed(args.seed)
     torch.set_num_threads(args.threads)
-    ds = BalloonDataset(args.data_root, args.train_json, args.img_dir, args.input_size, train=True)
+    env_filter = None
+    if args.env_filter is not None:
+        from tools.env_filter import EnvFilter
+        env_filter = EnvFilter(args.env_filter)
+    ds = BalloonDataset(args.data_root, args.train_json, args.img_dir, args.input_size, train=True,
+                        env_filter=env_filter, filter_prob=args.env_filter_prob,
+                        sim_prefix=args.sim_prefix)
     dl = DataLoader(ds, batch_size=args.batch, shuffle=True, num_workers=args.workers,
                     drop_last=len(ds) > args.batch)
     model = TinyBalloonNet(width=args.width)
@@ -326,6 +361,13 @@ def main():
     ap.add_argument("--threads", type=int, default=2, help="torch threads (keep low: RL runs in bg)")
     ap.add_argument("--workers", type=int, default=0, help="dataloader workers (0 = no subprocess)")
     ap.add_argument("--no-eval", action="store_true", help="skip the val comparison vs classical")
+    ap.add_argument("--seed", type=int, default=0)
+    ap.add_argument("--env-filter", type=pathlib.Path, default=None,
+                    help="tools.env_filter build の bank (.npz)。指定時だけ会場フィルタ拡張を使う")
+    ap.add_argument("--env-filter-prob", type=float, default=0.5,
+                    help="実画像に会場フィルタを掛ける確率（残りは従来の水色かぶり）")
+    ap.add_argument("--sim-prefix", default=None,
+                    help="file_name がこの前置きで始まる画像は sim とみなし、必ず会場フィルタを掛ける")
     args = ap.parse_args()
 
     if not (args.data_root / "annotations" / args.train_json).exists():

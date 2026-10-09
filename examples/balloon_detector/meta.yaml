@@ -19,3 +19,14 @@ load: load_learned_detector("examples/balloon_detector/model.pt")   # cfg (width
 models_20261003:
   primary: balloon_F320_20261003.pt
   fallback: balloon_F256_20261003.pt
+
+# --- 2026-10-07: 会場フィルタ付き sim を混ぜた版（autonomy #46 で実機の既定に採用）-----------------
+# balloon_F320_20261007.pt / _320.onnx（PyTorch と 40/40 枚で一致）。上の 20261003 の学習データ 1348 枚
+# + 10/03 プールの見え方を実映像から測って掛けた sim 画像 500 枚。10/03 のラベル付き画像は評価用に除外。
+# 成績（F1、conf 0.3、20261003 → 20261007）: 10/03 未見 151920 0.10 → 0.53 / 遠く淡い 144510 0.29 → 0.16 /
+#   風船なし 55 枚の誤検出 1 → 8 / JAMSTEC + 他チーム 70 枚 0.47 → 0.46。閾値は 0.3（0.4 だと濁りで全滅）。
+# envfilt_bank_20261007.npz = そのフィルタの参照（10/03 155 枚・9/13 120・JAMSTEC 120）。
+#   tools.env_filter / perception_train --env-filter で使う。詳細 docs/env_filter_study.md。
+models_20261007:
+  primary: balloon_F320_20261007.pt
+  env_filter_bank: envfilt_bank_20261007.npz
