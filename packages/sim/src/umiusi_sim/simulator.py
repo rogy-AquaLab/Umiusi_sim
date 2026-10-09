@@ -24,6 +24,8 @@ from umiusi_sim.physics import thruster as thr
 _PKG = Path(__file__).resolve().parent            # packages/sim/src/umiusi_sim
 _ROOT = _PKG.parents[3]                            # repo root (packages/sim/src/..)
 _DEFAULT_MODEL = _PKG / "description" / "umiusi.xml"
+FLOOR_CLEARANCE_M = 0.12  # CoM height above the floor at contact (hull half-height, approx.)
+SURFACE_BAND_M = 0.25  # buoyancy fades from full to zero over this band around the water surface
 _DEFAULT_CONFIG = _ROOT / "configs" / "umiusi.yaml"
 
 
@@ -44,6 +46,13 @@ class UmiusiSimulator:
         # Water / hull
         self.density = float(cfg["water"]["density"])
         self.volume = float(cfg["water"]["displaced_volume"])
+        # Optional water surface (world +Y height). None = unbounded water (the historical default).
+        # When set, buoyancy fades out over SURFACE_BAND_M as the centre of buoyancy breaks the
+        # surface, so a positively-buoyant hull floats AT the surface instead of rising forever.
+        self.water_surface_y = None
+        # Optional pool floor (world +Y height of the hull's lowest point allowed). None = no floor.
+        # A stiff spring-damper on the system CoM keeps the hull from sinking through it.
+        self.floor_y = None
         self.buoyancy_offset = float(cfg["water"]["buoyancy_offset_above_com"])
         self.gravity = np.array(cfg["sim"]["gravity"], dtype=float)
 
@@ -74,6 +83,10 @@ class UmiusiSimulator:
         # first-order lag near the target (tau = 0 -> pure slew). See configs/umiusi.yaml.
         self.servo_tau = float(t.get("servo_tau_s", 0.0))
         self.thrust_per_cmd = float(t["thrust_per_cmd"])
+        # Vertical-thrust efficiency (1.0 = none): thrust scaled by 1 - (1 - eff) * sin^2(servo),
+        # i.e. only the vertical (servo +/-90) component loses. 10/03 bags: roll/pitch response
+        # to vertical thrust is several times smaller than yaw to horizontal thrust.
+        self.thrust_vertical_eff = float(t.get("thrust_vertical_eff", 1.0))
         # Propeller-law thrust curve F = sign(u)|u|^exp * thrust_per_cmd (exp 1.0 = linear).
         # Fitted against the 2026-08-21 pool bag: linear overpredicts low-duty thrust ~10x.
         self.thrust_curve_exp = float(t.get("thrust_curve_exp", 1.0))
@@ -192,6 +205,8 @@ class UmiusiSimulator:
             self.esc_current = thr.slew(self.esc_current, esc_target, self.thrust_slew, self.dt)
             u = self.esc_current
             self.thrust_mag = np.sign(u) * np.abs(u) ** self.thrust_curve_exp * self.thrust_per_cmd
+            if self.thrust_vertical_eff != 1.0:
+                self.thrust_mag *= 1.0 - (1.0 - self.thrust_vertical_eff) * np.sin(self.servo_ctrl) ** 2
             for k, aid in enumerate(self.act_ids):
                 self.data.ctrl[aid] = self.servo_ctrl[k]
             self._apply_external_forces()
@@ -213,6 +228,9 @@ class UmiusiSimulator:
         # Buoyancy: force at the center of buoyancy (above the system CoM -> restoring moment).
         f_buoy = hydro.buoyancy_force_world(self.density, self.volume, self.gravity)
         cob_world = d.xpos[base] + R @ self.cob_local
+        if self.water_surface_y is not None:
+            sub = (self.water_surface_y - cob_world[1]) / SURFACE_BAND_M + 0.5
+            f_buoy = f_buoy * float(np.clip(sub, 0.0, 1.0))
         mujoco.mj_applyFT(m, d, f_buoy, zero3, cob_world, base, d.qfrc_applied)
 
         # Hydrodynamic damping: linear drag through the system CoM (no spurious torque),
@@ -247,6 +265,13 @@ class UmiusiSimulator:
         f_lift_body = hydro.lift_force_body(lin_body, self.lift_coef, self.lift_ref_axis)
         if f_lift_body.any():
             mujoco.mj_applyFT(m, d, R @ f_lift_body, zero3, sys_com, base, d.qfrc_applied)
+
+        # Pool floor contact (opt-in): spring-damper on the CoM height, no friction.
+        if self.floor_y is not None:
+            pen = (self.floor_y + FLOOR_CLEARANCE_M) - sys_com[1]
+            if pen > 0.0:
+                f_floor = np.array([0.0, 2000.0 * pen - 60.0 * min(0.0, d.subtree_linvel[base][1]), 0.0])
+                mujoco.mj_applyFT(m, d, f_floor, zero3, sys_com, base, d.qfrc_applied)
 
         # External impulse disturbance (waves/bumps), a world-frame force at the CoM.
         if self.ext_force_world.any():

@@ -54,9 +54,14 @@ hull:
 # Derived from CAD silhouette areas x BlueROV2-identified effective Cd (von Benzon et al. 2022,
 # JMSE 10(12):1898, same vehicle class). Re-derive: python -m tools.estimate_hydro
 # ESTIMATES, not measurements — docs/calibration_plan.md has the in-water experiments.
+# 2026-10-08: roll (idx 3) and pitch (idx 5) damping x8 and their added inertia x3, fitted on the
+# 2026-10-03 pool bags (open-loop gyro replay grid, tools/bag_replay.py, then confirmed in closed
+# loop with the real controllers: docs/closed_loop_replay_20261003.md §6). Before: roll gyro RMSE
+# 0.17 rad/s vs floor 0.057 and tilt errors of 20-55 deg in closed loop; after: 0.07 / 3-5 deg.
+# Yaw (idx 4) and the translational entries are unchanged (they already matched).
 drag:
-  linear:    [11.5, 13.7, 0.0, 0.15, 0.60, 1.19]    # N/(m/s) ; N*m/(rad/s)
-  quadratic: [118.0, 79.1, 144.0, 0.49, 2.01, 0.70] # N/(m/s)^2 ; N*m/(rad/s)^2
+  linear:    [11.5, 13.7, 0.0, 1.20, 0.60, 9.52]    # N/(m/s) ; N*m/(rad/s)
+  quadratic: [118.0, 79.1, 144.0, 3.92, 2.01, 5.60] # N/(m/s)^2 ; N*m/(rad/s)^2
 added_mass:
   # Diagonal added mass/inertia, same axis order as drag. Estimated (tools/estimate_hydro.py) from
   # Lamb's ellipsoid x per-axis solidity, calibrated against BlueROV2 published values; residual
@@ -75,7 +80,7 @@ added_mass:
   # DELIBERATELY NOT CHANGED: picking a value inside 2.1-5.6x would bake in a number nothing
   # measured. The free-decay test noted on buoyancy_offset_above_com settles roll and pitch
   # separately and therefore settles this ratio too.
-  diag: [2.69, 7.10, 3.16, 0.082, 0.165, 0.122]
+  diag: [2.69, 7.10, 3.16, 0.246, 0.165, 0.366]   # roll/pitch x3 (2026-10-08, see drag above)
 
 # --- LIFT: force perpendicular to the body-frame flow, growing with angle of attack -----------
 # force = coef * |v|^2 * sin(a)cos(a) perpendicular to v, a = angle of attack vs the longitudinal
@@ -130,12 +135,21 @@ thrusters:
   # bundle's action_contract, and the robot reproduces the plant from that copy.
   thrust_per_cmd: 30.0         # N at FULL command (|u| = 1)
   thrust_curve_exp: 2.0        # propeller-law exponent
+  # Vertical-thrust efficiency: thrust *= 1 - (1 - eff) * sin^2(servo). 1.0 = no loss.
+  # 2026-10-08: the 10/03 roll/pitch gyro fit preferred 0.25, but that ALSO cuts the heave force to
+  # 1/4 and the vehicle can no longer dive to a 0.5 m red (competition sim 0/8), while on 10/03 the
+  # real robot did sit at balloon height. Heave is unobserved (no depth sensor), so the roll/pitch
+  # mismatch is carried by the damping/inertia terms instead and this stays at 1.0 until a depth
+  # measurement separates "weak vertical thrust" from "strong roll/pitch damping".
+  thrust_vertical_eff: 1.0
   # ESC duty cap |u| <= max_duty, applied in the PLANT before the slew — the deploy-path clamp
   # (navigator/rl_attitude max_duty) made part of the training plant. Train WITH a cap: a
   # capless-trained policy saturates against the robot's clamp and degenerates to bang-bang.
   # 0.25 matches the deploy default and sits ~1.1x under the roll-capsize threshold.
   # domain_rand.max_duty_range randomizes it so one policy survives an operator raising the cap.
-  max_duty: 0.25
+  # 2026-10-08: the deployed control (sinsei_umiusi_control da05604) clamps at 0.5; the plant cap
+  # follows it so bag replays are not cut (closed-loop runs set it to 1.0 and let control clamp).
+  max_duty: 0.5
   # Per-unit: pivot = measured servo joint (base_link frame; from CAD placement.txt), and
   # thrust_axis = the NEUTRAL (servo=0) thrust direction = horizontal tangential (perp to the arm),
   # expressed in the thruster body frame (= base frame at servo=0). The MJCF hinge axis (= arm) is

@@ -49,6 +49,13 @@ def test_servo_aware_holds_level_on_a_flatter_thrust_curve():
         sim = UmiusiSimulator()
         sim.set_net_buoyancy(0.0)
         sim.thrust_curve_exp = 1.6
+        # The 10/03-calibrated plant damps roll/pitch hard enough that no limit cycle forms at all,
+        # so this feature test runs on the pre-calibration roll/pitch plant, where it does.
+        sim.thrust_vertical_eff = 1.0
+        for i in (3, 5):
+            sim.drag_lin[i] /= 8.0
+            sim.drag_quad[i] /= 8.0
+            sim.added_mass_diag[i] /= 3.0
         sim.reset(pos=(0.0, 1.5, 0.0))
         drv = DeployDriver(sim, servo_aware=servo_aware)
         roll = []
