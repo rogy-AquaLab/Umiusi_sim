@@ -75,11 +75,20 @@ class WaterParams:
     murk: float = 0.5
     cast: float = 0.5
     cast_sat: float = 0.6
+    # --- opt-in "pool0913" terms (defaults = OFF, so existing callers are unchanged) -------------
+    cam_gain: np.ndarray = field(default_factory=lambda: np.array([1.0, 1.0, 1.0]))  # NoIR WB error
+    nir_gain: np.ndarray = field(default_factory=lambda: np.array([0.0, 0.0, 0.0]))  # NIR -> RGB leak
+    nir_beta: float = 2.5           # water NIR absorption [1/m] (NIR dies within ~1 m)
+    caustic_web: float = 0.0        # amplitude of the cellular caustic network (0 = off)
+    caustic_cell: float = 40.0      # caustic cell size [px]
+    soft_focus: float = 0.0         # global defocus gaussian sigma [px] (0 = off)
 
     def __post_init__(self):
         self.beta = np.asarray(self.beta, dtype=np.float64).reshape(3)
         self.B = np.asarray(self.B, dtype=np.float64).reshape(3)
         self.wb_gain = np.asarray(self.wb_gain, dtype=np.float64).reshape(3)
+        self.cam_gain = np.asarray(self.cam_gain, dtype=np.float64).reshape(3)
+        self.nir_gain = np.asarray(self.nir_gain, dtype=np.float64).reshape(3)
 
 
 # TWO independent random axes per frame:
@@ -346,6 +355,8 @@ def degrade(
     depth_m: np.ndarray,
     params: WaterParams | None = None,
     rng: np.random.Generator | None = None,
+    nir: np.ndarray | None = None,
+    caustic_weight: np.ndarray | None = None,
 ) -> np.ndarray:
     """Apply the underwater image-formation model to a clean render.
 
@@ -354,6 +365,11 @@ def degrade(
         depth_m:   (H, W) float metric depth from the camera [m] (Renderer depth mode).
         params:    a ``WaterParams`` (defaults = moderate murk). Use ``random_params`` for DR.
         rng:       optional Generator for the stochastic terms (noise/caustics/reflection phase).
+        nir:       optional (H, W) near-infrared reflectance map in [0,1] (per material, from the
+                   segmentation). Used only when ``params.nir_gain`` is non-zero (pool0913 profile):
+                   the NoIR camera adds ``nir_gain * nir * exp(-nir_beta * z)`` to R/G/B.
+        caustic_weight: optional (H, W) weight in [0,1] where the cellular caustic network lands
+                   (lit floor/walls/surface; 0 on balloons). Used only when ``params.caustic_web`` > 0.
 
     Returns:
         (H, W, 3) uint8 degraded RGB. Pixel positions are UNCHANGED, so segmentation-derived
@@ -385,6 +401,19 @@ def degrade(
     # into the CLEAN RGB by the generator BEFORE degrade() — see apply_surface_reflection. degrade()
     # then veils it along with the rest of the scene ("veil on top of the correct reflection").
 
+    # 1b) Pi NoIR near-infrared leak (opt-in): the sensor has no IR-cut filter, so NIR reflected by
+    # each material leaks mostly into R (some B). Water absorbs NIR within ~1 m, so the leak is
+    # strongest for close objects / near the surface and falls off with range.
+    if nir is not None and np.any(params.nir_gain > 0):
+        leak = np.asarray(nir, dtype=np.float64)[..., None] * np.exp(-params.nir_beta * z[..., None])
+        img = img + leak * params.nir_gain.reshape(1, 1, 3)
+
+    # 2b) cellular caustic network (opt-in): bright web-like lines of sunlight focused by the waves.
+    if params.caustic_web > 0:
+        web = caustic_web(img.shape[:2], params.caustic_cell, rng)
+        wgt = t.mean(axis=2) if caustic_weight is None else caustic_weight * t.mean(axis=2)
+        img = img * (1.0 + params.caustic_web * (web * wgt)[..., None])
+
     # 3) turbidity blur (depth-scaled: farther => blurrier)
     if params.turbidity > 0:
         img = _depth_scaled_blur(img, depth_norm, params.turbidity)
@@ -406,8 +435,11 @@ def degrade(
     if params.particles > 0:
         img = _add_particles(img, t, params.particles, rng)
 
-    # 6) exposure / white-balance (camera gain + colour cast; raspi auto-exposure/AWB swing)
-    img = img * params.exposure * params.wb_gain.reshape(1, 1, 3)
+    # 6) exposure / white-balance (camera gain + colour cast; raspi auto-exposure/AWB swing). The
+    # opt-in ``cam_gain`` is the NoIR camera's pink/magenta white-balance error (R up, G down).
+    img = img * params.exposure * params.wb_gain.reshape(1, 1, 3) * params.cam_gain.reshape(1, 1, 3)
+    if params.soft_focus > 0:
+        img = _gaussian_blur(img, params.soft_focus)
 
     # 7) motion blur (moving vehicle) then lens vignetting — near-range robustness DR. Both are
     # applied last (on the ~final image) and keep pixel positions symmetric, so boxes stay exact.
@@ -417,6 +449,75 @@ def degrade(
         img = _vignette(img, params.vignette)
 
     return np.clip(img * 255.0, 0, 255).astype(np.uint8)
+
+
+def caustic_web(shape, cell_px: float, rng: np.random.Generator) -> np.ndarray:
+    """Cellular (Worley F2-F1) caustic network in [0,1]: thin bright lines along cell borders,
+    wobbled by a smooth warp — the web-like light pattern sunlight makes through a rippled surface."""
+    from scipy.spatial import cKDTree
+
+    h, w = shape
+    n = max(8, int(h * w / (cell_px * cell_px)))
+    pts = rng.uniform([0, 0], [w, h], size=(n, 2))
+    small = 4                                     # evaluate at 1/4 res, then upsample (cheap)
+    hs, ws = (h + small - 1) // small, (w + small - 1) // small
+    yy, xx = np.mgrid[0:hs, 0:ws].astype(np.float64) * small
+    warp = _gaussian_blur(rng.normal(0, 1, (hs, ws, 2)), 3.0)
+    warp = warp / max(np.abs(warp).max(), 1e-9) * cell_px * 0.35
+    q = np.stack([xx + warp[..., 0], yy + warp[..., 1]], -1).reshape(-1, 2)
+    d, _ = cKDTree(pts).query(q, k=2)
+    edge = (d[:, 1] - d[:, 0]).reshape(hs, ws)
+    web = np.exp(-edge / (0.04 * cell_px))
+    if cv2 is not None:
+        web = cv2.resize(web.astype(np.float32), (w, h), interpolation=cv2.INTER_LINEAR)
+    else:  # pragma: no cover
+        web = np.kron(web, np.ones((small, small)))[:h, :w]
+    return np.clip(web, 0.0, 1.0)
+
+
+# pool0913 profile (opt-in): the real pool footage of 2026-09-13 / 10-01 (Pi NoIR camera just below
+# the surface, clear bright water). Ranges are measured/eyeballed from ai/balloon/pool0913 frames.
+POOL0913_RANGES = {
+    "beta_red": (0.25, 0.55),        # clear water: red attenuates, but distances are short
+    "veil": ([0.30, 0.62, 0.62], [0.42, 0.76, 0.74]),  # cyan veil (before the camera gain)
+    "cam_gain_r": (1.08, 1.35),      # NoIR white-balance error: R gain (per episode/day)
+    "cam_gain_g": (0.85, 0.98),
+    "cam_gain_b": (0.80, 0.95),
+    "nir_r": (0.50, 1.00),           # NIR leak into R ...
+    "nir_b_frac": (0.40, 0.70),      # ... and a fraction of that into B
+    "nir_beta": (0.8, 2.0),          # effective water absorption over the NoIR band (~700-800 nm)
+    "exposure": (0.78, 1.10),        # often over-exposed (washes the pale balloons out)
+    "caustic_web": (0.20, 0.70),
+    "caustic_cell": (18.0, 60.0),
+    "soft_focus": (0.6, 2.2),
+    "motion_blur": (0.0, 7.0),
+}
+
+
+def random_params_pool0913(rng: np.random.Generator) -> WaterParams:
+    """Sample a ``WaterParams`` for the opt-in pool0913 look (clear cyan water + NoIR camera)."""
+    def u(key):
+        lo, hi = POOL0913_RANGES[key]
+        return float(rng.uniform(lo, hi))
+
+    red = u("beta_red")
+    beta = np.array([red, red * rng.uniform(0.18, 0.30), red * rng.uniform(0.22, 0.35)])
+    lo, hi = (np.asarray(v) for v in POOL0913_RANGES["veil"])
+    B = rng.uniform(lo, hi)
+    cam_gain = np.array([u("cam_gain_r"), u("cam_gain_g"), u("cam_gain_b")])
+    nir_r = u("nir_r")
+    # silicon responds to NIR in every Bayer channel, most in R: the leak is pink-WHITE, not pure red
+    nir_gain = np.array([nir_r, nir_r * float(rng.uniform(0.25, 0.45)), nir_r * u("nir_b_frac")])
+    return WaterParams(
+        beta=beta, B=B, turbidity=float(rng.uniform(0.1, 0.5)), backscatter_noise=float(rng.uniform(1, 4)),
+        caustics=0.0, particles=0.0, reflection=float(rng.uniform(0.75, 0.95)),
+        exposure=u("exposure"), wb_gain=1.0 + rng.uniform(-0.05, 0.05, size=3),
+        motion_blur=u("motion_blur") if rng.random() < 0.5 else 0.0,
+        motion_angle=float(rng.uniform(0.0, np.pi)),
+        vignette=float(rng.uniform(0.0, 0.25)), murk=0.2, cast=0.2, cast_sat=0.4,
+        cam_gain=cam_gain, nir_gain=nir_gain, nir_beta=u("nir_beta"),
+        caustic_web=u("caustic_web"), caustic_cell=u("caustic_cell"), soft_focus=u("soft_focus"),
+    )
 
 
 def _remap(img: np.ndarray, map_x: np.ndarray, map_y: np.ndarray) -> np.ndarray:
@@ -480,6 +581,47 @@ def apply_surface_reflection(clean_rgb, reflection_rgb, reflect_mask, B, strengt
     alpha = alpha * strength
     out = base * (1.0 - alpha[..., None]) + refl * alpha[..., None]
     return np.clip(out * 255.0, 0, 255).astype(np.uint8)
+
+
+SNELL_COS = float(np.cos(np.arcsin(1.0 / 1.333)))  # cos of the critical angle (~48.6 deg)
+
+
+def composite_surface_mirror(clean_rgb, mirror_rgb, surface_mask, cos_inc, rng, *, window_rgb,
+                             strength=0.9, extra_maps=()):
+    """pool0913 profile: the underside of the water surface as seen from just below it.
+
+    Outside Snell's window (incidence beyond the critical angle) the surface is a near-perfect mirror
+    (total internal reflection) of the underwater scene — ``mirror_rgb`` is a render of the WHOLE
+    scene mirrored across the surface plane from the same camera, so each balloon's upside-down copy
+    sits directly above it, touching it at the surface line. Inside the window the bright sky shows
+    through (``window_rgb``) with a weak Fresnel reflection. A wavy displacement ripples both.
+    ``extra_maps`` (HxW float arrays, e.g. a NIR map of the mirrored scene) are displaced with the
+    same ripple. Returns (uint8 image, tir_alpha HxW, [displaced extra maps]). Reflections carry NO
+    label — only the primary segmentation produces boxes.
+    """
+    base = np.asarray(clean_rgb, dtype=np.float64)[..., :3] / 255.0
+    refl = np.asarray(mirror_rgb, dtype=np.float64)[..., :3] / 255.0
+    h, w = base.shape[:2]
+    yy, xx = np.mgrid[0:h, 0:w].astype(np.float64)
+    amp = rng.uniform(3.0, 16.0)
+    disp_x = np.zeros((h, w))
+    disp_y = np.zeros((h, w))
+    for _ in range(int(rng.integers(2, 5))):
+        a = amp * rng.uniform(0.3, 1.0) / 2.0
+        fr = rng.uniform(3.0, 14.0)                 # mostly horizontal stripes (perspective-squashed)
+        fc = rng.uniform(0.3, 2.5)
+        phase = 2 * np.pi * (fr * yy / h + fc * xx / w) + rng.uniform(0, 2 * np.pi)
+        disp_x += a * np.sin(phase)
+        disp_y += 0.3 * a * np.cos(phase)
+    refl = _remap(refl, xx + disp_x, yy + disp_y)
+    maps = [_remap(np.asarray(m, dtype=np.float32), xx + disp_x, yy + disp_y) for m in extra_maps]
+    tir = np.clip((SNELL_COS + 0.05 - np.asarray(cos_inc)) / 0.10, 0.0, 1.0)
+    alpha = strength * (0.10 + 0.90 * tir) * surface_mask
+    win = np.asarray(window_rgb, dtype=np.float64).reshape(1, 1, 3) * (1.0 + 0.08 * np.sin(
+        2 * np.pi * (yy / h * rng.uniform(4, 12)) + disp_x / 3.0))[..., None]
+    surf = refl * alpha[..., None] + win * (1.0 - alpha[..., None])
+    out = np.where(surface_mask[..., None], surf, base)
+    return np.clip(out * 255.0, 0, 255).astype(np.uint8), alpha, maps
 
 
 # Difficulty presets (handy for the eval set / quick dials) --------------------

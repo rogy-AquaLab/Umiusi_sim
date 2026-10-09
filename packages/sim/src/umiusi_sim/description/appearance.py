@@ -182,7 +182,186 @@ def apply_perception_appearance(spec: mujoco.MjSpec, *, center_x: float, depth: 
     brighten_like_pool(spec, center_x, depth, len_x, len_z, floor_y, add_surface=add_surface)
 
 
+# ------------------------------------------------------------------------------------------------
+# OPT-IN "pool0913" appearance profile (real pool footage 2026-09-13 / 10-01). Nothing above uses it;
+# only ``tools/gen_sim_dataset --profile pool0913`` calls these. See docs/sim_pool_appearance.md.
+#   * balloons: near-round (aspect ~1.0-1.15), glossy, bright latex; visible colours are the real
+#     dyes (blue / crimson / orange-yellow). The pale-lavender look of blue in the footage is NOT a
+#     paint colour: it comes from the Pi NoIR camera's near-infrared leak (see underwater_sim
+#     ``add_nir_leak`` + ``POOL0913_NIR``), applied per material after rendering;
+#   * a small knot under each balloon, sometimes a red plastic clip;
+#   * tethers: thin DARK RED-BROWN wavy ribbons (box-segment chain) from the knot down to the floor.
+# ------------------------------------------------------------------------------------------------
+POOL0913_BALLOON_RGB = {   # base latex colour (before water + camera gain), jittered per balloon
+    "red": (0.92, 0.04, 0.22),
+    "blue": (0.42, 0.56, 0.78),   # a real BLUE dye; the NoIR camera's NIR leak makes it lavender
+    "yellow": (1.00, 0.66, 0.04),
+}
+POOL0913_ASPECT = (1.0, 1.15)          # height/width of the ellipsoid, sampled per balloon
+POOL0913_RIBBON_RGB = (0.36, 0.10, 0.08)  # dark red-brown ribbon
+POOL0913_CLIP_PROB = 0.35
+# Near-infrared reflectance per material class (0..1) for the NoIR leak model. Blue dyes are nearly
+# transparent in NIR, so the latex reflects NIR strongly (-> pale lavender); red/yellow somewhat;
+# white plaster walls/floor high; the dark ribbon low.
+POOL0913_NIR = {"blue": 0.95, "red": 0.55, "yellow": 0.60, "ribbon": 0.15, "clip": 0.45,
+                "pool": 0.55, "robot": 0.30}
+
+
+def _quat_from_axes(x: np.ndarray, y: np.ndarray, z: np.ndarray) -> np.ndarray:
+    """Unit quaternion (w,x,y,z) of the rotation whose columns are the given orthonormal axes."""
+    mat = np.stack([x, y, z], axis=1).reshape(9)
+    q = np.zeros(4)
+    mujoco.mju_mat2Quat(q, mat)
+    return q
+
+
+def _add_ribbon(world, name: str, top: np.ndarray, bottom: np.ndarray, rng: np.random.Generator,
+                rgb=POOL0913_RIBBON_RGB) -> None:
+    """A wavy flat ribbon from ``top`` to ``bottom`` as a chain of thin twisted box segments."""
+    length = float(np.linalg.norm(top - bottom))
+    if length < 1e-3:
+        return
+    axis = (bottom - top) / length
+    side = np.cross(axis, [0.0, 1.0, 0.0])
+    side = side / np.linalg.norm(side) if np.linalg.norm(side) > 1e-6 else np.array([1.0, 0.0, 0.0])
+    side2 = np.cross(axis, side)
+    amp = rng.uniform(0.008, 0.05)
+    lam = rng.uniform(0.12, 0.45)
+    ph = rng.uniform(0, 2 * np.pi)
+    ph2 = rng.uniform(0, 2 * np.pi)
+    n = int(np.clip(length / 0.035, 4, 48))
+    s = np.linspace(0.0, length, n + 1)
+    # the wave dies out toward the balloon end (the knot holds it) and the anchor
+    env = np.clip(np.sin(np.pi * s / length), 0.0, 1.0) ** 0.5
+    pts = (top[None] + axis[None] * s[:, None]
+           + side[None] * (amp * env * np.sin(2 * np.pi * s / lam + ph))[:, None]
+           + side2[None] * (0.5 * amp * env * np.sin(2 * np.pi * s / (1.7 * lam) + ph2))[:, None])
+    half_w = rng.uniform(0.0012, 0.0028)
+    twist0 = rng.uniform(0, np.pi)
+    rgba = [*np.clip(np.asarray(rgb) * rng.uniform(0.8, 1.2), 0, 1), 1.0]
+    for k in range(n):
+        a, b = pts[k], pts[k + 1]
+        d = b - a
+        seg = float(np.linalg.norm(d))
+        if seg < 1e-6:
+            continue
+        d = d / seg
+        tw = twist0 + 2.5 * s[k]
+        ref = np.cos(tw) * side + np.sin(tw) * side2
+        ref = ref - d * float(ref @ d)
+        ref /= max(np.linalg.norm(ref), 1e-9)
+        g = world.add_geom()
+        g.name = f"{name}_ribbon{k}"
+        g.type = mujoco.mjtGeom.mjGEOM_BOX
+        g.pos = list((a + b) / 2)
+        g.quat = list(_quat_from_axes(ref, d, np.cross(ref, d)))
+        g.size = [half_w, seg / 2 + 0.002, 0.0006]
+        g.rgba = rgba
+        g.contype = 0
+        g.conaffinity = 0
+
+
+def style_pool0913(spec: mujoco.MjSpec, rng: np.random.Generator, heights: dict, floor_y: float,
+                   radius: float) -> dict:
+    """Apply the pool0913 balloon/knot/clip/ribbon look IN PLACE (opt-in profile).
+
+    ``heights`` maps balloon body name -> centre height y [m] (overrides the scenario's per-colour
+    heights, so balloons can float just under the surface). Returns ``{body_name: aspect}``.
+    The original ``*_tether`` / ``*_weight`` geoms and the pin are hidden (alpha 0, physics intact).
+    Only ``balloon_*_geom`` stays a balloon in segmentation: knots/clips/ribbons get other names.
+    """
+    aspects = {}
+    world = spec.worldbody
+    for b in spec.bodies:
+        bname = b.name or ""
+        if not bname.startswith("balloon_") or bname not in heights:
+            continue
+        colour = bname.split("_")[1]
+        b.pos[1] = heights[bname]
+        asp = float(rng.uniform(*POOL0913_ASPECT))
+        aspects[bname] = asp
+        rgb = np.clip(np.asarray(POOL0913_BALLOON_RGB[colour]) + rng.uniform(-0.05, 0.05, 3), 0, 1)
+        mat = spec.add_material()
+        mat.name = f"{bname}_latex"
+        mat.rgba = [*rgb, 1.0]
+        mat.specular = float(rng.uniform(0.3, 0.7))
+        mat.shininess = float(rng.uniform(0.4, 0.8))
+        mat.emission = float(rng.uniform(0.15, 0.40))   # translucent latex glows in sunlight
+        for g in b.geoms:
+            if (g.name or "").endswith("_geom"):
+                g.type = mujoco.mjtGeom.mjGEOM_ELLIPSOID
+                g.size[:] = [radius, radius * asp, radius]
+                g.material = mat.name
+                g.rgba[:] = [*rgb, 1.0]
+        # knot (same latex) + optional red plastic clip, hanging under the balloon (body frame)
+        knot_y = -radius * asp - 0.008
+        k = b.add_geom()
+        k.name = f"{bname}_knot"
+        k.type = mujoco.mjtGeom.mjGEOM_ELLIPSOID
+        k.size = [0.010, 0.014, 0.010]
+        k.pos = [0.0, knot_y, 0.0]
+        k.rgba = [*rgb * 0.85, 1.0]
+        k.contype = k.conaffinity = 0
+        bottom_y = knot_y - 0.014
+        if rng.random() < POOL0913_CLIP_PROB:
+            c = b.add_geom()
+            c.name = f"{bname}_clip"
+            c.type = mujoco.mjtGeom.mjGEOM_BOX
+            c.size = [0.018, 0.008, 0.004]
+            c.pos = [0.0, bottom_y - 0.008, 0.0]
+            c.rgba = [0.85, 0.08, 0.10, 1.0]
+            c.contype = c.conaffinity = 0
+            bottom_y -= 0.016
+        top = np.array([b.pos[0], b.pos[1] + bottom_y, b.pos[2]])
+        anchor = np.array([b.pos[0] + rng.uniform(-0.25, 0.25), floor_y,
+                           b.pos[2] + rng.uniform(-0.25, 0.25)])
+        _add_ribbon(world, bname, top, anchor, rng)
+    for g in spec.geoms:
+        name = g.name or ""
+        if name == "pin" or (name.startswith("balloon_") and name.endswith(("_tether", "_weight"))):
+            g.rgba[3] = 0.0
+    return aspects
+
+
+def mirror_world_across(spec: mujoco.MjSpec, surface_y: float, keep_bodies=("base_link",)) -> None:
+    """Reflect the whole visual world (world geoms, balloon bodies, lights) across the plane
+    y = ``surface_y`` IN PLACE, so a render from the unchanged camera shows the scene's MIRROR image
+    in the water surface (total internal reflection seen from below). The robot (``keep_bodies``)
+    is not moved. Rotations map R -> M R M with M = diag(1,-1,1) (a proper rotation)."""
+    M = np.diag([1.0, -1.0, 1.0])
+
+    def _mirror_quat(q):
+        mat = np.zeros(9)
+        mujoco.mju_quat2Mat(mat, np.asarray(q, dtype=float))
+        r = M @ mat.reshape(3, 3) @ M
+        out = np.zeros(4)
+        mujoco.mju_mat2Quat(out, r.reshape(9))
+        return out
+
+    for g in spec.worldbody.geoms:
+        if np.all(np.isfinite(g.fromto)):          # fromto-defined geom (e.g. the scenario tether)
+            g.fromto[1] = 2 * surface_y - g.fromto[1]
+            g.fromto[4] = 2 * surface_y - g.fromto[4]
+            continue
+        g.pos[1] = 2 * surface_y - g.pos[1]
+        g.quat[:] = _mirror_quat(g.quat)
+    for b in spec.worldbody.bodies:
+        if (b.name or "") in keep_bodies:
+            continue
+        b.pos[1] = 2 * surface_y - b.pos[1]
+        b.quat[:] = _mirror_quat(b.quat)
+        for g in b.geoms:
+            g.pos[1] = -g.pos[1]
+            g.quat[:] = _mirror_quat(g.quat)
+    for lt in spec.worldbody.lights:
+        lt.pos[1] = 2 * surface_y - lt.pos[1]
+        lt.dir[1] = -lt.dir[1]
+        lt.castshadow = False
+
+
 __all__ = [
     "BALLOON_ASPECT", "TETHER_RGBA", "TETHER_RADIUS", "LightingParams", "sample_lighting",
     "style_balloons_pin_tethers", "brighten_like_pool", "apply_perception_appearance",
+    "POOL0913_BALLOON_RGB", "POOL0913_ASPECT", "POOL0913_RIBBON_RGB", "POOL0913_NIR", "style_pool0913",
+    "mirror_world_across",
 ]

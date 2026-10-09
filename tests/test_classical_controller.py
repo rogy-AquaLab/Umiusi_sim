@@ -81,9 +81,13 @@ def test_attitude_torque_is_cap_invariant():
 
 
 def test_buoyancy_trim_holds_the_same_force_at_every_cap():
-    """Same argument for the heave trim: net buoyancy is a constant, so the mode must move."""
+    """Same argument for the heave trim: net buoyancy is a constant, so the mode must move.
+
+    OFF by default since 2026-09-30 (the hull is ballasted instead), so this asks for it — the
+    term still has to be correct for anyone comparing against the pre-2026-09-30 results.
+    """
     env = _env(dr=False)
-    ctl = build_controller(env, cap_tau=0.0)
+    ctl = build_controller(env, cap_tau=0.0, buoy_trim=True)
     force = []
     for cap in CAPS:
         ctl.reset()
@@ -179,7 +183,11 @@ def test_singularity_avoidance_actually_leaves_the_fold_at_hold_station():
     from umiusi_perception.classical import cad_wrench_from_modes
 
     env = _env(dr=False)
-    ctl = build_controller(env, cap_tau=0.0, kp=1.0, kd=0.35)
+    # buoy_trim=True ON PURPOSE: the fold problem at hold station is CREATED by the trim. Holding a
+    # buoyant hull down needs a near-vertical force, which is what parks every servo at +-90 deg.
+    # With the trim off (the default since 2026-09-30) the hold wrench is zero and there is nothing
+    # to avoid — see test_hold_station_costs_nothing_without_the_trim below.
+    ctl = build_controller(env, cap_tau=0.0, kp=1.0, kd=0.35, buoy_trim=True)
     plain = GeneralAllocator(env.sim)
     avoid = GeneralAllocator(env.sim, prefer_deg=60.0, w_move=3.0, dead_hold=True)
     cap = 0.25
@@ -195,6 +203,35 @@ def test_singularity_avoidance_actually_leaves_the_fold_at_hold_station():
     # with it, every servo must be clear of the limit — this is the assertion that was failing
     deg = np.degrees(a_avoid[:4] * env.sim.servo_range_rad)
     assert np.max(np.abs(deg)) < 60.0, f"avoidance left a servo on the fold: {np.round(deg, 1)}"
+
+
+def test_hold_station_costs_nothing_without_the_trim():
+    """With `buoy_trim=False` the z channel means commanded heave and nothing else: 0 in, 0 out.
+
+    This is the whole point of dropping the trim. On the vehicle, idle duty decomposed as
+    0.107 constant + 0.25*cap, and the constant was the trim — roughly 63 % of idle duty at cap
+    0.25, spent continuously just to stay level. It also created the azimuth problem: the required
+    force was near-vertical, which is exactly the fold. Both go away together, and the hull gets
+    ballasted near neutral instead.
+    """
+    from classical_control import GeneralAllocator
+    from umiusi_perception.classical import cad_wrench_from_modes
+
+    env = _env(dr=False)
+    ctl = build_controller(env, cap_tau=0.0, kp=1.0, kd=0.35)          # default: no trim
+    alloc = GeneralAllocator(env.sim, prefer_deg=60.0, w_move=3.0, dead_hold=True)
+    for _ in range(8):
+        m = ctl.wrench(np.zeros(3), np.zeros(3), np.zeros(3), np.zeros(3), 0.25)
+        act = alloc.allocate(cad_wrench_from_modes(m, ctl.f_max_total(ctl.cap)), 0.25)
+    env.close()
+    assert m[2] == 0.0, f"no command and no trim must give no heave mode, got {m[2]}"
+    assert np.allclose(act[4:], 0.0), f"idle must burn no duty at all, got {act[4:]}"
+    # ...and a commanded heave still reaches the channel (the trim is gone, the command is not)
+    ctl2_env = _env(dr=False)
+    ctl2 = build_controller(ctl2_env, cap_tau=0.0)
+    up = ctl2.wrench(np.zeros(3), np.zeros(3), np.array([0.0, 0.0, 0.05]), np.zeros(3), 0.25)
+    ctl2_env.close()
+    assert up[2] > 0.0, f"commanded ascent must still produce upward heave, got {up[2]}"
 
 
 def test_singularity_avoidance_does_not_change_the_wrench():
@@ -239,3 +276,44 @@ def test_singularity_avoidance_does_not_change_the_wrench():
         f"the null-space offset moved the realised wrench: {ra} vs {rp}"
     assert np.allclose(ra, w, atol=0.03 * np.linalg.norm(w)), f"realised {ra} != commanded {w}"
     env.close()
+
+
+def test_null_space_circulation_does_not_creep_to_the_cap():
+    """A tiny vertical demand must not cost the duty cap.
+
+    `_away_from_singularity` re-centres its search window on the previous choice every step, and
+    once every unit is inside `prefer_deg` nothing in the cost grows with the circulation's size —
+    so it creeps until the cap term stops it at `cap_margin * f_max`. Measured 2026-10-01 in the
+    deploy chain (neutral hull, CoB 0.5 mm ahead of the CoM): the units pushed +-2.1 N against each
+    other to hold a 0.06 N/unit pitch torque, mean |duty| 0.265 = 88 % of cap 0.3, standing still.
+    `w_effort` prices the circulation; 0.0 (the default) keeps the old behaviour, which this test
+    also pins so the defect stays visible until the bundle is re-exported with it on.
+    """
+    from classical_control import GeneralAllocator
+
+    env = _env(dr=False)
+    cap = 0.3
+    # a small pure pitch torque (CAD rot+Z) — what a slightly bow-heavy hull asks for at hold
+    w = np.array([0.0, 0.0, 0.0, 0.0, 0.0, 0.25])
+    kw = dict(prefer_deg=60.0, w_move=3.0, dead_hold=True, cap_margin=0.85, w_cap=50.0)
+    old = GeneralAllocator(env.sim, **kw)
+    new = GeneralAllocator(env.sim, **kw, w_effort=2.0)
+    for _ in range(200):                      # the creep is a drift over many steps
+        a_old, a_new = old.allocate(w, cap), new.allocate(w, cap)
+    env.close()
+
+    def per_unit_force(alloc, act):
+        p = alloc.plant
+        return np.abs(act[4:]) ** p.thrust_curve_exp * p.thrust_per_cmd
+
+    plain = GeneralAllocator(env.sim)         # minimum norm = exactly the force the wrench needs
+    f_need = per_unit_force(plain, plain.allocate(w, cap)).max()
+    f_old, f_new = per_unit_force(old, a_old).max(), per_unit_force(new, a_new).max()
+    # static input creeps "only" ~5-15x (to ~1 N); in the closed loop it reached cap_margin * f_max
+    assert f_old > 2.0 * f_need, \
+        "the creep is gone with w_effort=0 — if that is intended, flip the default and drop this half"
+    assert f_new < 0.5 * f_old, f"w_effort did not stop the circulation: {f_new:.3f} vs old {f_old:.3f} N"
+    assert f_new < 2.0 * f_need, f"w_effort still spends {f_new:.3f} N/unit for a {f_need:.3f} N demand"
+    # NOTE: for a near-zero demand w_effort lets the servos sit on the fold again. That is the
+    # intended trade — reversing a unit that is barely pushing costs almost nothing — and the
+    # closed-loop check (tools/competition_eval.py --w-effort) showed no esc reversals at hold.

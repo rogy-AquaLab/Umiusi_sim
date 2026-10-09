@@ -121,6 +121,12 @@ sim 推定は surge 2.7 kg / heave 7.1 kg / sway 3.2 kg。倍半分ズレてい�
 較正した yaml で `python -m tools.validate_sim -v` を通し、`python -m tools.analyze_steady`
 系で bag 対 sim の定常値を比較 → 残差が DR の幅に収まったら再学習（DR を実測誤差幅まで絞る）。
 
+## 2026-10-07/08 実施済み: 10/03 bag の再生と較正
+
+- `tools/bag_replay.py` の `FRAME_P` が逆回転だった（上 = −imu_z）。yaw と pitch が反転して見え、duty の符号が逆に見えた。`cad = imu(x, z, −y)` に修正（`tools/sim_server.py` に 1 本置いて import）。修正後は 3 軸とも正の相関で、プラントの符号は 10/03 実機と一致。
+- control 経路の bag は `tools/bag_export_npz.py`（`/state/thruster_state_all` の commanded_angle [rad → deg] / duty_cycle、50 Hz 等間隔化）。
+- roll/pitch: 垂直推力効率 0.25、roll/pitch 抗力 ×8、付加慣性 ×3 を yaml に反映（`docs/closed_loop_replay_20261003.md` §6）。§3 の秤と §7 のステップ応答はこれでも未実施で、並進は未観測のまま。
+
 ## 取得データの二次利用（world model / 流体シミュレータ向上）
 
 上記の bag はそのまま「(state, action) → next state」の教師データになる。

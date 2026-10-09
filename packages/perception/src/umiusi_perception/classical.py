@@ -253,19 +253,46 @@ class GeneralAllocator:
     """
 
     def __init__(self, plant, servo_offset_rad=None, live=None, prefer_deg=None, dead_hold=False,
-                 w_move=1.0, cap_margin=0.85, w_cap=50.0):
+                 w_move=1.0, cap_margin=0.85, w_cap=50.0, w_flip=0.0, w_effort=0.0):
         self.plant = plant
         self.r = np.asarray(plant.pivots_from_com, dtype=float)
         self.offset = np.zeros(4) if servo_offset_rad is None else np.asarray(servo_offset_rad, float)
         self.prefer = None if prefer_deg is None else np.radians(float(prefer_deg))
         self.w_move = float(w_move)
         self.cap_margin, self.w_cap = float(cap_margin), float(w_cap)
+        # Price an ESC SIGN REVERSAL. Crossing the |phi| = 90 fold reverses the esc, and on the real
+        # vehicle a reversal is not free: the BLDC has to spin the prop back up. Measured on the
+        # vehicle 2026-09-13 — a start from REST costs 2.5-3.2 s of no thrust, and a reversal while
+        # spinning costs 0.23-0.89 s at the median but p90 reaches ~3 s, because a reversal at low
+        # duty really does stop the prop. In sim the fold only ever cost a 180 deg servo sweep, so
+        # nothing in this cost function knew about it.
+        # This is the hysteresis the fold itself denies us: for a GIVEN force direction the branch
+        # is forced, but the null space lets us pick a force direction that keeps the sign.
+        #
+        # MEASURED NOT TO HELP — keep the default 0.0. It does cut reversals (1.90 -> 1.03 per
+        # second at w_flip=20 with no dead time, 1.85 -> 1.37 with it), but attitude gets slightly
+        # WORSE in every regime tested (no dead time 0.0636 -> 0.0696 rad; 2.7 s dead time
+        # 0.5030 -> 0.5072). Fewer reversals bought nothing, because the damage is not the reversal
+        # event: a reversal happens exactly when a unit's force crosses zero, so |duty| is 0.086 at
+        # the median against 0.219 in normal operation — the thrust thrown away is already small.
+        # What hurts is the unit being UNAVAILABLE for seconds afterwards, and halving the number of
+        # such windows still leaves the vehicle short of thrusters. The knob stays because the
+        # reduction is real and a different fix may want it; do not switch it on expecting attitude.
+        self.w_flip = float(w_flip)
+        # Price the circulation's SIZE. Without this nothing in the cost grows with it once every
+        # unit is inside `prefer_deg`, and the search window recentres on the last choice every
+        # step, so the circulation creeps until the cap term stops it at `cap_margin * f_max`.
+        # Measured 2026-10-01 (sim, neutral hull, CoB 0.5 mm ahead): the units pushed +-2.1 N
+        # against each other to deliver 0.06 N, mean |duty| 0.265 = 88 % of cap 0.3 standing
+        # still, with or without a real torque to hold. 0.0 keeps the old behaviour bit-for-bit.
+        self.w_effort = float(w_effort)
         self.dead_hold, self.phi_prev, self.z_prev = dead_hold, None, None
+        self.rear_prev = None
         self.hv_prev = np.zeros(8)
         self.set_live(np.ones(4, dtype=bool) if live is None else np.asarray(live, dtype=bool))
 
     def reset(self):
-        self.phi_prev, self.z_prev = None, None
+        self.phi_prev, self.z_prev, self.rear_prev = None, None, None
 
     def set_live(self, live):
         self.live = np.asarray(live, dtype=bool)
@@ -339,6 +366,15 @@ class GeneralAllocator:
         over = np.maximum(0.0, mag - self.cap_margin * f_max) / max(f_max, 1e-9)
         cost = (np.sum(mag * (into ** 2 + self.w_move * move ** 2), axis=1)
                 + self.w_cap * np.sum(over ** 2, axis=1))
+        if self.w_effort > 0.0:
+            cost = cost + self.w_effort * np.sum(mag, axis=1) / max(f_max, 1e-9)
+        if self.w_flip > 0.0 and self.rear_prev is not None:
+            # Weight the flip by the thrust being reversed: reversing a unit that is barely pushing
+            # is cheap (and is also the case the vehicle recovers from SLOWEST, but it is producing
+            # nothing either way), while reversing a loaded unit throws away real thrust for as long
+            # as the prop takes to come back.
+            flip = (np.abs(phi) > np.pi / 2.0) != self.rear_prev[None, :]
+            cost = cost + self.w_flip * np.sum(mag * flip, axis=1) / max(f_max, 1e-9)
         i = int(np.argmin(cost))
         self.z_prev = z[i]
         return cand[i]
@@ -386,6 +422,10 @@ class GeneralAllocator:
         # the angle actually COMMANDED, which is what the next warm start must aim at (post fold,
         # post clip, post the dead-zone snap to 0 — all of them move the servo)
         self.phi_prev = servo * p.servo_range_rad
+        # ...and which side of the fold each unit ended on, so the next search can price a reversal.
+        # A unit inside the dead zone makes no thrust, so its sign is meaningless: carry the
+        # previous side rather than letting the deadband inject a spurious flip next step.
+        self.rear_prev = rear if self.rear_prev is None else np.where(dead, self.rear_prev, rear)
         # The (h, v) this solved for, normalised by the cap force. This IS the action of the env's
         # "forces" mode, so it is the label to clone when the student works in that space — a
         # continuous target, unlike the folded servo angle above.
@@ -394,12 +434,21 @@ class GeneralAllocator:
 
 
 class ClassicalController:
-    """obs -> 6-D wrench command. Attitude PID + exact buoyancy trim + observer-corrected cruise.
+    """obs -> 6-D wrench command. Attitude PID + observer-corrected cruise. Heave is a COMMAND.
 
     Two pathologies of the learned policy are structural and disappear here by construction:
       * hovering at ~90 % of the esc cap — the required wrench is computed, not discovered;
-      * commanding heave UPWARD on a positively buoyant vehicle — buoyancy is a known constant,
-        so the trim term is exact.
+      * commanding heave UPWARD on a positively buoyant vehicle — buoyancy is a known constant.
+
+    BUOYANCY IS TRIMMED MECHANICALLY, NOT IN SOFTWARE (`buoy_trim=False`, the default since
+    2026-09-30). Holding a positively buoyant hull down costs thrust continuously, and on this
+    vehicle that was most of the duty budget: idle duty decomposes as 0.107 constant + 0.25*cap,
+    and the constant is the trim — about 63 % of idle duty at cap 0.25. Thrust spent standing
+    still is thrust unavailable for attitude, and the hull has to be ballasted near neutral for
+    competition anyway. So the z channel now means "commanded heave", nothing else: command 0 and
+    it outputs 0. `buoy_trim=True` restores the old term for comparing against earlier results.
+    The OBSERVER still models buoyancy (it is a real force on the hull) — this switch only stops
+    the controller from commanding a counter-force.
 
     The integral term exists for MODEL MISMATCH, which is the one regime the PD version lost in.
     Everything domain_rand shakes — CoB height (±60 %), displaced volume (±5 %), per-unit servo
@@ -407,10 +456,10 @@ class ClassicalController:
     CONSTANT over an episode. A PD leaves exactly that as steady-state error; an integrator is the
     textbook answer and needs no extra sensor. ki=0 reproduces the PD behaviour.
 
-    EVERY CAP-DEPENDENT QUANTITY IS SOLVED, NOT TUNED. There are exactly four, and all of them
-    reduce to f_max(cap) = 4 * thrust_per_cmd * cap**exp:
+    EVERY CAP-DEPENDENT QUANTITY IS SOLVED, NOT TUNED. There are exactly three, and all of them
+    reduce to f_max(cap) = 4 * thrust_per_cmd * cap**exp (a fourth, the buoyancy trim
+    -net_buoy_up / f_max(cap), applies only with `buoy_trim=True`):
         attitude gains   tau_mode = (kp*e - kd*w + ki*int e) * f_max(cap_ref) / f_max(cap)
-        buoyancy trim    fz_mode  = -net_buoy_up / f_max(cap)
         reachable speed  v_ref    = the positive root of lin*v + quad*v^2 = f_max(cap)
         cruise feedfwd   ff_mode  = drag(v_cmd) / f_max(cap)
     Do NOT bake a constant tuned at cap 0.25 into a deploy node. The operator moves the cap by
@@ -418,7 +467,8 @@ class ClassicalController:
     """
 
     def __init__(self, plant, kp=2.2, kd=0.45, k_ff=1.0, k_v=1.2,
-                 ki=0.0, i_max=0.35, cap_norm=True, cap_tau=1.0, k_v_vert=0.0):
+                 ki=0.0, i_max=0.35, cap_norm=True, cap_tau=1.0, k_v_vert=0.0,
+                 buoy_trim=False):
         self.kp, self.kd, self.k_ff, self.k_v = kp, kd, k_ff, k_v
         # 鉛直の速度フィードバック。**既定 0 は「今までどおり」を意味する** — 従来この軸は
         # 浮力トリム (定数) しか持たず、v_cmd の z 成分は捨てられていた。前進 (feed-forward)
@@ -426,6 +476,7 @@ class ClassicalController:
         # 従来とビット単位で同じ**。上げるのは鉛直の観測 (VelocityObserver の z) を信用して
         # からにすること — 深度センサではなく指令からの推測なので、水平ほど当てにならない。
         self.k_v_vert = k_v_vert
+        self.buoy_trim = bool(buoy_trim)
         self.ki, self.i_max = ki, i_max
         self.plant = plant
         self.net_buoy_up = plant.net_buoy_up
@@ -535,11 +586,12 @@ class ClassicalController:
         ff = self.k_ff * drag_cmd / self.f_max_total(cap)
         fb = self.k_v * (v_cmd_xy - np.asarray(v_hat_body)[:2]) / max(v_ref, 1e-9)
         f_xy = ff + fb
-        # Buoyancy trim, in the mode units of THIS episode's cap. A mode is normalized by the
-        # full-cap wrench, so the same physical force is a different mode value at a different
-        # max_duty — and the cap is a runtime parameter the operator raises (0.25 -> 0.4). Fixing
-        # the trim at the nominal cap left a standing heave error at every other cap.
-        fz_trim = -self.net_buoy_up / f_max_total(self.plant, cap)
+        # Buoyancy trim, OFF by default — the hull is ballasted near neutral instead (see the class
+        # docstring). When on, it is in the mode units of THIS episode's cap: a mode is normalized
+        # by the full-cap wrench, so the same physical force is a different mode value at a
+        # different max_duty, and fixing the trim at the nominal cap left a standing heave error at
+        # every other cap.
+        fz_trim = -self.net_buoy_up / f_max_total(self.plant, cap) if self.buoy_trim else 0.0
         # Heave. Same shape as the horizontal pair, one axis over: hold the commanded vertical
         # speed against its own drag and add the buoyancy trim on top. Until this existed the z
         # channel carried ONLY the trim, so a commanded descent/climb was silently dropped — the

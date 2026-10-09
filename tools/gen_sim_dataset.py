@@ -355,7 +355,8 @@ def _geom_colour(model: mujoco.MjModel, gid: int) -> str | None:
     return colour if colour in COLOUR_TO_CAT else None
 
 
-def _boxes_from_seg(model, seg, depth, fpx, min_area_px, max_label_range=MAX_LABEL_RANGE):
+def _boxes_from_seg(model, seg, depth, fpx, min_area_px, max_label_range=MAX_LABEL_RANGE,
+                    aspect=BALLOON_ASPECT):
     """Extract GT balloon boxes from the segmentation buffer.
 
     For each balloon sphere geom present:
@@ -392,7 +393,7 @@ def _boxes_from_seg(model, seg, depth, fpx, min_area_px, max_label_range=MAX_LAB
         # test). Vertical major axis => taller than wide: area ~ pi * a * b.
         d = float(np.median(depth[mask]))
         a_px = fpx * scn.BALLOON_RADIUS / max(d, 1e-3)
-        b_px = a_px * BALLOON_ASPECT
+        b_px = a_px * aspect
         full_area = np.pi * a_px * b_px
         occ = 1.0 - n_vis / max(full_area, 1.0)
         # off-screen: the balloon touches a frame border AND most of it is missing
@@ -510,6 +511,246 @@ def draw_preview(rgb, boxes):
     return img[..., ::-1]  # back to RGB
 
 
+# ================================================================================================
+# OPT-IN "pool0913" profile (--profile pool0913): look like the real pool footage of 2026-09-13/10-01
+# (ai/balloon/pool0913): Pi NoIR camera just under the surface, clear bright water, balloons floating
+# up against the surface with their mirror image above them, dark red-brown ribbon tethers, caustic
+# web on a light pool, soft focus. The default profile above is untouched. docs/sim_pool_appearance.md
+# ================================================================================================
+POOL0913_SURFACE_Y = SURFACE_Y                 # keep the surface where the scenario has it (3.3 m)
+POOL0913_DEPTH = (1.0, 2.2)                    # water depth [m] (shallow test pool; floor visible)
+POOL0913_BOX_X = (-4.0, 10.0)                  # pool extent (x) [m]
+POOL0913_BOX_Z = (-5.0, 5.0)                   # pool extent (z) [m]
+POOL0913_CAM_X = (-1.5, 6.0)
+POOL0913_CAM_Z = (-3.0, 3.0)
+POOL0913_BALLOON_DIST = (0.35, 4.0)            # camera-to-balloon range [m] (log-uniform)
+POOL0913_N = ((0, 0.06), (1, 0.22), (2, 0.20), (3, 0.17), (4, 0.12), (6, 0.12), (9, 0.11))
+
+
+def _pool0913_sample_scene(rng: np.random.Generator) -> dict:
+    """Camera pose (world) + balloon layout/heights for one pool0913 frame."""
+    S = POOL0913_SURFACE_Y
+    depth = float(rng.uniform(*POOL0913_DEPTH))
+    floor_y = S - depth
+    if rng.random() < 0.75:                       # usually just under the surface
+        cam_y = S - float(rng.uniform(0.03, 0.45))
+    else:
+        cam_y = S - float(rng.uniform(0.45, min(1.1, depth - 0.25)))
+    cam = np.array([rng.uniform(*POOL0913_CAM_X), cam_y, rng.uniform(*POOL0913_CAM_Z)])
+    yaw = float(rng.uniform(-np.pi, np.pi))
+    pitch = float(np.radians(rng.uniform(-14.0, 24.0)))
+    roll = float(np.radians(rng.uniform(-10.0, 10.0)))
+
+    counts, probs = zip(*POOL0913_N)
+    n = int(rng.choice(counts, p=np.asarray(probs) / sum(probs)))
+    if n >= 6:
+        n = int(n + rng.integers(0, 3))
+    colours = list(COLOUR_WEIGHTS)
+    cp = np.array([COLOUR_WEIGHTS[c] for c in colours])
+    cp /= cp.sum()
+    layout, heights = [], {}
+    tries = 0
+    while len(layout) < n and tries < 200:
+        tries += 1
+        r = float(np.exp(rng.uniform(np.log(POOL0913_BALLOON_DIST[0]), np.log(POOL0913_BALLOON_DIST[1]))))
+        th = yaw + float(rng.uniform(-0.75, 0.75))
+        x = cam[0] + r * np.cos(th)
+        z = cam[2] - r * np.sin(th)
+        if not (POOL0913_BOX_X[0] + 0.3 < x < POOL0913_BOX_X[1] - 0.3
+                and POOL0913_BOX_Z[0] + 0.3 < z < POOL0913_BOX_Z[1] - 0.3):
+            continue
+        if any((x - bx) ** 2 + (z - bz) ** 2 < 0.28 ** 2 for _, _, bx, bz in layout):
+            continue
+        c = colours[int(rng.choice(len(colours), p=cp))]
+        name = f"balloon_{c}_{len(layout)}"
+        top_gap = float(rng.uniform(0.0, 0.04)) if rng.random() < 0.65 else float(rng.uniform(0.04, 0.7))
+        y = S - scn.BALLOON_RADIUS * 1.15 - top_gap
+        heights[name] = max(y, floor_y + 0.35)
+        layout.append((name, c, float(x), float(z)))
+    return {"depth": depth, "floor_y": floor_y, "cam": cam, "yaw": yaw, "pitch": pitch, "roll": roll,
+            "layout": layout, "heights": heights}
+
+
+def _pool0913_lighting(rng: np.random.Generator) -> ra.LightingParams:
+    """Bright, sunlit outdoor/indoor pool: strong fill + a sun casting shadows."""
+    level = float(rng.uniform(0.40, 0.62))
+    tilt = float(rng.uniform(0.0, np.radians(40.0)))
+    azi = float(rng.uniform(0.0, 2.0 * np.pi))
+    sun_dir = np.array([np.sin(tilt) * np.cos(azi), -np.cos(tilt), np.sin(tilt) * np.sin(azi)])
+    return ra.LightingParams(
+        ambient=np.full(3, level), diffuse=np.full(3, level * rng.uniform(0.6, 0.9)),
+        sun_dir=sun_dir, sun_diffuse=np.full(3, float(rng.uniform(0.45, 0.85))),
+        surface_rgb=np.array([0.85, 0.88, 0.90]), fog_rgb=np.array([0.36, 0.70, 0.70]),
+        fogstart=float(rng.uniform(3.0, 6.0)), fogend=float(rng.uniform(10.0, 18.0)),
+        light_level=round(level, 3), sun_tilt_deg=round(float(np.degrees(tilt)), 1))
+
+
+def _pool0913_build(sc: dict, style_seed: int, lighting, pool_rgb, mirror: bool):
+    """Compose + compile the pool0913 scene (or its mirror image across the surface)."""
+    S = POOL0913_SURFACE_Y
+    spec = scn.build_spec(sc["layout"])
+    srng = np.random.default_rng(style_seed)    # identical styling for the primary and mirror builds
+    aspects = ra.style_pool0913(spec, srng, sc["heights"], sc["floor_y"], scn.BALLOON_RADIUS)
+    cx, lx = sum(POOL0913_BOX_X) / 2, POOL0913_BOX_X[1] - POOL0913_BOX_X[0]
+    lz = POOL0913_BOX_Z[1] - POOL0913_BOX_Z[0]
+    fy, d = sc["floor_y"], sc["depth"]
+    for g in spec.geoms:
+        name = g.name or ""
+        if name == "pool_floor":
+            g.pos[:] = [cx, fy - 0.02, 0.0]
+            g.size[:] = [lx / 2, 0.02, lz / 2]
+            g.rgba[:] = [*pool_rgb, 1.0]
+        elif name == "pool_water":
+            g.rgba[3] = 0.0
+        elif name.startswith("pool_wall_"):
+            if name.endswith(("xpos", "xneg")):
+                sign = 1.0 if name.endswith("xpos") else -1.0
+                g.pos[:] = [cx + sign * lx / 2, fy + d / 2, 0.0]
+                g.size[:] = [0.02, d / 2, lz / 2]
+            else:
+                sign = 1.0 if name.endswith("zpos") else -1.0
+                g.pos[:] = [cx, fy + d / 2, sign * lz / 2]
+                g.size[:] = [lx / 2, d / 2, 0.02]
+            g.rgba[:] = [*np.clip(pool_rgb * 1.03, 0, 1), 1.0]
+    ra.brighten_like_pool(spec, cx, d, lx, lz, fy, add_surface=not mirror, lighting=lighting)
+    for lt in spec.worldbody.lights:
+        if lt.name == "perception_sun" and not mirror:
+            lt.castshadow = True
+    if mirror:
+        ra.mirror_world_across(spec, S)
+    model = spec.compile()
+    model.vis.map.znear = min(0.01, 0.02 / max(model.stat.extent, 1e-3))
+    model.vis.quality.shadowsize = 4096
+    return model, aspects
+
+
+def _pool0913_class_maps(model):
+    """Per-geom lookup arrays: NIR reflectance and caustic weight (indexed by seg geom id)."""
+    nir = np.full(model.ngeom + 1, ra.POOL0913_NIR["robot"], dtype=np.float32)
+    cw = np.zeros(model.ngeom + 1, dtype=np.float32)
+    for gid in range(model.ngeom):
+        name = mujoco.mj_id2name(model, mujoco.mjtObj.mjOBJ_GEOM, gid) or ""
+        if name.startswith("balloon_"):
+            colour = name.split("_")[1]
+            if "_ribbon" in name:
+                nir[gid], cw[gid] = ra.POOL0913_NIR["ribbon"], 0.0
+            elif name.endswith("_clip"):
+                nir[gid], cw[gid] = ra.POOL0913_NIR["clip"], 0.2
+            elif colour in ra.POOL0913_NIR:
+                nir[gid], cw[gid] = ra.POOL0913_NIR[colour], 0.25
+        elif name.startswith("pool_"):
+            nir[gid], cw[gid] = ra.POOL0913_NIR["pool"], 1.0
+        elif name == "perception_surface":
+            nir[gid], cw[gid] = 0.0, 0.35
+    return nir, cw
+
+
+def _seg_lookup(table, seg):
+    ids = seg[..., 0].astype(np.int64)
+    out = table[np.clip(ids, 0, len(table) - 1)]
+    out[ids < 0] = 0.0
+    return out
+
+
+def run_pool0913(args) -> int:
+    """Generate frames with the opt-in pool0913 appearance profile (same output format)."""
+    ss = np.random.SeedSequence(args.seed)
+    rng = np.random.default_rng(ss.spawn(1)[0])
+    water_rng = np.random.default_rng(ss.spawn(1)[0])
+    img_dir, prev_dir = args.out / "images", args.out / "preview"
+    img_dir.mkdir(parents=True, exist_ok=True)
+    prev_dir.mkdir(parents=True, exist_ok=True)
+    coco = {"images": [], "annotations": [], "categories": CATEGORIES}
+    ann_id = 1
+    total_boxes = {"red": 0, "blue": 0, "yellow": 0}
+    opt = _geom_only_option()
+    W, H = args.width, args.height
+    for i in range(args.n):
+        sc = _pool0913_sample_scene(rng)
+        lighting = _pool0913_lighting(rng)
+        pool_rgb = np.clip(np.array([0.80, 0.84, 0.84]) * rng.uniform(0.75, 1.05)
+                           + rng.uniform(-0.03, 0.03, 3), 0, 1)
+        style_seed = int(rng.integers(2 ** 31))
+        model, aspects = _pool0913_build(sc, style_seed, lighting, pool_rgb, mirror=False)
+        data = mujoco.MjData(model)
+        rot = Rot.from_euler("yzx", [sc["yaw"], sc["pitch"], sc["roll"]])
+        base = sc["cam"] - rot.apply(CAM_OFFSET)
+        q = rot.as_quat()
+        data.qpos[0:3] = base
+        data.qpos[3:7] = [q[3], q[0], q[1], q[2]]
+        mujoco.mj_forward(model, data)
+        r = mujoco.Renderer(model, height=H, width=W)
+        try:
+            rgb, depth, seg = render_buffers(r, model, data, args.camera, opt)
+        finally:
+            r.close()
+        cam_id = model.camera(args.camera).id
+        fpx = (H / 2.0) / np.tan(np.radians(model.cam_fovy[cam_id]) / 2.0)
+        mean_aspect = float(np.mean(list(aspects.values()))) if aspects else 1.07
+        boxes, drops = _boxes_from_seg(model, seg, depth, fpx, args.min_area_px,
+                                       max_label_range=args.max_label_range, aspect=mean_aspect)
+        nir_tab, cw_tab = _pool0913_class_maps(model)
+        nir = _seg_lookup(nir_tab, seg)
+        cweight = _seg_lookup(cw_tab, seg)
+
+        params = us.random_params_pool0913(water_rng)
+        surf_id = model.geom("perception_surface").id
+        surface_mask = seg[..., 0] == surf_id
+        if surface_mask.any():
+            mmodel, _ = _pool0913_build(sc, style_seed, lighting, pool_rgb, mirror=True)
+            mdata = mujoco.MjData(mmodel)
+            mdata.qpos[:7] = data.qpos[:7]
+            mujoco.mj_forward(mmodel, mdata)
+            mr = mujoco.Renderer(mmodel, height=H, width=W)
+            try:
+                mrgb, _, mseg = render_buffers(mr, mmodel, mdata, args.camera, opt)
+            finally:
+                mr.close()
+            mnir = _seg_lookup(_pool0913_class_maps(mmodel)[0], mseg)
+            # per-pixel incidence on the surface: ray direction from the camera frame
+            xm = data.cam_xmat[cam_id].reshape(3, 3)
+            yy, xx = np.mgrid[0:H, 0:W].astype(np.float64)
+            rays = np.stack([(xx - (W - 1) / 2) / fpx, -(yy - (H - 1) / 2) / fpx, -np.ones_like(xx)], -1)
+            dw = rays @ xm.T
+            cos_inc = np.abs(dw[..., 1]) / np.linalg.norm(dw, axis=-1)
+            window = np.clip(np.array([0.52, 0.58, 0.60]) * rng.uniform(0.85, 1.15), 0, 1)
+            rgb, alpha, (mnir_d,) = us.composite_surface_mirror(
+                rgb, mrgb, surface_mask, cos_inc, water_rng, window_rgb=window,
+                strength=params.reflection, extra_maps=(mnir,))
+            # NIR seen in the surface: the mirrored scene's NIR (+ the bright sky in Snell's window)
+            nir = np.where(surface_mask, alpha * mnir_d * 0.4 + (1 - alpha) * 0.3, nir)
+        out_rgb = rgb if args.clean else us.degrade(rgb, depth, params, water_rng, nir=nir,
+                                                     caustic_weight=cweight)
+        fname = f"frame_{i:05d}.jpg"
+        _imwrite(img_dir / fname, out_rgb)
+        coco["images"].append({
+            "id": i + 1, "file_name": args.file_prefix + fname, "width": W, "height": H,
+            "condition": {"profile": "pool0913", "cam_depth_m": round(POOL0913_SURFACE_Y - sc["cam"][1], 3),
+                          "pitch_deg": round(float(np.degrees(sc["pitch"])), 1),
+                          "n_balloons_scene": len(sc["layout"]), "n_balloons": len(boxes),
+                          "cam_gain_r": round(float(params.cam_gain[0]), 3),
+                          "nir_r": round(float(params.nir_gain[0]), 3),
+                          "exposure": round(params.exposure, 3)},
+        })
+        for b in boxes:
+            total_boxes[b["colour"]] += 1
+            coco["annotations"].append({
+                "id": ann_id, "image_id": i + 1, "category_id": b["category_id"],
+                "bbox": [float(v) for v in b["bbox"]], "area": float(b["area"]), "iscrowd": 0,
+                "occlusion": b["occlusion"], "distance_m": b["distance_m"]})
+            ann_id += 1
+        if cv2 is not None and i < args.preview_n:
+            _imwrite(prev_dir / fname, draw_preview(out_rgb, boxes))
+        if i % 50 == 0 or i == args.n - 1:
+            print(f"frame {i:05d}: kept={len(boxes)} drops={drops} surface={bool(surface_mask.any())}",
+                  flush=True)
+    with open(args.out / "annotations.json", "w") as f:
+        json.dump(coco, f, indent=1)
+    print(f"pool0913: frames={args.n} boxes red={total_boxes['red']} blue={total_boxes['blue']} "
+          f"yellow={total_boxes['yellow']} -> {args.out / 'annotations.json'}")
+    return 0
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(description=__doc__)
     ap.add_argument("--n", type=int, default=12, help="number of frames")
@@ -529,7 +770,14 @@ def main() -> int:
                     help="force the water-surface reflection ON at this strength every frame "
                          "(e.g. 0.75) — for the reflection demo")
     ap.add_argument("--preview-n", type=int, default=8, help="how many frames to also save as previews")
+    ap.add_argument("--profile", default="default", choices=["default", "pool0913"],
+                    help="appearance profile; 'pool0913' = real-pool look (NoIR camera near the surface, "
+                         "mirror reflections, ribbon tethers, caustics). Default keeps the original look.")
+    ap.add_argument("--file-prefix", default="",
+                    help="(pool0913) prefix for COCO file_name, e.g. 'sim_pool/images/'")
     args = ap.parse_args()
+    if args.profile == "pool0913":
+        return run_pool0913(args)
 
     if cv2 is None:
         print("WARNING: cv2 not available; previews will be skipped (install the 'perception' extra).")

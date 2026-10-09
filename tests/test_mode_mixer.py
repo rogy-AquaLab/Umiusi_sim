@@ -75,6 +75,28 @@ def test_geometry_guard_rejects_a_layout_the_sign_table_no_longer_describes():
     _mixer(sim)
 
 
+def test_yaw_guard_catches_a_mirrored_tz_column():
+    """The gap the 2026-09-13 mirror lived in: nothing checked which way `tz` actually yaws.
+
+    The fx/fy guards pin the sign of each tangent's x and z components per unit, so they cannot be
+    fooled — but they say nothing about the tz COLUMN, which is a free +-1 per unit. Flip it and
+    "yaw left" becomes "yaw right" with every other check still green, which on the robot is
+    positive feedback: attitude control settled at 180 deg of yaw error in the pool.
+    """
+    import umiusi_rl.envs.mode_mixer as mm
+
+    sim = UmiusiSimulator()
+    orig = dict(mm._MODE_SIGNS)
+    try:
+        mm._MODE_SIGNS = {n: v[:2] + (-v[2],) + v[3:] for n, v in orig.items()}
+        with pytest.raises(ValueError, match="counter-clockwise"):
+            ModeMixer(sim.unit_names, sim.thrust_axes, sim.unit_pivots, sim.servo_range_rad,
+                      sim.thrust_per_cmd, sim.thrust_curve_exp)
+    finally:
+        mm._MODE_SIGNS = orig
+    _mixer(sim)          # and the real table still constructs
+
+
 def test_single_mode_full_scale_hits_the_cap_exactly():
     """One mode at +/-1 commands each unit at exactly the current esc cap."""
     sim = UmiusiSimulator()
@@ -93,7 +115,12 @@ def test_pure_surge_keeps_servos_flat_with_signed_esc():
     assert np.allclose(a[:4], 0.0, atol=1e-9)              # tangential: no tilt
     assert np.allclose(np.abs(a[4:]), 0.3, atol=1e-9)
     signs = np.sign(a[4:])
-    assert list(signs) == [1.0, 1.0, -1.0, -1.0]           # (lf, lb, rb, rf) = fx column
+    # (lf, lb, rb, rf) = the fx column. NEGATED 2026-09-21 with thrust_axis + the hinge axes, when
+    # the horizontal convention was mirrored onto the real vehicle's: lf's tangent now points
+    # backward-port, so forward surge needs a NEGATIVE tangential force there. What must stay
+    # convention-independent is the realised wrench, and that is
+    # test_pure_modes_produce_the_named_wrench_in_the_plant — this assertion only pins the encoding.
+    assert list(signs) == [-1.0, -1.0, 1.0, 1.0]
 
 
 def test_rear_half_plane_folds_into_esc_reversal():
@@ -102,7 +129,7 @@ def test_rear_half_plane_folds_into_esc_reversal():
     mx = _mixer(sim)
     a = mx.mix(_mode("fx", -1.0), 0.3, np.zeros(4))
     assert np.allclose(a[:4], 0.0, atol=1e-9)
-    assert list(np.sign(a[4:])) == [-1.0, -1.0, 1.0, 1.0]
+    assert list(np.sign(a[4:])) == [1.0, 1.0, -1.0, -1.0]   # mirrored 2026-09-21; see fx test
     # mixed vertical + backward horizontal: |servo| stays within range, esc reversed
     a = mx.mix(np.array([-1.0, 0.0, 0.5, 0.0, 0.0, 0.0]), 0.3, np.zeros(4))
     assert np.all(np.abs(a[:4]) <= 1.0)

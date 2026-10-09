@@ -40,8 +40,12 @@ import yaml
 from umiusi_sim.simulator import UmiusiSimulator
 
 POS = ("lf", "lb", "rb", "rf")
-# IMU (z-up world) -> CAD (+Y-up) proper rotation: cad(x, y, z) = imu(x, -z, y).
-FRAME_P = np.array([[1, 0, 0], [0, 0, -1], [0, 1, 0]], dtype=float)
+# IMU (REP-103: x fwd, y left, z up) -> CAD (+X fwd, +Y up, +Z starboard) proper rotation:
+# cad(x, y, z) = imu(x, z, -y).  2026-10-07: the previous matrix was the INVERSE rotation
+# (cad up = -imu z), which negated yaw and pitch in the replay; on the 10/03 bags that looked
+# like a reversed duty sign. With this remap all three axes correlate positively with the stock
+# plant (docs/calibration_plan.md 2026-10-07 追記).
+from tools.sim_server import FRAME_P  # noqa: E402  (one definition; cad = P @ imu)
 
 
 def load(npz_path):
