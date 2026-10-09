@@ -265,3 +265,30 @@ env -u PYTHONPATH -u AMENT_PREFIX_PATH uv run python -m tools.competition_eval \
 
 **残る主な失点は検出器の質**: 角度 35° でも、recall 0.72 と方位・距離の誤差を入れると +126 → +60
 （外れ 19 回・RECOVER 34 回 / 回）。次の調査対象。
+
+
+## 2026-10-08: 10/03 較正後のプラントで詰め直し（cap 0.5 = 実機）
+
+プラントは `configs/umiusi.yaml` の新既定（roll/pitch 抗力 ×8・慣性 ×3、`max_duty 0.5`）+ 水面（`water_surface_y`、
+competition_eval で有効）。各 8 回、`--driver deploy`。`--layout single` = スタートの黄なし・風船 1 個をどの方位にも置く（プールでの確認の再現）。
+
+| 設定 | 風船 1 個・赤 | 風船 1 個・黄 | 競技場（≥1 個 / 平均点 / 初回 / 赤） |
+|---|---|---|---|
+| FSM 既定 | 0/8 | 0/8 | 0/8 / +0 |
+| 推奨（下記 A） | 1/8 | 8/8（29 s） | 8/8 / +62 / 26 s / 0.6 個 |
+| **A + 赤も上を狙う + 探索中 heave −0.2** | **8/8（26 s）** | 8/8（36 s） | **8/8 / +126 / 22 s / 3.0 個**、青 0、ワイヤ下通過 7.6→3.0 |
+
+A = `--w-effort 2.0 --ki-heave 0.3 --ram-surge 0.6 --ram-max-steps 200 --servo-aware`。追加は `--aim-above-red --search-heave-bias -0.2`
+（FSM の `AIM_ABOVE_COLOURS` に red、`SEARCH_HEAVE_BIAS`。どちらも既定は従来どおり）。
+
+- **FSM 既定は cap 0.5 の新プラントで全滅**（突進が届かない）。推奨 A は必須。
+- 赤が取れなかった理由は 2 つ: (1) 探索中に深さを保つ仕組みが無く、正浮力（sim +1.2 N）で浮いて 0.5 m の赤が視野の下に外れる（SEARCH 80〜90%）。
+  (2) 届いても低い赤の真横〜下から当たり、ピン先が 3 cm まで入っても角度 90° 超で割れない（トレース）。黄と同じく 5° 上を狙うと当たり方が揃う。
+- `--search-heave-bias` は機体の浮力トリムに依存する。実機が中性浮力に近ければ −0.2 は潜りすぎ（床へ）。プールで探索中の深さの変化を見て決める。
+- 水面が無かった（正浮力で 8 m まで上がる）のはこれまでの全評価に共通の sim の欠陥。これ以前の「水面にいる時間」は当てにならない。
+
+再現: `uv run python -m tools.competition_eval --max-duty 0.5 --episodes 8 --verbose [--layout single --single-colour red --minutes 2] --w-effort 2.0 --ki-heave 0.3 --ram-surge 0.6 --ram-max-steps 200 --servo-aware --aim-above-red --search-heave-bias -0.2`
+
+**実機経路（`tools/competition_ros.py`、実機 control 無改変、`--yaw-rate-scale -1`、床・水面あり）での確認**: 探索中の heave は −0.05 が最良
+（風船 1 個の赤: −0.2 は床へ沈み 1/4、−0.1 / −0.05 は 3/4、0 は浮いて 2/4）。control の vz 列が √2 倍のぶん、sim 内の経路（−0.2）より小さい。
+競技場 2 回: +180 / +120、初回 16 秒、青 0。動画 `/srv/share/umiusi_sim_videos-20261008/`。

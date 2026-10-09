@@ -82,6 +82,10 @@ SEARCH_YAW = 0.5          # in-place yaw-sweep rate command
 SEARCH_SURGE = 0.30       # forward speed while translating to a fresh spot between sweeps
 SCAN_HEAVE = 0.15         # heave amplitude while sweeping (scan the different balloon heights)
 SCAN_RATE = 1.5           # rad/s of the height-scan oscillation
+# Constant heave added during the in-place sweep (negative = down). There is no depth sensor, so a
+# positively-buoyant hull drifts UP while sweeping and the low reds (0.5 m) leave the bottom of the
+# view. 0.0 = historical behaviour; tune against the vehicle's measured trim.
+SEARCH_HEAVE_BIAS = 0.0
 TRANSLATE_STEPS = 50      # steps (~1 s @50 Hz) to translate before the next sweep
 # ヨーレート計測が死んだときの探索フォールバック (autonomy#19-3)。一周の判定は
 # `_swept += |yaw_rate|·dt` の積分なので、IMU が止まる (実機 8/25: autonomy 区間だけで
@@ -693,7 +697,7 @@ class BalloonBehavior:
         self._swept += abs(yaw_rate) * dt
         self._sweep_time += dt
         self._scan_phase += SCAN_RATE * dt
-        heave = SCAN_HEAVE * math.sin(self._scan_phase)  # scan the different balloon heights
+        heave = SEARCH_HEAVE_BIAS + SCAN_HEAVE * math.sin(self._scan_phase)  # scan balloon heights
         yaw = self._sweep_dir * SEARCH_YAW + 0.4 * avoid_yaw
         # 2つ目の条件が IMU 断フォールバック: 積分が一周に届かないまま SWEEP_TIMEOUT_S 経った
         # ら、ヨーレート計測が死んでいるとみなして一周完了と同じ扱いで抜ける (定数の注記参照)。

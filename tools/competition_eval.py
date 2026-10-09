@@ -142,7 +142,15 @@ class _Tracer:
 
 def run_episode(rng, args, xml_path):
     """One competition episode; return a result dict (cleared, t_clear, score, blue_popped, wire)."""
-    layout = scn.sample_layout(rng)
+    if args.layout == "single":
+        # Pool bring-up: no fixed start yellow, ONE balloon somewhere around the start (any bearing,
+        # incl. behind) — "put a balloon in the pool and see whether it comes after it".
+        rr = rng.uniform(*args.single_range)
+        th = rng.uniform(-np.pi, np.pi)
+        layout = [(f"balloon_{args.single_colour}_1", args.single_colour,
+                   START[0] + rr * np.cos(th), START[2] + rr * np.sin(th))]
+    else:
+        layout = scn.sample_layout(rng)
     pin_kw = {}
     if args.pin_base is not None:
         pin_kw["pin_base"] = args.pin_base
@@ -150,6 +158,8 @@ def run_episode(rng, args, xml_path):
         pin_kw["pin_tip"] = args.pin_tip
     xml_path.write_text(scn.build_spec(layout=layout, **pin_kw).to_xml())
     sim = UmiusiSimulator(model_path=xml_path)
+    sim.water_surface_y = scn.POOL_DEPTH   # float at the surface instead of rising out of the pool
+    sim.floor_y = scn.FLOOR_Y               # ...and rest on the floor instead of sinking through it
     if args.net_buoy is not None:
         sim.set_net_buoyancy(args.net_buoy)
     if args.cob_fwd or args.cob_lat:
@@ -359,7 +369,17 @@ def main():
     ap.add_argument("--min-pop-speed", type=float, default=scn.MIN_POP_SPEED,
                     help="pin closing speed a pop needs [m/s]. UNMEASURED: 0.18 was set against the ff "
                          "path's ~0.5 m/s lunge; the deploy chain rams at ~0.09 m/s (cap 0.3)")
+    ap.add_argument("--aim-above-red", action="store_true",
+                    help="aim the ram a few degrees ABOVE red too (default: yellow only)")
+    ap.add_argument("--search-heave-bias", type=float, default=0.0,
+                    help="constant heave during the search sweep (negative = down; offsets + buoyancy)")
+    ap.add_argument("--layout", choices=("field", "single"), default="field",
+                    help="field = competition field (start yellow + sampled counts); single = one balloon, "
+                         "no start yellow (pool bring-up test)")
+    ap.add_argument("--single-colour", default="red", choices=("red", "yellow", "blue"))
+    ap.add_argument("--single-range", default="1.5,4.0", help="min,max distance of the single balloon [m]")
     args = ap.parse_args()
+    args.single_range = tuple(float(v) for v in args.single_range.split(","))
     # The FSM's ram timing was tuned against the ff path's ~0.5 m/s lunge; on the deploy chain the ram
     # closes at ~0.09 m/s and times out (RAM_MAX_STEPS = 1.7 s) ~0.15 m short. Module constants, so
     # patch them for the run — experiment knobs, not a tuned value.
@@ -368,6 +388,9 @@ def main():
         _bh.RAM_SURGE = args.ram_surge
     if args.ram_max_steps is not None:
         _bh.RAM_MAX_STEPS = args.ram_max_steps
+    if args.aim_above_red:
+        _bh.AIM_ABOVE_COLOURS = ("yellow", "red")
+    _bh.SEARCH_HEAVE_BIAS = args.search_heave_bias
     args.pin_tip = tuple(float(v) for v in args.pin_tip.split(",")) if args.pin_tip else None
     args.pin_base = tuple(float(v) for v in args.pin_base.split(",")) if args.pin_base else None
     args.yellow_frac = 0.0  # unused here (field sampled from config), but ram_eval helpers read args
